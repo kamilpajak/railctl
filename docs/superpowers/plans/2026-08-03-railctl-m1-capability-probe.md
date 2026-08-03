@@ -1463,10 +1463,19 @@ def check_function_groups(link: Link, address: int) -> CheckResult:
     g4, g4_frames = _accepted(link, commands.function_group(address, 0x23, 0x00))
     g5, g5_frames = _accepted(link, commands.function_group(address, 0x28, 0x00))
     dump = _hexdump(g4_frames) + _hexdump(g5_frames)
-    if g4 is None or g5 is None:
-        return CheckResult("function_groups_4_5", None, "no reply to E4 23 or E4 28", dump)
-    value = bool(g4 and g5)
-    detail = "groups 4 and 5 accepted: F13-F28 reachable" if value else "at least one group rejected: F13-F28 unavailable on the group path"
+    # Three-valued AND (Kleene): a confirmed rejection of either group settles the
+    # pair as unusable, even if the other group never answered. Testing for None
+    # first would throw that knowledge away and report "unknown" for something we
+    # already know is False.
+    if g4 is False or g5 is False:
+        value: bool | None = False
+        detail = "at least one group rejected: F13-F28 unavailable on the group path"
+    elif g4 is None or g5 is None:
+        value = None
+        detail = "no reply to E4 23 or E4 28"
+    else:
+        value = True
+        detail = "groups 4 and 5 accepted: F13-F28 reachable"
     return CheckResult("function_groups_4_5", value, detail, dump)
 ```
 
