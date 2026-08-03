@@ -1,8 +1,12 @@
-from tools.probe.checks import DECODER_TYPES, check_address_band, check_identity
+import json
+from unittest.mock import patch
+
+from tools.probe.checks import DECODER_TYPES, check_address_band, check_identity, read_f0
 from tools.probe.fake import FakeLink
 
 VERSION = b"\x21\x21"
 STATUS = b"\x21\x24"
+LOCO_INFO_AT_3 = b"\xe3\x00\x00\x03"
 
 
 def test_identity_reports_the_version_and_decoded_status():
@@ -52,3 +56,75 @@ def test_address_band_is_unknown_when_both_forms_answer():
     reply = b"\xff\xfe\xe4\x04\x00\x00\x00\xe0"
     link = FakeLink({long_form: [reply], short_form: [reply]})
     assert check_address_band(link, address=100).value is None
+
+
+def test_read_f0_returns_true_when_f0_is_on():
+    # E4 03 20 1F 00 with checksum D8
+    link = FakeLink({LOCO_INFO_AT_3: [b"\xff\xfe\xe4\x03\x20\x1f\x00\xd8"]})
+    f0_is_on, frames = read_f0(link, address=3)
+    assert f0_is_on is True
+    assert len(frames) > 0
+
+
+def test_read_f0_returns_false_when_f0_is_off():
+    # E4 03 20 00 00 with checksum C7
+    link = FakeLink({LOCO_INFO_AT_3: [b"\xff\xfe\xe4\x03\x20\x00\x00\xc7"]})
+    f0_is_on, frames = read_f0(link, address=3)
+    assert f0_is_on is False
+    assert len(frames) > 0
+
+
+def test_read_f0_returns_none_with_non_empty_frames_on_non_loco_info_reply():
+    # 61 1F BUSY reply with checksum 7E
+    # This is the critical case: a valid, checksummed reply that is not LocoInfo
+    link = FakeLink({LOCO_INFO_AT_3: [b"\xff\xfe\x61\x1f\x7e"]})
+    f0_is_on, frames = read_f0(link, address=3)
+    assert f0_is_on is None
+    assert len(frames) > 0  # Non-empty frames is critical; this would crash without the fix
+
+
+def test_read_f0_returns_none_with_empty_frames_on_timeout():
+    # No reply at all
+    link = FakeLink({})
+    f0_is_on, frames = read_f0(link, address=3)
+    assert f0_is_on is None
+    assert len(frames) == 0
+
+
+def test_main_skips_single_function_check_without_crashing_on_non_loco_info_reply(capsys):
+    # End-to-end: main() must not crash when read_f0 gets a valid, checksummed
+    # reply that is not a LocoInfo (here, a 61 1F BUSY), and it must record the
+    # R5 check as skipped (None), not silently drop it and not guess a value.
+    from tools.probe import __main__
+
+    # - check_identity: version + status
+    # - check_pom_read: CV value
+    # - read_f0: 61 1F (BUSY) -- valid checksum, not LocoInfo -- this is the
+    #   frame that used to crash main() via a double hex-dump
+    # - check_function_groups: function group replies
+    link = FakeLink(
+        {
+            b"\x21\x21": [b"\xff\xfe\x63\x21\x40\x12\x10"],  # version
+            b"\x21\x24": [b"\xff\xfe\x62\x22\x07\x47"],  # status
+            b"\xe6\x30\x00\x03\xe4\x07\x00": [b"\xff\xfe\x63\x14\x07\x91\xe1"],  # POM read
+            b"\xe3\x00\x00\x03": [b"\xff\xfe\x61\x1f\x7e"],  # loco info -> BUSY (not LocoInfo)
+            b"\xe4\x23\x00\x03\x00": [b"\xff\xfe\x01\x04\x05"],  # function group 4
+            b"\xe4\x28\x00\x03\x00": [b"\xff\xfe\x01\x04\x05"],  # function group 5
+        }
+    )
+
+    with patch("tools.probe.__main__.SerialLink") as mock_link_class:
+        mock_link_class.return_value.__enter__.return_value = link
+        mock_link_class.return_value.__exit__.return_value = None
+
+        # --format json so the recorded result can be inspected, not just the
+        # absence of an exception (a silently dropped check would also "not crash").
+        result = __main__.main(
+            ["--address", "3", "--format", "json", "--port", "/dev/fake", "--no-programming-track"]
+        )
+
+    assert result == 0
+    payload = json.loads(capsys.readouterr().out)
+    assert payload["capabilities"]["single_function_cmd"] is None
+    skipped = next(c for c in payload["checks"] if c["name"] == "single_function_cmd")
+    assert "could not read F0" in skipped["detail"]
