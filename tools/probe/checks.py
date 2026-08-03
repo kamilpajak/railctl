@@ -31,6 +31,18 @@ class CheckResult:
     frames: list[str] = field(default_factory=list)
 
 
+def _unresolved() -> dict[str, object | None]:
+    """The R1 result dict with nothing established. Used for every path that
+    does not reach a verdict, so `CheckResult.value` for check_pom_read is
+    always a dict and never a bare None."""
+    return {
+        "pom_read": None,
+        "pom_result_channel": "none",
+        "pom_echo_zero_based": None,
+        "value": None,
+    }
+
+
 def check_pom_read(link: Link, address: int, cv: int = 8, *, poll: bool) -> CheckResult:
     """R1. CV8 is used by default because its ZIMO value is a known constant (145),
     so a plausible-but-wrong reading is detectable."""
@@ -91,15 +103,15 @@ def check_pom_read(link: Link, address: int, cv: int = 8, *, poll: bool) -> Chec
             " (CV29 bit 3 = 1, CV28 bits 0 and 1 set) and retry",
             dump,
         )
+    # Transient station conditions. Neither proves anything about the capability,
+    # so pom_read stays None — but the dict shape is kept so every caller can
+    # subscript CheckResult.value without a type check.
     if SHORT_CIRCUIT in seen:
         return CheckResult(
-            "pom_read",
-            None,
-            "short circuit reported; fix the track and retry",
-            dump,
+            "pom_read", _unresolved(), "short circuit reported; fix the track and retry", dump
         )
     if BUSY in seen:
-        return CheckResult("pom_read", None, "station busy; retry", dump)
+        return CheckResult("pom_read", _unresolved(), "station busy; retry", dump)
 
     return CheckResult(
         "pom_read",
