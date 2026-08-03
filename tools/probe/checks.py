@@ -12,6 +12,8 @@ from tools.probe.replies import (
     SHORT_CIRCUIT,
     UNSUPPORTED,
     CvValue,
+    Status,
+    Version,
     parse,
 )
 
@@ -237,3 +239,63 @@ def check_function_groups(link: Link, address: int) -> CheckResult:
         value = True
         detail = "groups 4 and 5 accepted: F13-F28 reachable"
     return CheckResult("function_groups_4_5", value, detail, dump)
+
+
+DECODER_TYPES = {
+    6: "MS450", 7: "MS990", 8: "MS590", 9: "MS950", 10: "MS560",
+    11: "MS001", 12: "MS491", 13: "MS581", 14: "MS540", 15: "MS591",
+}
+
+
+def check_identity(link: Link) -> CheckResult:
+    version_frames = link.exchange(commands.version(), window=2.0)
+    version = next(
+        (r for r in map(lambda f: parse(f.telegram), version_frames) if isinstance(r, Version)),
+        None,
+    )
+    if version is None:
+        return CheckResult("identity", None, "no version reply; is this the XpressNet port?",
+                           _hexdump(version_frames))
+
+    status_frames = link.exchange(commands.status(), window=2.0)
+    status = next(
+        (r for r in map(lambda f: parse(f.telegram), status_frames) if isinstance(r, Status)),
+        None,
+    )
+    dump = _hexdump(version_frames) + _hexdump(status_frames)
+    value = {
+        "xpressnet": f"{version.xpressnet_major}.{version.xpressnet_minor}",
+        "command_station_id": version.command_station_id,
+        "status_raw": status.raw if status else None,
+        "auto_start_mode": status.auto_start_mode if status else None,
+        "emergency_off": status.emergency_off if status else None,
+        "emergency_stop": status.emergency_stop if status else None,
+        "service_mode": status.service_mode if status else None,
+    }
+    station_id_hex = f"0x{version.command_station_id:02X}"
+    detail = f"XpressNet {value['xpressnet']}, command station id {station_id_hex}"
+    if status and status.auto_start_mode:
+        detail += (
+            "; start mode is AUTOMATIC, so every locomotive resumes its last known speed "
+            "when the station powers up - send an emergency stop before restoring track power"
+        )
+    return CheckResult("identity", value, detail, dump)
+
+
+def check_address_band(link: Link, address: int) -> CheckResult:
+    """Addresses 100..127 are the XpressNet/Z21 divergence band."""
+    if not 100 <= address <= 127:
+        return CheckResult("loco_address_threshold", None,
+                           f"address {address} is outside the 100..127 divergence band", [])
+    short_high, short_low = commands.loco_address_bytes(address, threshold=128)
+    long_high, long_low = commands.loco_address_bytes(address, threshold=100)
+    short_frames = link.exchange(bytes([0xE3, 0x00, short_high, short_low]), window=2.0)
+    long_frames = link.exchange(bytes([0xE3, 0x00, long_high, long_low]), window=2.0)
+    dump = _hexdump(short_frames) + _hexdump(long_frames)
+    if bool(short_frames) == bool(long_frames):
+        return CheckResult("loco_address_threshold", None,
+                           "both encodings behaved identically; threshold not established", dump)
+    threshold = 100 if long_frames else 128
+    form = "long" if long_frames else "short"
+    detail = f"only the {form} form answered; threshold is {threshold}"
+    return CheckResult("loco_address_threshold", threshold, detail, dump)
