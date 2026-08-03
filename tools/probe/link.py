@@ -13,6 +13,7 @@ from tools.probe.frames import Frame, build, split_frames
 
 BAUD = termios.B57600
 PORT_GLOB = "/dev/cu.usbmodem7010*"
+WRITE_TIMEOUT = 1.0  # seconds to write a command frame
 
 
 class Link(Protocol):
@@ -72,8 +73,19 @@ class SerialLink:
         self._buffer = b""
         frame = build(payload)
         written = 0
+        deadline = time.monotonic() + WRITE_TIMEOUT
         while written < len(frame):
-            written += os.write(fd, frame[written:])
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                raise TimeoutError(f"timed out writing frame to {self.path}")
+            try:
+                n = os.write(fd, frame[written:])
+                if n == 0:
+                    raise OSError(f"os.write returned 0 for {self.path}")
+                written += n
+            except BlockingIOError:
+                # Kernel send buffer full; wait for writable before retrying
+                select.select([], [fd], [], max(0.0, min(0.01, remaining)))
         return self.collect(window=window)
 
     def collect(self, *, window: float) -> list[Frame]:
