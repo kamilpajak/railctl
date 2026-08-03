@@ -1276,7 +1276,7 @@ from tools.probe.fake import FakeLink
 EXT_CV1 = b"\x22\x18\x01"
 DIRECT_CV1 = b"\x22\x15\x01"
 Z21_CV29 = b"\x23\x11\x00\x1c"
-DIRECT_CV29 = b"\x22\x15\x1c"
+DIRECT_CV29 = b"\x22\x15\x1d"
 SINGLE_F0_AT_3 = b"\xe4\xf8\x00\x03\x00"
 GROUP4_AT_3 = b"\xe4\x23\x00\x03\x00"
 GROUP5_AT_3 = b"\xe4\x28\x00\x03\x00"
