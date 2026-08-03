@@ -206,21 +206,21 @@ def _accepted(link: Link, payload: bytes, window: float = 2.0) -> tuple[bool | N
     return True, frames
 
 
-def read_f0(link: Link, address: int) -> tuple[bool | None, list[str]]:
+def read_f0(link: Link, address: int) -> tuple[bool | None, list]:
     """Read the current F0 state for the locomotive.
 
     Returns (True, frames) if F0 is on, (False, frames) if F0 is off, or
     (None, frames) if the locomotive information request did not return a valid reply.
+    Frames are returned as raw Frame objects, not hex-dumped.
     """
     frames = link.exchange(commands.loco_info(address), window=1.5)
-    dump = _hexdump(frames)
 
     for frame in frames:
         reply = parse(frame.telegram)
         if isinstance(reply, LocoInfo):
-            return reply.f0, dump
+            return reply.f0, frames
 
-    return None, dump
+    return None, frames
 
 
 def check_single_function(link: Link, address: int, *, f0_is_on: bool) -> CheckResult:
