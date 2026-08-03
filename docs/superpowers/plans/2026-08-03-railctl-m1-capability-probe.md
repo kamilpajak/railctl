@@ -844,7 +844,7 @@ def test_pom_read_puts_the_high_cv_bits_into_the_option_byte():
 
 def test_service_direct_read_matches_the_spec():
     assert build(service_direct_read(1)) == b"\xff\xfe\x22\x15\x01\x36"
-    assert build(service_direct_read(29)) == b"\xff\xfe\x22\x15\x1c\x2b"
+    assert build(service_direct_read(29)) == b"\xff\xfe\x22\x15\x1d\x2a"
 
 
 def test_service_direct_read_refuses_cv_above_256():
@@ -897,8 +897,21 @@ Expected: FAIL — `ModuleNotFoundError: No module named 'tools.probe.commands'`
 # tools/probe/commands.py
 """X-Bus payload builders (header + data, no LI prefix and no XOR).
 
-CV numbers are 1-based on the way in. cv_wire() is the ONLY place the
-zero-based conversion happens, so it cannot be applied twice.
+CV numbers are 1-based on the way in, for every function here.
+
+The wire conventions are NOT uniform, and this is the single most dangerous
+detail in the module:
+
+- POM (0xE6 0x30) and the Z21 opcodes (0x23 0x11) are ZERO-BASED:
+  CV1 goes on the wire as 0. Those two, and only those two, call cv_wire().
+- The legacy direct read (0x22 0x15) and the extended reads (0x22 0x18..0x1B)
+  are ONE-BASED: CV1 goes on the wire as 1. Lenz XpressNet Protocol
+  Description section 2.2.8, verbatim: "The range is from 1 to 256, CV256 is
+  sent as 00".
+
+Routing a service-mode opcode through cv_wire() reads the wrong CV off the
+decoder and reports it under the right name, which is why each function
+states its convention.
 """
 
 from __future__ import annotations
@@ -940,24 +953,33 @@ def pom_read(address: int, cv: int) -> bytes:
 
 
 def service_direct_read(cv: int) -> bytes:
-    """Legacy direct read. Only CV1..255 — wire value 0 is ambiguous between
-    CV256 and CV1024 across the two Lenz documents, so it is refused."""
-    wire = cv_wire(cv)
-    if wire == 0xFF + 1 or cv > 256:
+    """Legacy direct read, 0x22 0x15.
+
+    IMPORTANT: this opcode is ONE-BASED, unlike POM. Lenz XpressNet Protocol
+    Description section 2.2.8 states verbatim: "The range is from 1 to 256,
+    CV256 is sent as 00". So CV1 goes on the wire as 0x01, CV29 as 0x1D.
+    Do NOT route this through cv_wire() — that is the POM/Z21 convention.
+
+    CV256 is refused because its wire value 0 collides with CV1024 in the
+    newer LI-USB document, and nothing here needs to guess which the YD7010
+    implements.
+    """
+    if not 1 <= cv <= 256:
         raise ValueError(f"CV {cv} exceeds the 256 CV limit of the legacy direct read")
-    if wire == 0:
-        raise ValueError("wire value 0 is ambiguous in the legacy direct read; use the extended opcodes")
     if cv == 256:
-        raise ValueError("CV256 encodes as wire 0, which is ambiguous; use the extended opcodes")
-    return bytes([0x22, 0x15, wire])
+        raise ValueError("CV256 is sent as 0, which is ambiguous; use the extended opcodes")
+    return bytes([0x22, 0x15, cv & 0xFF])
 
 
 def service_ext_read(cv: int) -> bytes:
-    wire = cv_wire(cv)
-    band = wire >> 8
+    """Extended read, 0x22 0x18..0x1B. Also ONE-BASED, banded by cv >> 8:
+    0x18 covers CV1-255, 0x19 CV256-511, 0x1A CV512-767, 0x1B CV768-1023."""
+    if not 1 <= cv <= MAX_CV:
+        raise ValueError(f"CV {cv} outside the extended opcode range 1..{MAX_CV}")
+    band = cv >> 8
     if band > 3:
-        raise ValueError(f"CV {cv} outside the extended opcode range 1..1024")
-    return bytes([0x22, 0x18 + band, wire & 0xFF])
+        raise ValueError(f"CV {cv} outside the extended opcode range 1..{MAX_CV}")
+    return bytes([0x22, 0x18 + band, cv & 0xFF])
 
 
 def z21_service_read(cv: int) -> bytes:
