@@ -117,11 +117,13 @@ def test_function_groups_unknown_when_one_group_busy_and_the_other_accepted():
     link = FakeLink(
         {
             GROUP4_AT_3: [b"\xff\xfe\x01\x04\x05"],
-            GROUP5_AT_3: [b"\xff\xfe\x61\x1f\x70"],
+            GROUP5_AT_3: [b"\xff\xfe\x61\x1f\x7e"],
         }
     )
     result = check_function_groups(link, address=3)
     assert result.value is None
+    # Verify frame was actually parsed (not dropped for bad checksum) and BUSY was seen
+    assert len(result.frames) == 2  # One ACK from G4, one BUSY marker from G5
 
 
 def test_service_ext_cv_unknown_when_extended_succeeds_but_direct_silent():
