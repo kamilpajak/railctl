@@ -567,7 +567,7 @@ def test_fake_link_returns_nothing_for_an_unscripted_payload():
 def test_fake_link_can_deliver_an_unsolicited_broadcast_after_the_reply():
     link = FakeLink(
         {b"\x21\x10": [b"\xff\xfe\x01\x04\x05"]},
-        unsolicited={b"\x21\x10": [b"\xff\xfd\x63\x14\x07\x91\x81"]},
+        unsolicited={b"\x21\x10": [b"\xff\xfd\x63\x14\x07\x91\xe1"]},
     )
     frames = link.exchange(b"\x21\x10", window=0.1)
     assert [f.solicited for f in frames] == [True, False]
@@ -1022,7 +1022,7 @@ POLL = b"\x21\x10"
 def test_result_arriving_as_a_broadcast_sets_channel_broadcast():
     link = FakeLink(
         {POM_CV8_AT_3: [b"\xff\xfe\x01\x04\x05"]},
-        unsolicited={POM_CV8_AT_3: [b"\xff\xfd\x63\x14\x07\x91\x81"]},
+        unsolicited={POM_CV8_AT_3: [b"\xff\xfd\x63\x14\x07\x91\xe1"]},
     )
     result = check_pom_read(link, address=3, cv=8, poll=False)
     assert result.value["pom_read"] is True
@@ -1033,7 +1033,7 @@ def test_result_arriving_as_a_broadcast_sets_channel_broadcast():
 def test_echo_of_the_zero_based_cv_sets_the_echo_flag():
     link = FakeLink(
         {POM_CV8_AT_3: []},
-        unsolicited={POM_CV8_AT_3: [b"\xff\xfd\x63\x14\x07\x91\x81"]},
+        unsolicited={POM_CV8_AT_3: [b"\xff\xfd\x63\x14\x07\x91\xe1"]},
     )
     result = check_pom_read(link, address=3, cv=8, poll=False)
     assert result.value["pom_echo_zero_based"] is True
@@ -1042,7 +1042,7 @@ def test_echo_of_the_zero_based_cv_sets_the_echo_flag():
 def test_echo_of_the_one_based_cv_clears_the_echo_flag():
     link = FakeLink(
         {POM_CV8_AT_3: []},
-        unsolicited={POM_CV8_AT_3: [b"\xff\xfd\x63\x14\x08\x91\x8e"]},
+        unsolicited={POM_CV8_AT_3: [b"\xff\xfd\x63\x14\x08\x91\xee"]},
     )
     result = check_pom_read(link, address=3, cv=8, poll=False)
     assert result.value["pom_echo_zero_based"] is False
@@ -1052,7 +1052,7 @@ def test_result_arriving_only_after_a_poll_sets_channel_poll():
     link = FakeLink(
         {
             POM_CV8_AT_3: [b"\xff\xfe\x01\x04\x05"],
-            POLL: [b"\xff\xfe\x63\x14\x07\x91\x81"],
+            POLL: [b"\xff\xfe\x63\x14\x07\x91\xe1"],
         }
     )
     result = check_pom_read(link, address=3, cv=8, poll=True)
@@ -1273,8 +1273,8 @@ def test_disagreeing_values_leave_service_ext_cv_unknown():
 def test_z21_opcode_matching_the_direct_read_sets_the_flag():
     link = FakeLink(
         {
-            Z21_CV29: [b"\xff\xfe\x63\x14\x1c\x0e\x69"],
-            DIRECT_CV29: [b"\xff\xfe\x63\x14\x1c\x0e\x69"],
+            Z21_CV29: [b"\xff\xfe\x63\x14\x1c\x0e\x65"],
+            DIRECT_CV29: [b"\xff\xfe\x63\x14\x1c\x0e\x65"],
         }
     )
     assert check_z21_opcodes(link).value is True
