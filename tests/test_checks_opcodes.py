@@ -59,17 +59,17 @@ def test_z21_opcode_rejected_sets_the_flag_false():
 
 def test_single_function_accepted_when_the_station_does_not_reject_it():
     link = FakeLink({SINGLE_F0_AT_3: [b"\xff\xfe\x01\x04\x05"]})
-    assert check_single_function(link, address=3).value is True
+    assert check_single_function(link, address=3, f0_is_on=False).value is True
 
 
 def test_single_function_rejected_sets_it_false():
     link = FakeLink({SINGLE_F0_AT_3: [b"\xff\xfe\x61\x82\xe3"]})
-    assert check_single_function(link, address=3).value is False
+    assert check_single_function(link, address=3, f0_is_on=False).value is False
 
 
 def test_single_function_silence_leaves_it_unknown():
     link = FakeLink({})
-    assert check_single_function(link, address=3).value is None
+    assert check_single_function(link, address=3, f0_is_on=False).value is None
 
 
 def test_function_groups_need_both_group_4_and_group_5():
