@@ -74,3 +74,45 @@ def test_the_probe_never_sends_a_write_opcode():
         assert frame[2] != 0x23, "0x23 is a write opcode; the probe must never write"
         if frame[2] == 0xE6:
             assert frame[6] & 0xFC == 0xE4, "POM option byte must be the read form 0xE4|MM"
+
+
+def test_short_circuit_reply_leaves_pom_read_unknown():
+    link = FakeLink({POM_CV8_AT_3: [b"\xff\xfe\x61\x12\x73"]})
+    result = check_pom_read(link, address=3, cv=8, poll=False)
+    assert result.value["pom_read"] is None
+    assert "short circuit" in result.detail
+
+
+def test_busy_reply_leaves_pom_read_unknown():
+    link = FakeLink({POM_CV8_AT_3: [b"\xff\xfe\x61\x1f\x7e"]})
+    result = check_pom_read(link, address=3, cv=8, poll=False)
+    assert result.value["pom_read"] is None
+    assert "busy" in result.detail
+
+
+def test_unrecognised_echo_leaves_echo_flag_unknown():
+    link = FakeLink(
+        {POM_CV8_AT_3: []},
+        unsolicited={POM_CV8_AT_3: [b"\xff\xfd\x63\x14\x09\x91\xef"]},
+    )
+    result = check_pom_read(link, address=3, cv=8, poll=False)
+    assert result.value["pom_read"] is True
+    assert result.value["pom_echo_zero_based"] is None
+
+
+def test_real_cvvalue_reply_wins_over_no_ack_marker():
+    link = FakeLink(
+        {POM_CV8_AT_3: [b"\xff\xfe\x61\x13\x72"]},
+        unsolicited={POM_CV8_AT_3: [b"\xff\xfd\x63\x14\x07\x91\xe1"]},
+    )
+    result = check_pom_read(link, address=3, cv=8, poll=False)
+    assert result.value["pom_read"] is True
+
+
+def test_with_broadcast_result_poll_command_is_never_sent():
+    link = FakeLink(
+        {POM_CV8_AT_3: [b"\xff\xfe\x01\x04\x05"]},
+        unsolicited={POM_CV8_AT_3: [b"\xff\xfd\x63\x14\x07\x91\xe1"]},
+    )
+    check_pom_read(link, address=3, cv=8, poll=True)
+    assert len(link.sent) == 1
