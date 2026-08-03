@@ -1,0 +1,20 @@
+[project]
+name = "railctl-probe"
+version = "0.0.0"
+description = "Hardware capability probe for the YaMoRC YD7010 (railctl milestone M1)"
+requires-python = ">=3.11"
+dependencies = []
+
+[project.optional-dependencies]
+dev = ["pytest>=8.0.0", "ruff>=0.4.0"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+addopts = "-q"
+
+[tool.ruff]
+line-length = 100
+target-version = "py311"
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "UP", "B", "SIM"]
