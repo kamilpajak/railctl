@@ -1425,10 +1425,19 @@ def check_z21_opcodes(link: Link) -> CheckResult:
 
 
 def _accepted(link: Link, payload: bytes, window: float = 2.0) -> tuple[bool | None, list]:
+    """Did the station accept this command? True / False / None-for-unresolved.
+
+    A transient condition must NOT be read as acceptance: a station that
+    answers `61 1F` (busy) or `61 12` (short circuit) has told us nothing about
+    whether it implements the opcode, so the capability stays unresolved.
+    Returning True there would record an unsupported command as supported.
+    """
     frames = link.exchange(payload, window=window)
     replies = [parse(f.telegram) for f in frames]
     if UNSUPPORTED in replies:
         return False, frames
+    if SHORT_CIRCUIT in replies or BUSY in replies:
+        return None, frames
     if not frames:
         return None, frames
     return True, frames
