@@ -90,3 +90,49 @@ def test_function_groups_true_when_both_are_accepted():
         }
     )
     assert check_function_groups(link, address=3).value is True
+
+
+def test_function_groups_false_when_group_4_rejected_and_group_5_silent():
+    link = FakeLink({GROUP4_AT_3: [b"\xff\xfe\x61\x82\xe3"]})
+    result = check_function_groups(link, address=3)
+    assert result.value is False
+    assert "rejected" in result.detail
+
+
+def test_function_groups_false_when_group_4_silent_and_group_5_rejected():
+    link = FakeLink({GROUP5_AT_3: [b"\xff\xfe\x61\x82\xe3"]})
+    result = check_function_groups(link, address=3)
+    assert result.value is False
+    assert "rejected" in result.detail
+
+
+def test_function_groups_unknown_when_both_groups_silent():
+    link = FakeLink({})
+    result = check_function_groups(link, address=3)
+    assert result.value is None
+    assert "no reply" in result.detail
+
+
+def test_function_groups_unknown_when_one_group_busy_and_the_other_accepted():
+    link = FakeLink(
+        {
+            GROUP4_AT_3: [b"\xff\xfe\x01\x04\x05"],
+            GROUP5_AT_3: [b"\xff\xfe\x61\x1f\x70"],
+        }
+    )
+    result = check_function_groups(link, address=3)
+    assert result.value is None
+
+
+def test_service_ext_cv_unknown_when_extended_succeeds_but_direct_silent():
+    link = FakeLink({EXT_CV1: [b"\xff\xfe\x63\x14\x00\x03\x74"]})
+    result = check_service_ext_cv(link)
+    assert result.value is None
+    assert "no value" in result.detail
+
+
+def test_z21_opcodes_unknown_when_z21_succeeds_but_direct_silent():
+    link = FakeLink({Z21_CV29: [b"\xff\xfe\x63\x14\x1c\x0e\x65"]})
+    result = check_z21_opcodes(link)
+    assert result.value is None
+    assert "no value" in result.detail
