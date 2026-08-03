@@ -1,0 +1,10 @@
+# SDD scratch workspace (ledger, briefs, review packages)
+.superpowers/
+
+# Python
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.ruff_cache/
+.venv/
+*.egg-info/
