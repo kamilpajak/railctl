@@ -12,6 +12,7 @@ from tools.probe.replies import (
     SHORT_CIRCUIT,
     UNSUPPORTED,
     CvValue,
+    LocoInfo,
     Status,
     Version,
     parse,
@@ -205,13 +206,31 @@ def _accepted(link: Link, payload: bytes, window: float = 2.0) -> tuple[bool | N
     return True, frames
 
 
-def check_single_function(link: Link, address: int) -> CheckResult:
+def read_f0(link: Link, address: int) -> tuple[bool | None, list[str]]:
+    """Read the current F0 state for the locomotive.
+
+    Returns (True, frames) if F0 is on, (False, frames) if F0 is off, or
+    (None, frames) if the locomotive information request did not return a valid reply.
+    """
+    frames = link.exchange(commands.loco_info(address), window=1.5)
+    dump = _hexdump(frames)
+
+    for frame in frames:
+        reply = parse(frame.telegram)
+        if isinstance(reply, LocoInfo):
+            return reply.f0, dump
+
+    return None, dump
+
+
+def check_single_function(link: Link, address: int, *, f0_is_on: bool) -> CheckResult:
     """R5. Commands F0 to the value it already holds, so a negative result changes nothing.
 
-    The caller is responsible for reading the current F0 state first and passing an
-    address whose F0 is off; the probe entry point does that.
+    The caller is responsible for reading the current F0 state first. This function
+    takes a required keyword argument f0_is_on to re-assert F0's existing value.
     """
-    accepted, frames = _accepted(link, commands.single_function(address, 0, action=0))
+    action = 1 if f0_is_on else 0
+    accepted, frames = _accepted(link, commands.single_function(address, 0, action=action))
     detail = {
         True: "station accepted E4 F8: single-function commands work, no shadow state needed",
         False: "station answered 61 82 to E4 F8: fall back to function group commands",

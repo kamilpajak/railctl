@@ -38,3 +38,63 @@ def test_markdown_includes_the_detail_text_for_each_check():
 def test_markdown_includes_the_raw_frames_for_auditing():
     text = to_markdown(RESULTS, port="/dev/cu.usbmodem0", run_at="2026-08-03T20:00:00Z")
     assert "FE 63 14 00 03" in text
+
+
+def test_markdown_renders_dict_valued_results_as_see_below():
+    # check_pom_read and check_identity have dict-valued results
+    dict_result = CheckResult(
+        "pom_read",
+        {
+            "pom_read": True,
+            "pom_result_channel": "broadcast",
+            "pom_echo_zero_based": False,
+            "value": 145,
+        },
+        "POM read of CV8 returned 145 via broadcast",
+        ["FE E6 30 00 03 E4 07 00 36"],
+    )
+    text = to_markdown([dict_result], port="/dev/cu.usbmodem0", run_at="2026-08-03T20:00:00Z")
+    assert "| `pom_read` | see below |" in text
+
+
+def test_json_flattens_dict_valued_results():
+    dict_result = CheckResult(
+        "pom_read",
+        {
+            "pom_read": True,
+            "pom_result_channel": "broadcast",
+            "pom_echo_zero_based": False,
+            "value": 145,
+        },
+        "POM read of CV8 returned 145 via broadcast",
+        [],
+    )
+    json_str = to_json([dict_result], port="/dev/cu.usbmodem0", run_at="2026-08-03T20:00:00Z")
+    payload = json.loads(json_str)
+    assert payload["capabilities"]["pom_read"] is True
+    assert payload["capabilities"]["pom_result_channel"] == "broadcast"
+    assert payload["capabilities"]["pom_echo_zero_based"] is False
+    assert payload["capabilities"]["value"] == 145
+
+
+def test_mixed_scalar_and_dict_valued_results_render_correctly():
+    results = [
+        CheckResult(
+            "pom_read",
+            {
+                "pom_read": True,
+                "pom_result_channel": "broadcast",
+                "pom_echo_zero_based": None,
+                "value": 145,
+            },
+            "POM read succeeded",
+            [],
+        ),
+        CheckResult("single_function_cmd", False, "station rejected", []),
+    ]
+    payload = json.loads(to_json(results, port="/dev/cu.usbmodem0", run_at="2026-08-03T20:00:00Z"))
+    # Dict keys should be flattened into capabilities
+    assert payload["capabilities"]["pom_read"] is True
+    assert payload["capabilities"]["pom_echo_zero_based"] is None
+    # Scalar should also be there
+    assert payload["capabilities"]["single_function_cmd"] is False

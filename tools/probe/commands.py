@@ -46,6 +46,12 @@ def status() -> bytes:
     return b"\x21\x24"
 
 
+def loco_info(address: int) -> bytes:
+    """Request locomotive information (F0 state, speed, etc.)."""
+    high, low = loco_address_bytes(address)
+    return bytes([0xE3, 0x00, high, low])
+
+
 def service_result() -> bytes:
     return b"\x21\x10"
 

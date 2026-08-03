@@ -52,6 +52,15 @@ class CvValue:
 
 
 @dataclass(frozen=True)
+class LocoInfo:
+    ident: int
+    speed: int
+    f0: bool
+    f1_f4: int
+    f5_f12: int
+
+
+@dataclass(frozen=True)
 class Marker:
     name: str
 
@@ -77,7 +86,7 @@ class Unknown:
     telegram: bytes
 
 
-Reply = Version | Status | CvValue | Marker | Unknown
+Reply = Version | Status | CvValue | LocoInfo | Marker | Unknown
 
 
 def parse(telegram: bytes) -> Reply:
@@ -96,6 +105,14 @@ def parse(telegram: bytes) -> Reply:
         return Status(raw=telegram[2])
     if header == 0x63 and db0 in (0x10, 0x14) and len(telegram) >= 4:
         return CvValue(raw_cv=telegram[2], value=telegram[3], ident=db0)
+    if header == 0xE4 and len(telegram) >= 5:
+        return LocoInfo(
+            ident=db0,
+            speed=telegram[2],
+            f0=bool(telegram[3] & 0x10),
+            f1_f4=telegram[3] & 0x0F,
+            f5_f12=telegram[4],
+        )
     if header == 0x61 and db0 in _PROGRAMMING_MARKERS:
         return _PROGRAMMING_MARKERS[db0]
     if header == 0x01 and db0 == 0x04:
