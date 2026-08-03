@@ -62,9 +62,19 @@ def test_pom_read_puts_the_high_cv_bits_into_the_option_byte():
     assert payload[5] == 0x2B
 
 
+def test_pom_is_zero_based_but_direct_read_is_one_based():
+    # POM (0xE6 0x30) is ZERO-BASED: CV29 encodes as wire 28 (0x1C)
+    pom_payload = pom_read(3, 29)
+    assert pom_payload[5] == 0x1C, "POM should encode CV29 as wire 28 (zero-based)"
+
+    # Direct read (0x22 0x15) is ONE-BASED: CV29 encodes as 29 (0x1D)
+    direct_payload = service_direct_read(29)
+    assert direct_payload[2] == 0x1D, "Direct read should encode CV29 as 29 (one-based)"
+
+
 def test_service_direct_read_matches_the_spec():
     assert build(service_direct_read(1)) == b"\xff\xfe\x22\x15\x01\x36"
-    assert build(service_direct_read(29)) == b"\xff\xfe\x22\x15\x1c\x2b"
+    assert build(service_direct_read(29)) == b"\xff\xfe\x22\x15\x1d\x2a"
 
 
 def test_service_direct_read_refuses_cv_above_256():
