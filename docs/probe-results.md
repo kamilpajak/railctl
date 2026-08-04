@@ -228,8 +228,14 @@ its instrument fixed. It asks the right question and now answers it.
 ### Operational note
 
 Each service-mode read makes the YD7010 switch its output between the main and the
-programming track with an audible relay. Space reads out rather than firing them back to
-back — consecutive reads without a pause returned silence where spaced reads succeeded.
+programming track with an audible relay. A long backup therefore cycles that relay once
+per CV. There is no protocol reason to space the reads out — see the timing section above,
+which measured nine consecutive reads at 0.2 s gaps all correct. Do not overlap
+operations: complete read → poll → result before starting the next one.
+
+Because the relay re-energises the main track on every cycle and the station's start mode
+is **automatic**, a long run repeatedly restores power to locomotives that will resume
+their last speed. Send an emergency stop before a backup, not only after.
 
 ## Measurement note
 
