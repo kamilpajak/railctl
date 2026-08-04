@@ -148,6 +148,9 @@ Verified with the poll, three rounds each, all correct against known constants:
 | 8 | `23 11 00 07` | `63 14 08 91` | **145** | ZIMO manufacturer id — the known constant |
 | 29 | `23 11 00 1C` | `63 14 1D 0E` | **14** | bit 3 set, RailCom enabled at the decoder |
 | 250 | `23 11 00 F9` | `63 14 FA 06` | **6** | decoder type 6 = MS450, matches the hardware |
+| 251 | `23 11 00 FA` | `63 14 FB FB` | **251** | serial byte, low |
+| 252 | `23 11 00 FB` | `63 14 FC 69` | **105** | serial byte, middle |
+| 253 | `23 11 00 FC` | `63 14 FD 4B` | **75** | serial byte, high |
 | 265 | `23 11 01 08` | `63 15 09 00` | **0** | sound project |
 | 266 | `23 11 01 09` | `63 15 0A 40` | **64** | master volume |
 
@@ -169,6 +172,35 @@ is CV256 + 9 = CV265.
 For M2, the `63 14` band maps as Lenz 23151 section 3.1.2.6 states: **C = 0 means CV1024**,
 C = 1..255 means CV1..255. Not 0xFF for CV1024 — a plausible-sounding claim that the
 document contradicts.
+
+### CV251–253 — the decoder serial, and what it does not yet prove
+
+Measured 2026-08-04. The restore path planned for M9 is meant to refuse to write a backup
+taken from one decoder into a different one, and that gate needs something that identifies
+the unit. These three CVs are the candidate.
+
+`CV251` reads back **251**, the same number as the CV itself. That is the shape of a parser
+returning the CV number instead of the value, so it was not accepted until three separate
+checks ruled the artefact out:
+
+- **The anchor.** CV8 read back 145 through the same code path in the same session. 145 is
+  not 8, so the path returns values, not numbers.
+- **The pairing.** The direct-opcode reply carries no CV echo, so nothing in the frame says
+  which CV it answers; the attribution rests on the link keeping one command in flight. The
+  four CVs were re-read in reverse order, interleaved with CV8. Every value stayed with its
+  own request and every CV8 returned 145. A reply arriving one request late would have moved
+  the 145 onto a subject CV.
+- **Two opcode families.** `22 15` is one-based and `23 11` is zero-based. Both return the
+  same four values, so an off-by-one in either would have shown up as a disagreement.
+
+Stable across two passes in one session.
+
+What this does **not** establish: that the three bytes differ between two MS450P22 decoders.
+Only a second decoder answers that, and until one is read, a value identical on both would
+mean these CVs identify the model rather than the unit — which would leave the M9 gate with
+nothing to compare. The byte order of the composite is also unknown: nothing here says
+whether ZIMO means 251·2^0 + 105·2^8 + 75·2^16 or the reverse, and no reason to guess has
+come up yet, because the gate only needs equality, not the number.
 
 ### Service-mode WRITE works
 
