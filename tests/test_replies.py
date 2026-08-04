@@ -73,6 +73,12 @@ def test_the_direct_band_leaves_the_absolute_cv_undecoded():
     assert parse(b"\x63\x14\x07\x91").cv is None
 
 
+def test_parses_the_z21_form_cv_result_with_its_16_bit_address():
+    # Z21 LAN Protocol 6.5: 64 14 CVAdr_MSB CVAdr_LSB Value.
+    assert parse(b"\x64\x14\x00\x07\x91") == CvValue(raw_cv=7, value=0x91, ident=0x14, cv=None)
+    assert parse(b"\x64\x14\x01\x08\x2d") == CvValue(raw_cv=264, value=0x2D, ident=0x14, cv=None)
+
+
 def test_parses_command_station_busy():
     assert parse(b"\x61\x81") is STATION_BUSY
 

@@ -58,6 +58,9 @@ def check_pom_read(link: Link, address: int, cv: int = 8, *, poll: bool) -> Chec
     frames = link.exchange(commands.pom_read(address, cv), window=POM_WINDOW)
     channel = "broadcast"
 
+    # 0x21 0x10 is specified as the SERVICE mode result request (Lenz section
+    # 2.2.10); using it to collect a POM result is speculative, which is exactly
+    # why the channel that produced the value is recorded rather than assumed.
     if poll and not any(isinstance(parse(f.telegram), CvValue) for f in frames):
         polled = link.exchange(commands.service_result(), window=POM_WINDOW)
         if any(isinstance(parse(polled_frame.telegram), CvValue) for polled_frame in polled):
@@ -123,16 +126,23 @@ def check_pom_read(link: Link, address: int, cv: int = 8, *, poll: bool) -> Chec
             dump,
         )
 
+    # Silence establishes nothing, so it must not be reported as a definite
+    # "not supported". XpressNet section 2.2.23 states that a command station
+    # which does not support Operations Mode Programming answers 61 82, and
+    # Lenz 23151 section 1.4 states that "command not available" is always
+    # coupled to the command that caused it, even for commands that normally
+    # produce no reply. Non-support therefore has its own signal, and silence
+    # is not it: it is equally produced by a result form this probe cannot
+    # parse, by a missing RailCom receiver, or by the loco not being on the
+    # track at all.
     return CheckResult(
         "pom_read",
-        {
-            "pom_read": False,
-            "pom_result_channel": "none",
-            "pom_echo_zero_based": None,
-            "value": None,
-        },
-        "no result on either channel and neither 61 13 nor 61 82:"
-        " concluded from silence",
+        _unresolved(),
+        "no reply of any kind, and neither 61 13 nor 61 82: nothing established."
+        " An unsupported station is specified to answer 61 82, so silence points"
+        " elsewhere - check that the locomotive is on a powered main track at this"
+        " address, that RailCom is on (CV29 bit 3, CV28 bits 0 and 1), and inspect"
+        " the raw frames for a result form this probe does not recognise",
         dump,
     )
 
@@ -254,6 +264,20 @@ def check_service_ext_cv(link: Link, high_cv: int = HIGH_BAND_CV) -> CheckResult
              "service_ext_cv_high_value": None},
             f"{detail}, but the CV{high_cv} read came back {high.status}:"
             " the high bands are not established",
+            dump,
+        )
+    if high.reply_cv is None:
+        # A value arrived, so the band was served, but the reply form does not
+        # identify which CV it answers for: the Z21 0x64 0x14 form carries the
+        # address under a convention this probe has not established. Report the
+        # capability, and say plainly that the echo could not be cross-checked.
+        return CheckResult(
+            "service_ext_cv",
+            {"service_ext_cv": True, "service_ext_cv_high_band": True,
+             "service_ext_cv_high_value": high.value},
+            f"{detail}; the CV{high_cv} read returned {high.value}, so CVs above 255"
+            " are reachable, but the reply form does not identify the CV it answers"
+            " for, so the echo was not cross-checked",
             dump,
         )
     # The reply band echoes the CV it answers for, so a mismatch means the
