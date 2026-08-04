@@ -109,14 +109,17 @@ def test_busy_reply_leaves_pom_read_unknown():
     assert "busy" in result.detail
 
 
-def test_unrecognised_echo_leaves_echo_flag_unknown():
+def test_a_result_echoing_a_different_cv_is_not_taken_as_an_answer():
+    # Echo 9 is neither CV8 nor its zero-based form 7, so this result belongs to
+    # some other request. Reporting its value under CV8 would be a wrong reading
+    # dressed as a successful one.
     link = FakeLink(
         {POM_CV8_AT_3: []},
         unsolicited={POM_CV8_AT_3: [b"\xff\xfd\x63\x14\x09\x91\xef"]},
     )
     result = check_pom_read(link, address=3, cv=8, poll=False)
-    assert result.value["pom_read"] is True
-    assert result.value["pom_echo_zero_based"] is None
+    assert result.value["pom_read"] is None
+    assert "echo is 9" in result.detail
 
 
 def test_real_cvvalue_reply_wins_over_no_ack_marker():
@@ -134,4 +137,7 @@ def test_with_broadcast_result_poll_command_is_never_sent():
         unsolicited={POM_CV8_AT_3: [b"\xff\xfd\x63\x14\x07\x91\xe1"]},
     )
     check_pom_read(link, address=3, cv=8, poll=True)
-    assert len(link.sent) == 1
+    # One drain of the stored service result, then the POM read. No result poll
+    # after it, because the broadcast already delivered the value.
+    assert len(link.sent) == 2
+    assert link.sent[0] == build(b"\x21\x10")
