@@ -2,13 +2,42 @@
 
 ## Purpose
 
-`railctl` is a command-line tool for driving and configuring DCC model locomotives from macOS through a YaMoRC YD7010 command station over USB. It speaks XpressNet across the station's LI-USB-compatible CDC port, so it can read and write decoder CVs, back them up to a file, restore them, and run a locomotive (speed, direction, functions). The immediate user is the author, with one locomotive carrying a **ZIMO MS450P22** sound decoder (MS family, PluX22, 1.2 A continuous) on a bench layout; the immediate need is tuning that decoder without a Windows programmer. That decoder ships with RailCom already enabled (CV28 = 67, CV29 = 14), which is what makes POM on the main track the primary CV path rather than the programming track. The design keeps a second transport (Z21 over LAN) in view: adding it must mean adding a transport and an envelope, nothing else. Everything the station cannot be proven to support is treated as unknown until a `doctor` run measures it on the real hardware.
+`railctl` is a command-line tool for driving and configuring DCC model locomotives from macOS through a YaMoRC YD7010 command station over USB. It speaks XpressNet across the station's LI-USB-compatible CDC port, so it can read and write decoder CVs, back them up to a file, restore them, and run a locomotive (speed, direction, functions). The immediate user is the author, with one locomotive carrying a **ZIMO MS450P22** sound decoder (MS family, PluX22, 1.2 A continuous) on a bench layout; the immediate need is tuning that decoder without a Windows programmer. That decoder has RailCom enabled — **measured 2026-08-04: CV29 = 14 (bit 3 set) and CV28 = 3 (bits 0 and 1, channel 1 and channel 2)**. The ZIMO MS manual gives 3 as the correct value for this decoder class and 67 only for large scale decoders. An earlier draft of this document asserted 67 and used it to argue that POM should be the primary CV path; both were wrong, and the measurements replaced that framing entirely — see **CV operations by track** below. The design keeps a second transport (Z21 over LAN) in view: adding it must mean adding a transport and an envelope, nothing else. Everything the station cannot be proven to support is treated as unknown until a `doctor` run measures it on the real hardware.
 
 ## Scope
 
 - Command station control: version, status, track power on/off, emergency stop (all locomotives or one).
 - Driving: 128 speed steps, direction, functions **F0-F28**. The wire form used depends on what the `doctor` probe finds (single-function `E4 F8` preferred, function groups as fallback); F13-F28 are in scope for 0.1.0, not deferred.
-- CV read and write over POM (main track, RailCom) as the primary path, and over service mode (programming track) as the fallback.
+- CV read and write, per the **CV operations by track** matrix below. There is no single "primary path": reads have exactly one option and writes have two, so any one sentence naming a primary path has to misdescribe one of them.
+
+#### CV operations by track
+
+Measured on the YD7010 with a ZIMO MS450P22, 2026-08-04. See `docs/probe-results.md`.
+
+| Operation | Programming track (service mode) | Main track (POM) |
+| --- | --- | --- |
+| Read a CV | **yes — the only way** | **no**, returns only the interface ACK |
+| Write a CV | **yes**, and it can be read back | **yes**, and nothing can confirm it |
+| Backup / restore / diff | **yes** (they are built on reads) | **refused** |
+| Drive, functions, track power | — | yes |
+
+Inside service mode the default encoding is the Z21 16-bit pair `23 11` / `24 12`: it covers CV1..1024 in one form, and its result arrives **unsolicited**, which is the only delivery channel that cannot hand back a stale stored result. The Lenz opcodes stay implemented as fallbacks for other command stations; they require the `21 10` service-result request, which XpressNet section 2.2.8 mandates and which is not optional.
+
+Why POM read fails here is **inferred, not measured**: the YD7010 generates the RailCom cut-out but its documentation describes reception through external modules only. The decoder is excluded by measurement. `pom_read` therefore stays `unknown`, never `false` — no `61 82` was ever observed, and `false` would assert a measurement that was not taken.
+
+#### `--track prog|main`
+
+The user-facing flag names **the track the locomotive stands on**, not the protocol. "Programming track" is a thing you can point at; "POM" is not. `--mode service|pom` remains as a hidden 1:1 alias for one release (`service` → `prog`, `pom` → `main`) and the JSON envelope carries both keys; nothing has shipped, so the rename is free now and never again.
+
+Defaults: `cv read`, `cv write`, `backup`, `restore` and `diff` all default to `prog`. `--track main` must be typed, and is accepted only for `cv write`.
+
+Three rules that follow from the matrix:
+
+- A read requested on the main track fails with `read_needs_prog_track` (exit 16) and stdout empty. The message names the physical action first, then offers the live write as the alternative, and says plainly that the live write cannot be checked until the loco is back on the programming track.
+- `--verify` together with `--track main` is a **usage error (exit 2)**, never a silent downgrade — nothing can confirm a POM write.
+- Silence on the programming track must never be reported as "the decoder is not answering". An empty or badly contacted programming track is far more likely, and the guidance says so in that order, ending with `railctl cv read 8` as the placement test because a ZIMO decoder answers 145.
+
+Every programming-track command prints once, on stderr: *"Programming track: this acts on whatever locomotive is standing on it. `--address` is not used to select it."*
 - ZIMO indexed CVs via automatic CV31/CV32 page selection.
 - Curated CV backup and restore (Part B).
 - `railctl doctor`: probes and records what this station actually supports, before anything trusts it.
@@ -756,14 +785,16 @@ Service-mode operations are **never retried automatically**: they already take u
 
 ### CVs above 256
 
-POM natively covers CV1..1024 (10 bits split across `0xE4|MM` and the LSB), so the primary path needs nothing special. Service mode picks in this fixed order (`_service_read_telegram(cv) -> (telegram, encoding, page_index)`, write side identical):
+POM natively covers CV1..1024 (10 bits split across `0xE4|MM` and the LSB), but only for writing — POM cannot read here, so nothing in backup, restore or diff uses it. Service mode picks in this order (`_service_read_telegram(cv) -> (telegram, encoding, page_index)`, write side identical):
 
-1. `cv <= 255` and `capabilities.service_direct_cv is not False` -> `cmd_service_direct_read(cv)`, `SERVICE_DIRECT`, page 0. Universally supported; prefer it whenever it can express the CV.
-2. `capabilities.z21_cv_opcodes is True` -> `cmd_z21_cv_read(cv)`, `Z21_16BIT`, page 0. Preferred over the extended opcodes because the address is an unambiguous 16-bit field and it is the encoding the LAN transport will use anyway.
-3. `capabilities.service_ext_cv is True` and `cv <= MAX_CV_EXT` -> `cmd_service_ext_read(cv)`, `SERVICE_EXT`, page `cv // 256`.
+1. `capabilities.z21_cv_opcodes is True` -> `cmd_z21_cv_read(cv)`, `Z21_16BIT`, page 0. **First, not third.** Measured on the reference station: it covers CV1..1024 in one unambiguous 16-bit field, it is the encoding the LAN transport will use anyway, and its result arrives unsolicited — the only channel that cannot return a stale stored result. The previous order put `service_direct` first, which on this station is the one encoding that answers nothing until separately polled.
+2. `cv <= 255` and `capabilities.service_direct_cv is True` -> `cmd_service_direct_read(cv)`, `SERVICE_DIRECT`, page 0. Requires the `21 10` result request.
+3. `capabilities.service_ext_cv is True` and `cv <= MAX_CV_EXT` -> `cmd_service_ext_read(cv)`, `SERVICE_EXT`, page `cv // 256`. Also requires the `21 10` request.
 4. Otherwise `CvOutOfRangeError`: "CV{cv} is not reachable in service mode on this command station (no extended or Z21 CV opcodes); use `--mode pom`".
 
-Steps 2 and 3 require the capability to be explicitly `True`, never `None`: an unprobed station never sends an opcode that has not been observed to work. The extended opcodes are not in the extracted Lenz V2 document at all — they come from XpressNet 3.6, and the page boundaries used here are from a secondary summary. If both turn out negative, high CVs are reachable **only** over POM; the backup profile then marks entries above CV256 as `pom_only` so a service-mode backup reports them skipped rather than failing the run.
+Every step requires its capability to be explicitly `True`, never `None`: an unprobed station never sends an opcode that has not been observed to work. Step 2 previously accepted `is not False`, which let an unprobed station lead with the encoding measured silent here.
+
+**Bands above CV511 are documented but never exercised.** Only reply bands `0x63 0x14` (CV1..255) and `0x63 0x15` (CV256..511) have been answered on real hardware. `0x63 0x16` and `0x63 0x17` come from the Lenz document alone. `--all` may still sweep to CV1024, but the JSON output and `doctor` must label those ranges *not exercised on this station* rather than implying they were verified. The extended opcodes are not in the extracted Lenz V2 document at all — they come from XpressNet 3.6, and the page boundaries used here are from a secondary summary. If both turn out negative, high CVs are reachable **only** over POM; the backup profile then marks entries above CV256 as `pom_only` so a service-mode backup reports them skipped rather than failing the run.
 
 ### ZIMO indexed CVs (CV31 / CV32)
 
@@ -1107,11 +1138,38 @@ Order of a run:
 4. Read CV7, CV8, CV250–253 into `decoder`. A failure here is a hole, not an abort; the field is omitted.
 5. Read the rest of `curated_cvs(cat, cv29)` ascending, one at a time, through `Station.cv_read_many`.
 
-If `pom_read` is false, `--mode pom` aborts with `PomReadUnsupportedError` (exit 16) and names the two remedies: enable RailCom on the decoder (CV29 bit 3 = 1, CV28 bits 0 and 1 set), or use `--mode service` with the loco on the programming track. There is no silent fallback: falling back to service mode would read a *different* locomotive if two are on the layout. `--mode auto` resolves to `pom` when `pom_read` is true or unprobed, and to `service` when it is probed false.
+If `pom_read` is false, `--mode pom` aborts with `PomReadUnsupportedError` (exit 16) and names the two remedies: enable RailCom on the decoder (CV29 bit 3 = 1, CV28 bits 0 and 1 set), or use `--mode service` with the loco on the programming track. There is no silent fallback: falling back to service mode would read a *different* locomotive if two are on the layout. **`--mode auto` never resolves to the main track for any CV operation.** It resolves to `service` unless `pom_read` has been measured `True`, which on the reference station it has not been. The previous rule resolved to `pom` when `pom_read` was true *or unprobed*, so the default silently selected the one path that returns nothing — and would keep doing so on any station that has never been probed.
 
 Backup exits 9 when `complete` is false and lists the non-`ok` CVs; skips are listed but do not change the exit code. Ctrl-C writes the partial file with `"interrupted": true` and exits 9.
 
 ### C7. Restore
+
+#### Stage 0 — identity gate (runs before anything is written)
+
+**Service mode addresses the track, not a locomotive.** Whatever stands on the programming track receives the writes. A restore aimed at the wrong locomotive would write a full CV set into it and report complete success, and the curated set deliberately skips CV1/17/18/29 — removing the one symptom that would have shown up later as a changed address. Nothing in the protocol prevents this; only this gate does.
+
+Before the first write of a mutating programming-track command, read and require:
+
+- **CV8 == the file's `decoder.manufacturer_id`** and **CV250 == the file's `decoder.decoder_type`**. A mismatch is a hard abort with no `--force`.
+- **CV251..253 (serial) only when the file carries serial bytes and all three read back live.** Otherwise this degrades to a printed warning naming what did match, plus `--yes`. It cannot be an unskippable gate: those three CVs have **never been read on the reference hardware**, the backup example in this document shows CV253 as `no_response`, and an unsatisfiable safety gate is a broken tool. **Measure them before building restore** (see the open questions) and drop them from the gate if they do not answer.
+- A serial mismatch is overridable **only** by `--confirm=<the serial just read>`, never by `--force`. Restoring onto a replacement decoder and copying settings to a second locomotive are legitimate; a slip of the hand is not.
+
+The gate runs once per session, cached, and only for mutating commands — a plain `cv read` must not pay 10 s for it.
+
+#### Verifying a write
+
+The reply that follows a write is `63 14`, which is the **direct-CV read-result** format, not a documented write echo. It shows what the command station produced, not that the decoder retained the value. Worse, `21 10` returns the station's **stored** result: after a write, that store already holds the value the verification read is looking for, echoed against the same CV. A verification that polls can therefore confirm itself.
+
+The rule is provenance, not value comparison:
+
+- Verify **only** through `23 11`, whose result arrives unsolicited. If no unsolicited result arrives, the write is `unverified` — full stop. The verification path never sends `21 10`.
+- Before each verification read, read the reference CV (CV8, expect 145) so any late frame from the write is consumed by a read that is not the one being trusted.
+- Every read requires the echoed CV to decode back to the CV requested; a mismatch is `cv.stale_result`, discarded, retried once, then failed. Three consecutive stale replies abort the run.
+- Fail on the **first** unverified write, not the seventieth.
+- `restore --track main` is refused outright — no identity gate and no verification is possible there. `--no-verify` is removed from `restore` and kept only on a single `cv write`.
+- `tcflush` drains the host file descriptor only and gives no protection against any of this.
+
+Timing, stated honestly: restore reads every CV first (~2.2 min for 77), writes the few that differ, then verifies each with two reads. **3–4 minutes.** Write latency has never been measured.
 
 Preconditions, all checked before any write:
 
@@ -1129,7 +1187,7 @@ Never-write set: {7, 8, 31, 32, 250, 251, 252, 253}. `source == "sweep"` entries
 **Stages**, each fully verified before the next, because a later stage can destroy the ability to verify an earlier one:
 
 - **A — ordinary CVs.** All `ok`, restorable, non-address CVs except 28, 29, 144, ascending.
-- **B — CV28 then CV29.** These can switch off the readback path itself. The test is on **bits, not on a whole-byte value**: RailCom is live when CV28 bits 0 and 1 are set and CV29 bit 3 is set. The MS450P22 ships with CV28 = 67 (bits 0, 1 and 6) and CV29 = 14 (bit 3 set), so comparing CV28 against the literal 3 would wrongly flag a factory-default decoder and would also clear bit 6 if written. If the target CV28 has bit 0 or bit 1 clear, or the target CV29 has bit 3 clear, and the mode is POM, abort before stage A (exit 9) unless `--allow-railcom-off`; with that flag they are written last in the stage and the remaining CVs are reported as unverifiable rather than as mismatches. CV29 is **skipped by default** (decision 5). `--merge-cv29` opts into a masked write preserving the live long-address bit: `new = (file & ~(1 << CV29_LONG_ADDRESS_BIT)) | (live & (1 << CV29_LONG_ADDRESS_BIT))`. With `--with-address` CV29 is written whole and `--merge-cv29` is refused as contradictory.
+- **B — CV28 then CV29.** These can switch off the readback path itself. The test is on **bits, not on a whole-byte value**: RailCom is live when CV28 bits 0 and 1 are set and CV29 bit 3 is set. **Measured on the reference decoder: CV28 = 3 and CV29 = 14.** An earlier draft asserted CV28 = 67 and warned that comparing against the literal 3 would wrongly flag a factory-default decoder; that had it backwards, and as written this stage would have aborted a restore on a correctly configured decoder. 67 belongs to large scale decoders (ZIMO MS manual: "CV #28 = 3 (or = 67, if large scale decoder)"). Test the bits and never a whole-byte literal, in either direction. If the target CV28 has bit 0 or bit 1 clear, or the target CV29 has bit 3 clear, and the mode is POM, abort before stage A (exit 9) unless `--allow-railcom-off`; with that flag they are written last in the stage and the remaining CVs are reported as unverifiable rather than as mismatches. CV29 is **skipped by default** (decision 5). `--merge-cv29` opts into a masked write preserving the live long-address bit: `new = (file & ~(1 << CV29_LONG_ADDRESS_BIT)) | (live & (1 << CV29_LONG_ADDRESS_BIT))`. With `--with-address` CV29 is written whole and `--merge-cv29` is refused as contradictory.
 - **C — address CVs, only with `--with-address`: CV17, CV18, then CV1.** Last among settings because on POM every later command is addressed by loco number. Afterwards the station re-targets: new address = `((cv17 - 192) << 8) | cv18` when CV29 bit 5 is set, else `cv1`. A long address below 100 aborts *before* stage C: the XpressNet threshold is purely numeric, so a long address in 1..99 cannot be addressed distinctly on this link. Because the address writes were blind (`BLIND_WRITE_CVS` = {1, 8, 17, 18}), failure is diagnosed, not guessed: read CV8 at the new address, then at the old one. An answer at the old address means the write did not take; no answer at either means communication was lost. Both report and exit 14. Nothing is retried at a third address.
 - **D — CV144, last of all.** Kept last for the MX case, where a lock written earlier would block every subsequent write including verification retries. On MS decoders the value only controls the confirmation jingle, so the ordering is harmless rather than load-bearing. CV144 is verified by read-back only, and the report says that no retry was possible.
 
@@ -1472,7 +1530,7 @@ CLI format tests are the house-standard enforcement: for every command, `--forma
 
 Serial port setup (termios flags, DTR/RTS, settle delay after open); R1 in all its parts (does a POM result come back at all, by poll or broadcast, and does the echo carry the CV or the zero-based CVAdr); R2; R4; whether a blind POM write actually took effect; RailCom working end to end; service mode on a 750 mA track with a sound decoder; the real timing tolerances; status bit 2; and anything physical. `tests/hardware/test_probe.py` automates these as a marked suite that **records rather than asserts** — while a capability is unresolved, the test `xfail`s with the reason, so an unproven risk cannot masquerade as a regression. Once `docs/probe-results.md` records a capability as present, the `xfail` becomes a hard assertion in the same commit.
 
-`docs/manual-test-checklist.md`, run before tagging a release, in order: CV250 identifies the decoder family (6 = MS450 on the reference hardware); CV29 bit 3 set and CV28 bits 0 and 1 set (factory values 14 and 67); `railctl version` prints XpressNet 4.0 / id 0x12; power on, drive, stop, power off; record the raw status byte on a healthy powered track; drive at addresses 3, 100, 127 and 1234 (100 and 127 are the divergence band and need a decoder set to a long address to answer); F0, F8, F12 and F13/F21 if groups 4/5 probe positive; POM read of CV8 returns 145; CV300 read agrees between POM and service; write CV3, read it back, restore it; full backup and restore including the skipped address CVs; and two failure drills — loco off the track, and USB unplugged — each checked for a clear message and the mapped exit code.
+`docs/manual-test-checklist.md`, run before tagging a release, in order: CV250 identifies the decoder family (6 = MS450 on the reference hardware); CV29 bit 3 set and CV28 bits 0 and 1 set (measured values 14 and 3 on the reference decoder); `railctl version` prints XpressNet 4.0 / id 0x12; power on, drive, stop, power off; record the raw status byte on a healthy powered track; drive at addresses 3, 100, 127 and 1234 (100 and 127 are the divergence band and need a decoder set to a long address to answer); F0, F8, F12 and F13/F21 if groups 4/5 probe positive; **service-mode** read of CV8 returns 145 and of CV250 returns 6; write CV3, read it back, restore it; full backup and restore including the skipped address CVs; and two failure drills — loco off the track, and USB unplugged — each checked for a clear message and the mapped exit code.
 
 ---
 
