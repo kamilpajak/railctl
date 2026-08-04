@@ -326,7 +326,7 @@ def encode(header: int, *data: int) -> bytes: ...    # header, data..., XOR
 def decode(raw: bytes) -> tuple[int, bytes]: ...     # (header, data) without the XOR byte
 ```
 
-`encode()` derives the expected data-byte count from the header's low nibble and raises `XBusEncodeError` on a mismatch, so an opcode whose argument list disagrees with its declared length cannot ship. `decode()` uses the `xor(whole) == 0` identity. Golden vectors come from the measured hardware: `encode(0x21, 0x21) == b"\x21\x21\x00"`, `decode(b"\x63\x21\x40\x12\x10") == (0x63, b"\x40\x12")`.
+`encode()` derives the expected data-byte count from the header's low nibble and raises `XBusEncodeError` on a mismatch, so an opcode whose argument list disagrees with its declared length cannot ship. `decode()` uses the `xor(whole) == 0` identity. Golden vectors come from the measured hardware: `encode(0x21, 0x21) == b"\x21\x21\x00"`, `decode(b"\x63\x21\x40\x12\x10") == (0x63, b"\x21\x40\x12")`.
 
 ### Dialect (`xbus/dialect.py`)
 
