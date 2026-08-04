@@ -75,8 +75,14 @@ def collision_free_results(draw: st.DrawFn) -> list[CheckResult]:
         # Rebuilding is cheaper than filtering: assume() on a list this wide
         # rejects most draws and Hypothesis gives up before finding anything.
         results = [
-            CheckResult(f"{index}_{r.name}", r.value if not isinstance(r.value, dict) else
-                        {f"{index}_{k}": v for k, v in r.value.items()}, r.detail, r.frames)
+            CheckResult(
+                f"{index}_{r.name}",
+                r.value
+                if not isinstance(r.value, dict)
+                else {f"{index}_{k}": v for k, v in r.value.items()},
+                r.detail,
+                r.frames,
+            )
             for index, r in enumerate(results)
         ]
     return results

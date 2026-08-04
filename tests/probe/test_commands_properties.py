@@ -188,7 +188,7 @@ def test_a_locomotive_address_survives_the_round_trip(address: int):
 
 @given(ADDRESSES)
 def test_the_long_address_marker_follows_the_threshold(address: int):
-    high, low = commands.loco_address_bytes(address)
+    high, _low = commands.loco_address_bytes(address)
     is_long = (high & 0xC0) == 0xC0
     assert is_long == (address >= XPRESSNET_LONG_ADDRESS_THRESHOLD)
 

@@ -133,22 +133,22 @@ def test_empty_telegram_becomes_unknown():
 def test_parses_loco_info_with_f0_on():
     # E4 ident speed [f0-f4] [f5-f12]
     # f0 is bit 4 of the f0-f4 byte
-    result = parse(b"\xE4\x03\x20\x1F\x00")
+    result = parse(b"\xe4\x03\x20\x1f\x00")
     assert result == LocoInfo(ident=0x03, speed=0x20, f0=True, f1_f4=0x0F, f5_f12=0x00)
     assert result.f0 is True
 
 
 def test_parses_loco_info_with_f0_off():
     # f0 is bit 4 of the f0-f4 byte, so 0x00 means f0 is off
-    result = parse(b"\xE4\x03\x20\x00\x00")
+    result = parse(b"\xe4\x03\x20\x00\x00")
     assert result == LocoInfo(ident=0x03, speed=0x20, f0=False, f1_f4=0x00, f5_f12=0x00)
     assert result.f0 is False
 
 
 def test_too_short_loco_info_telegram_becomes_unknown():
     # Only 4 bytes, needs at least 5
-    result = parse(b"\xE4\x03\x20\x1F")
-    assert result == Unknown(telegram=b"\xE4\x03\x20\x1F")
+    result = parse(b"\xe4\x03\x20\x1f")
+    assert result == Unknown(telegram=b"\xe4\x03\x20\x1f")
 
 
 def test_parses_the_programming_mode_broadcast():
