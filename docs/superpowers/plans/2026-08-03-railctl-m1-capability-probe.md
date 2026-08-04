@@ -567,7 +567,7 @@ def test_fake_link_returns_nothing_for_an_unscripted_payload():
 def test_fake_link_can_deliver_an_unsolicited_broadcast_after_the_reply():
     link = FakeLink(
         {b"\x21\x10": [b"\xff\xfe\x01\x04\x05"]},
-        unsolicited={b"\x21\x10": [b"\xff\xfd\x63\x14\x07\x91\x81"]},
+        unsolicited={b"\x21\x10": [b"\xff\xfd\x63\x14\x07\x91\xe1"]},
     )
     frames = link.exchange(b"\x21\x10", window=0.1)
     assert [f.solicited for f in frames] == [True, False]
@@ -844,7 +844,7 @@ def test_pom_read_puts_the_high_cv_bits_into_the_option_byte():
 
 def test_service_direct_read_matches_the_spec():
     assert build(service_direct_read(1)) == b"\xff\xfe\x22\x15\x01\x36"
-    assert build(service_direct_read(29)) == b"\xff\xfe\x22\x15\x1c\x2b"
+    assert build(service_direct_read(29)) == b"\xff\xfe\x22\x15\x1d\x2a"
 
 
 def test_service_direct_read_refuses_cv_above_256():
@@ -897,8 +897,21 @@ Expected: FAIL — `ModuleNotFoundError: No module named 'tools.probe.commands'`
 # tools/probe/commands.py
 """X-Bus payload builders (header + data, no LI prefix and no XOR).
 
-CV numbers are 1-based on the way in. cv_wire() is the ONLY place the
-zero-based conversion happens, so it cannot be applied twice.
+CV numbers are 1-based on the way in, for every function here.
+
+The wire conventions are NOT uniform, and this is the single most dangerous
+detail in the module:
+
+- POM (0xE6 0x30) and the Z21 opcodes (0x23 0x11) are ZERO-BASED:
+  CV1 goes on the wire as 0. Those two, and only those two, call cv_wire().
+- The legacy direct read (0x22 0x15) and the extended reads (0x22 0x18..0x1B)
+  are ONE-BASED: CV1 goes on the wire as 1. Lenz XpressNet Protocol
+  Description section 2.2.8, verbatim: "The range is from 1 to 256, CV256 is
+  sent as 00".
+
+Routing a service-mode opcode through cv_wire() reads the wrong CV off the
+decoder and reports it under the right name, which is why each function
+states its convention.
 """
 
 from __future__ import annotations
@@ -940,24 +953,33 @@ def pom_read(address: int, cv: int) -> bytes:
 
 
 def service_direct_read(cv: int) -> bytes:
-    """Legacy direct read. Only CV1..255 — wire value 0 is ambiguous between
-    CV256 and CV1024 across the two Lenz documents, so it is refused."""
-    wire = cv_wire(cv)
-    if wire == 0xFF + 1 or cv > 256:
+    """Legacy direct read, 0x22 0x15.
+
+    IMPORTANT: this opcode is ONE-BASED, unlike POM. Lenz XpressNet Protocol
+    Description section 2.2.8 states verbatim: "The range is from 1 to 256,
+    CV256 is sent as 00". So CV1 goes on the wire as 0x01, CV29 as 0x1D.
+    Do NOT route this through cv_wire() — that is the POM/Z21 convention.
+
+    CV256 is refused because its wire value 0 collides with CV1024 in the
+    newer LI-USB document, and nothing here needs to guess which the YD7010
+    implements.
+    """
+    if not 1 <= cv <= 256:
         raise ValueError(f"CV {cv} exceeds the 256 CV limit of the legacy direct read")
-    if wire == 0:
-        raise ValueError("wire value 0 is ambiguous in the legacy direct read; use the extended opcodes")
     if cv == 256:
-        raise ValueError("CV256 encodes as wire 0, which is ambiguous; use the extended opcodes")
-    return bytes([0x22, 0x15, wire])
+        raise ValueError("CV256 is sent as 0, which is ambiguous; use the extended opcodes")
+    return bytes([0x22, 0x15, cv & 0xFF])
 
 
 def service_ext_read(cv: int) -> bytes:
-    wire = cv_wire(cv)
-    band = wire >> 8
+    """Extended read, 0x22 0x18..0x1B. Also ONE-BASED, banded by cv >> 8:
+    0x18 covers CV1-255, 0x19 CV256-511, 0x1A CV512-767, 0x1B CV768-1023."""
+    if not 1 <= cv <= MAX_CV:
+        raise ValueError(f"CV {cv} outside the extended opcode range 1..{MAX_CV}")
+    band = cv >> 8
     if band > 3:
-        raise ValueError(f"CV {cv} outside the extended opcode range 1..1024")
-    return bytes([0x22, 0x18 + band, wire & 0xFF])
+        raise ValueError(f"CV {cv} outside the extended opcode range 1..{MAX_CV}")
+    return bytes([0x22, 0x18 + band, cv & 0xFF])
 
 
 def z21_service_read(cv: int) -> bytes:
@@ -1022,7 +1044,7 @@ POLL = b"\x21\x10"
 def test_result_arriving_as_a_broadcast_sets_channel_broadcast():
     link = FakeLink(
         {POM_CV8_AT_3: [b"\xff\xfe\x01\x04\x05"]},
-        unsolicited={POM_CV8_AT_3: [b"\xff\xfd\x63\x14\x07\x91\x81"]},
+        unsolicited={POM_CV8_AT_3: [b"\xff\xfd\x63\x14\x07\x91\xe1"]},
     )
     result = check_pom_read(link, address=3, cv=8, poll=False)
     assert result.value["pom_read"] is True
@@ -1033,7 +1055,7 @@ def test_result_arriving_as_a_broadcast_sets_channel_broadcast():
 def test_echo_of_the_zero_based_cv_sets_the_echo_flag():
     link = FakeLink(
         {POM_CV8_AT_3: []},
-        unsolicited={POM_CV8_AT_3: [b"\xff\xfd\x63\x14\x07\x91\x81"]},
+        unsolicited={POM_CV8_AT_3: [b"\xff\xfd\x63\x14\x07\x91\xe1"]},
     )
     result = check_pom_read(link, address=3, cv=8, poll=False)
     assert result.value["pom_echo_zero_based"] is True
@@ -1042,7 +1064,7 @@ def test_echo_of_the_zero_based_cv_sets_the_echo_flag():
 def test_echo_of_the_one_based_cv_clears_the_echo_flag():
     link = FakeLink(
         {POM_CV8_AT_3: []},
-        unsolicited={POM_CV8_AT_3: [b"\xff\xfd\x63\x14\x08\x91\x8e"]},
+        unsolicited={POM_CV8_AT_3: [b"\xff\xfd\x63\x14\x08\x91\xee"]},
     )
     result = check_pom_read(link, address=3, cv=8, poll=False)
     assert result.value["pom_echo_zero_based"] is False
@@ -1052,7 +1074,7 @@ def test_result_arriving_only_after_a_poll_sets_channel_poll():
     link = FakeLink(
         {
             POM_CV8_AT_3: [b"\xff\xfe\x01\x04\x05"],
-            POLL: [b"\xff\xfe\x63\x14\x07\x91\x81"],
+            POLL: [b"\xff\xfe\x63\x14\x07\x91\xe1"],
         }
     )
     result = check_pom_read(link, address=3, cv=8, poll=True)
@@ -1132,6 +1154,18 @@ class CheckResult:
     frames: list[str] = field(default_factory=list)
 
 
+def _unresolved() -> dict[str, object | None]:
+    """The R1 result dict with nothing established. Used for every path that
+    does not reach a verdict, so `CheckResult.value` for check_pom_read is
+    always a dict and never a bare None."""
+    return {
+        "pom_read": None,
+        "pom_result_channel": "none",
+        "pom_echo_zero_based": None,
+        "value": None,
+    }
+
+
 def check_pom_read(link: Link, address: int, cv: int = 8, *, poll: bool) -> CheckResult:
     """R1. CV8 is used by default because its ZIMO value is a known constant (145),
     so a plausible-but-wrong reading is detectable."""
@@ -1181,10 +1215,15 @@ def check_pom_read(link: Link, address: int, cv: int = 8, *, poll: bool) -> Chec
             "decoder did not acknowledge: check RailCom (CV29 bit 3 = 1, CV28 bits 0 and 1 set) and retry",
             dump,
         )
+    # Transient station conditions. Neither proves anything about the capability,
+    # so pom_read stays None — but the dict shape is kept so every caller can
+    # subscript CheckResult.value without a type check.
     if SHORT_CIRCUIT in seen:
-        return CheckResult("pom_read", None, "short circuit reported; fix the track and retry", dump)
+        return CheckResult(
+            "pom_read", _unresolved(), "short circuit reported; fix the track and retry", dump
+        )
     if BUSY in seen:
-        return CheckResult("pom_read", None, "station busy; retry", dump)
+        return CheckResult("pom_read", _unresolved(), "station busy; retry", dump)
 
     return CheckResult(
         "pom_read",
@@ -1237,7 +1276,7 @@ from tools.probe.fake import FakeLink
 EXT_CV1 = b"\x22\x18\x01"
 DIRECT_CV1 = b"\x22\x15\x01"
 Z21_CV29 = b"\x23\x11\x00\x1c"
-DIRECT_CV29 = b"\x22\x15\x1c"
+DIRECT_CV29 = b"\x22\x15\x1d"
 SINGLE_F0_AT_3 = b"\xe4\xf8\x00\x03\x00"
 GROUP4_AT_3 = b"\xe4\x23\x00\x03\x00"
 GROUP5_AT_3 = b"\xe4\x28\x00\x03\x00"
@@ -1273,8 +1312,8 @@ def test_disagreeing_values_leave_service_ext_cv_unknown():
 def test_z21_opcode_matching_the_direct_read_sets_the_flag():
     link = FakeLink(
         {
-            Z21_CV29: [b"\xff\xfe\x63\x14\x1c\x0e\x69"],
-            DIRECT_CV29: [b"\xff\xfe\x63\x14\x1c\x0e\x69"],
+            Z21_CV29: [b"\xff\xfe\x63\x14\x1c\x0e\x65"],
+            DIRECT_CV29: [b"\xff\xfe\x63\x14\x1c\x0e\x65"],
         }
     )
     assert check_z21_opcodes(link).value is True
@@ -1386,22 +1425,48 @@ def check_z21_opcodes(link: Link) -> CheckResult:
 
 
 def _accepted(link: Link, payload: bytes, window: float = 2.0) -> tuple[bool | None, list]:
+    """Did the station accept this command? True / False / None-for-unresolved.
+
+    A transient condition must NOT be read as acceptance: a station that
+    answers `61 1F` (busy) or `61 12` (short circuit) has told us nothing about
+    whether it implements the opcode, so the capability stays unresolved.
+    Returning True there would record an unsupported command as supported.
+    """
     frames = link.exchange(payload, window=window)
     replies = [parse(f.telegram) for f in frames]
     if UNSUPPORTED in replies:
         return False, frames
+    if SHORT_CIRCUIT in replies or BUSY in replies:
+        return None, frames
     if not frames:
         return None, frames
     return True, frames
 
 
-def check_single_function(link: Link, address: int) -> CheckResult:
-    """R5. Commands F0 to the value it already holds, so a negative result changes nothing.
+def read_f0(link: Link, address: int) -> tuple[bool | None, list]:
+    """Current state of F0 for one locomotive, from the XpressNet loco info reply.
 
-    The caller is responsible for reading the current F0 state first and passing an
-    address whose F0 is off; the probe entry point does that.
+    Returns (True/False, frames) when the reply parsed, or (None, frames) when it
+    did not. `None` is not a failure — it simply means the R5 probe must be skipped,
+    because R5 is only side-effect free if we already know the value to re-assert.
     """
-    accepted, frames = _accepted(link, commands.single_function(address, 0, action=0))
+    frames = link.exchange(bytes([0xE3, 0x00, *commands.loco_address_bytes(address)]), window=2.0)
+    for frame in frames:
+        info = parse(frame.telegram)
+        if isinstance(info, LocoInfo):
+            return info.f0, frames
+    return None, frames
+
+
+def check_single_function(link: Link, address: int, *, f0_is_on: bool) -> CheckResult:
+    """R5. Commands F0 to the value it ALREADY holds, so the layout does not change.
+
+    `f0_is_on` is required, not optional, and the caller gets it from read_f0().
+    Defaulting it would silently switch someone's headlight off — the probe would
+    then be changing the thing it claims not to touch.
+    """
+    action = 1 if f0_is_on else 0
+    accepted, frames = _accepted(link, commands.single_function(address, 0, action=action))
     detail = {
         True: "station accepted E4 F8: single-function commands work, no shadow state needed",
         False: "station answered 61 82 to E4 F8: fall back to function group commands",
@@ -1415,10 +1480,19 @@ def check_function_groups(link: Link, address: int) -> CheckResult:
     g4, g4_frames = _accepted(link, commands.function_group(address, 0x23, 0x00))
     g5, g5_frames = _accepted(link, commands.function_group(address, 0x28, 0x00))
     dump = _hexdump(g4_frames) + _hexdump(g5_frames)
-    if g4 is None or g5 is None:
-        return CheckResult("function_groups_4_5", None, "no reply to E4 23 or E4 28", dump)
-    value = bool(g4 and g5)
-    detail = "groups 4 and 5 accepted: F13-F28 reachable" if value else "at least one group rejected: F13-F28 unavailable on the group path"
+    # Three-valued AND (Kleene): a confirmed rejection of either group settles the
+    # pair as unusable, even if the other group never answered. Testing for None
+    # first would throw that knowledge away and report "unknown" for something we
+    # already know is False.
+    if g4 is False or g5 is False:
+        value: bool | None = False
+        detail = "at least one group rejected: F13-F28 unavailable on the group path"
+    elif g4 is None or g5 is None:
+        value = None
+        detail = "no reply to E4 23 or E4 28"
+    else:
+        value = True
+        detail = "groups 4 and 5 accepted: F13-F28 reachable"
     return CheckResult("function_groups_4_5", value, detail, dump)
 ```
 
@@ -1738,8 +1812,11 @@ def to_markdown(results: list[CheckResult], *, port: str, run_at: str) -> str:
 # tools/probe/__main__.py
 """Run the YD7010 capability probe.
 
-Read-only: no decoder CV is ever written. Function checks command a function to
-the value it already holds, so nothing on the layout changes.
+Read-only: no decoder CV is ever written.
+
+The function checks re-assert a function's EXISTING value, so nothing on the
+layout changes -- but that only holds because the entry point reads F0 first.
+When F0 cannot be read the R5 check is skipped, not guessed.
 """
 
 from __future__ import annotations
@@ -1763,7 +1840,9 @@ def find_xpressnet_port() -> str:
         try:
             with SerialLink(path) as link:
                 frames = link.exchange(version_cmd(), window=1.5)
-        except OSError:
+        except (OSError, termios.error):
+            # termios.error is NOT a subclass of OSError, so a failure inside
+            # tcgetattr/tcsetattr would otherwise escape and abort discovery.
             continue
         if any(isinstance(parse(f.telegram), Version) for f in frames):
             return path
@@ -1790,7 +1869,24 @@ def main(argv: list[str] | None = None) -> int:
     with SerialLink(port) as link:
         results.append(checks.check_identity(link))
         results.append(checks.check_pom_read(link, args.address, poll=True))
-        results.append(checks.check_single_function(link, args.address))
+
+        # R5 is only side-effect free if we re-assert F0's existing value, so the
+        # state has to be read first. If it cannot be read, skip rather than guess:
+        # sending "F0 off" blind would switch off someone's headlight.
+        f0_is_on, f0_frames = checks.read_f0(link, args.address)
+        if f0_is_on is None:
+            results.append(
+                checks.CheckResult(
+                    "single_function_cmd",
+                    None,
+                    "skipped: could not read F0 for this address, and the probe will not "
+                    "command a function whose current value it does not know",
+                    checks._hexdump(f0_frames),
+                )
+            )
+        else:
+            results.append(checks.check_single_function(link, args.address, f0_is_on=f0_is_on))
+
         results.append(checks.check_function_groups(link, args.address))
         if args.band_address:
             results.append(checks.check_address_band(link, args.band_address))
