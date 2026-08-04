@@ -6,7 +6,16 @@ requires-python = ">=3.11"
 dependencies = []
 
 [project.optional-dependencies]
-dev = ["pytest>=8.0.0", "ruff>=0.4.0"]
+# hypothesis drives the property tests in tests/test_*_properties.py.
+# cosmic-ray is the mutation-testing runner; see docs/test-hardening.md for the
+# per-module configs and the operator recipe. Neither is imported by the probe
+# itself, so a hardware run needs none of this.
+dev = [
+    "pytest>=8.0.0",
+    "ruff>=0.4.0",
+    "hypothesis>=6.140.0",
+    "cosmic-ray>=8.4.0",
+]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
