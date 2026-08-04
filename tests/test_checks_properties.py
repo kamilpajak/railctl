@@ -110,9 +110,9 @@ def test_only_an_explicit_rejection_can_ever_produce_false(
     assert run_pom(pom) is not False
 
 
-@given(replies, replies, st.integers(min_value=0, max_value=4))
+@given(replies, replies)
 def test_a_rejection_anywhere_in_the_replies_is_still_a_rejection(
-    before: list[bytes], after: list[bytes], _seed: int
+    before: list[bytes], after: list[bytes]
 ):
     """`61 82` must not be masked by whatever else shares the window with it."""
     telegrams = [*before, UNSUPPORTED, *after]
