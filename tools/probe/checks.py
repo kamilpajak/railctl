@@ -172,8 +172,39 @@ class ReadOutcome:
     frames: list
 
 
+SERVICE_POLLS = 4
+SERVICE_POLL_WINDOW = 3.0
+
+
 def _read_value(link: Link, payload: bytes) -> ReadOutcome:
+    """Send a service-mode read and collect the result, polling if needed.
+
+    The poll is not optional. Service-mode results are asynchronous, and the
+    two opcode families differ in how they deliver them: measured on the YD7010
+    on 2026-08-04, 0x23 0x11 returns its result unsolicited, while 0x22 0x15,
+    0x22 0x18 and 0x22 0x19 return NOTHING until asked with 0x21 0x10 and then
+    answer correctly every time.
+
+    Without the poll this function reported the whole Lenz opcode family as
+    silent, and that silence was read as "this station does not implement
+    them" - a capability declared absent because of a defect in the instrument
+    measuring it. That is the exact failure this probe exists to prevent.
+    """
     frames = link.exchange(payload, window=SERVICE_WINDOW)
+    for _ in range(SERVICE_POLLS):
+        replies = [parse(f.telegram) for f in frames]
+        for reply in replies:
+            if isinstance(reply, CvValue):
+                return ReadOutcome("ok", reply.value, reply.cv, frames)
+        if UNSUPPORTED in replies:
+            return ReadOutcome("unsupported", None, None, frames)
+        if any(isinstance(reply, RegisterValue) for reply in replies):
+            return ReadOutcome("register_fallback", None, None, frames)
+        polled = link.exchange(commands.service_result(), window=SERVICE_POLL_WINDOW)
+        if not polled:
+            break
+        frames = frames + polled
+
     replies = [parse(f.telegram) for f in frames]
     for reply in replies:
         if isinstance(reply, CvValue):
