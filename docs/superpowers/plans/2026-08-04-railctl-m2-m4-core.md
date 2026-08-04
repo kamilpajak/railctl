@@ -7019,16 +7019,29 @@ def test_a_stray_prefix_in_front_of_a_real_frame_does_not_swallow_it(env):
 
 
 def test_a_stray_prefix_further_into_the_buffer_still_resyncs(env):
-    """Mutation pinning. docs/test-hardening.md records the most serious survivor
-    in frames.py as the salvage scan starting at pos << 1 instead of pos + 1:
-    with the noise at the FRONT the doubled offset still lands near the frame,
-    and every test passed. With the noise further in it jumps past the frame and
-    nothing comes back at all.
+    """Mutation pinning for `_salvage_start`'s own offset arithmetic (`pos`
+    doubled to `pos << 1` instead of used directly), not the `_salvage(buffer,
+    pos + 1)` base-offset shape docs/test-hardening.md records for
+    tools/probe/frames.py - LiUsbEnvelope's scan has no base-offset argument to
+    mutate that way.
+
+    The real salvage offset has to land on an odd number, or `pos << 1` (which
+    is always even) can coincide with it by chance and the mutant hides behind
+    a green suite - that is exactly what happened when this test fed a stray
+    prefix at an even offset: `_complete_at(1 << 1)` found the same frame
+    `_complete_at(2)` would have, and the mutant passed. The extra `0xFF` here
+    pushes the real frame to offset 3 so the two expressions diverge.
     """
-    env.feed(b"\xff\xfe" + ACK + b"\xff\xfe" + b"\xff\xfe" + VERSION_REPLY)
+    env.feed(b"\xff\xfe" + ACK + b"\xff\xfe\xff" + b"\xff\xfe" + VERSION_REPLY)
     assert env.pop() == Frame(Kind.SOLICITED, ACK)
     assert env.pop() == Frame(Kind.SOLICITED, VERSION_REPLY)
     assert env.pop() is None
+    assert env.stats.bytes_dropped == 3
+
+> Corrected after review: the buffer above did not reach the odd offset the
+> docstring claims to test, so the printed block could not have killed the
+> `pos << 1` mutant it describes. The block above is the version that runs the
+> real salvage offset onto an odd number and actually kills that mutant.
 
 
 def test_an_incomplete_frame_with_nothing_behind_it_is_waited_for(env):
@@ -7737,13 +7750,24 @@ def test_a_read_that_finds_bytes_does_not_advance_the_clock(env):
 
 
 def test_chunk_size_one_replays_worst_case_usb_fragmentation(env):
+    """Asserts the size of every individual piece, not just the reassembled total.
+
+    A FakeTransport that ignores chunk_size and hands back the whole frame on
+    the first read (then b"" on every read after) would satisfy a bare
+    `got == framed` check. Asserting each piece is exactly one byte long is
+    what actually proves fragmentation was replayed.
+    """
     transport = _open(chunk_size=1)
     framed = env.frame(Kind.SOLICITED, VERSION_REPLY)
     transport.queue(framed)
-    got = b""
-    for _ in range(len(framed)):
-        got += transport.read(256, 0.1)
-    assert got == framed
+    pieces = [transport.read(256, 0.1) for _ in range(len(framed))]
+    assert [len(piece) for piece in pieces] == [1] * len(framed)
+    assert b"".join(pieces) == framed
+
+> Corrected after review: accumulating into `got` and asserting `got == framed`
+> passes even when chunk_size is ignored entirely and the whole frame comes
+> back on the first read. The block above asserts the length of every
+> individual piece, which is what chunk_size is actually supposed to control.
 
 
 def test_max_write_splits_the_write_but_delivers_everything(env):
@@ -8325,6 +8349,18 @@ def test_a_timeout_does_not_flush_the_receive_buffer(station):
     """Flushing risks cutting a frame in half. A late reply is caught, counted as
     a stray by the next drain(), and KEPT.
 
+    The reply has to be sitting in the transport's receive buffer WHILE the
+    timeout budget is still running, not pushed in afterwards - otherwise a
+    flush_input() call inserted right before the raise would find nothing to
+    destroy and the test would stay green for the wrong reason. FakeTransport
+    burns the clock one _READ_SLICE at a time when there is nothing to read
+    (see FakeTransport.read), so the fake clock's sleep() is the one place a
+    test can land bytes exactly at the moment the budget runs out: the
+    injected sleep delivers the reply the instant the clock reaches the
+    deadline, and by then _pump has already decided remaining <= 0 and will
+    not call read() again to pick it up. That is what "sitting in the buffer
+    while the timeout is running" means here.
+
     docs/probe-results.md investigation R1 is a station that acknowledges a
     request and returns no result. The question there is whether something
     arrived late and what it was, so a counter alone is not enough: "one stray
@@ -8333,12 +8369,35 @@ def test_a_timeout_does_not_flush_the_receive_buffer(station):
     "POM read is slower than the budget".
     """
     station.open().expect(STATUS_REQUEST)
+    late_reply = station.envelope.frame(Kind.SOLICITED, STATUS_REPLY)
+    budget = 1.0
+    deadline = station.clock.monotonic() + budget
+    delivered = False
+    real_sleep = station.clock.sleep
+
+    def sleep_then_deliver_at_the_deadline(seconds: float) -> None:
+        real_sleep(seconds)
+        nonlocal delivered
+        if not delivered and station.clock.monotonic() >= deadline - 1e-9:
+            delivered = True
+            station.transport.queue(late_reply)
+
+    station.clock.sleep = sleep_then_deliver_at_the_deadline
     with pytest.raises(LinkTimeout):
-        station.link.request(STATUS_REQUEST, timeout=1.0)
-    station.push(Kind.SOLICITED, STATUS_REPLY)
+        station.link.request(STATUS_REQUEST, timeout=budget)
+    assert delivered, "the fake never reached the deadline; the timing rigging is broken"
     station.link.drain()
     assert station.link.stats().stray_replies == 1
     assert station.link.recent_late_replies() == [Frame(Kind.SOLICITED, STATUS_REPLY)]
+
+> Corrected after review: the printed version pushed the late reply only
+> AFTER the timeout had already been raised, so at flush time there was
+> nothing in the buffer to lose - inserting a `flush_input()` call right
+> before the `raise LinkTimeout(...)` in `link.py` left the whole suite green.
+> The block above rigs the fake clock to deliver the reply the instant the
+> deadline is crossed, so the bytes are genuinely sitting in the buffer while
+> the timeout is still running, and the same `flush_input()` insertion now
+> fails the test.
 
 
 def test_the_same_request_answered_first_with_silence_then_with_the_value(station):
@@ -8508,6 +8567,24 @@ def test_await_frame_that_never_matches_raises_link_timeout(station):
         station.link.await_frame(lambda f: False, timeout=1.0)
 
 
+def test_await_frame_files_a_non_matching_solicited_frame_as_a_late_reply(station):
+    """await_frame must mirror poll(): a solicited frame that does not match
+    the predicate is a late reply, not a frame silently thrown away. A
+    discarded frame leaves only a counter, and a counter cannot say what
+    arrived.
+    """
+    station.open()
+    station.push(Kind.SOLICITED, STATUS_REPLY)
+    station.push(Kind.SOLICITED, CV8_RESULT)
+    frame = station.link.await_frame(lambda f: f.payload[:2] == b"\x63\x14", timeout=1.0)
+    assert frame.payload == CV8_RESULT
+    assert station.link.recent_late_replies() == [Frame(Kind.SOLICITED, STATUS_REPLY)]
+
+> Added after review: `await_frame` used to drop a non-matching solicited frame
+> on the floor while `poll()` filed the same thing in `self._late`. This test
+> pins the fix in the `await_frame` block above.
+
+
 def test_link_never_logs_wire_bytes(station, caplog):
     """The envelope owns the wire log in both directions. Two loggers means the
     same frame printed twice, or once with the framing and once without.
@@ -8533,11 +8610,21 @@ def test_description_and_identity_come_from_the_transport(station):
     assert station.link.identity == "fake"
 
 
+def test_close_closes_the_transport(station):
+    station.open()
+    station.link.close()
+    assert station.transport.is_open is False
+
+
 def test_the_budgets_are_the_documented_ones():
     assert DEFAULT_TIMEOUT == 5.0
     assert PROGRAMMING_TIMEOUT == 95.0
     assert HANDSHAKE_TIMEOUT == 2.0
 ```
+
+> Added after review: `close()` had no test at all - coverage reported its two
+> lines as the only uncovered body in `link.py`. The block above closes that
+> gap.
 
 - [ ] **Step 2: Run the tests to verify they fail**
 
@@ -8771,9 +8858,7 @@ class Link:
                     remaining = deadline - self._clock.monotonic()
                     if remaining <= 0:
                         self._timeouts += 1
-                        raise LinkTimeout(
-                            f"no matching frame within {timeout} s; {self.stats()}"
-                        )
+                        raise LinkTimeout(f"no matching frame within {timeout} s; {self.stats()}")
                     self._envelope.feed(
                         self._transport.read(_READ_CHUNK, min(remaining, _READ_SLICE))
                     )
@@ -8782,6 +8867,17 @@ class Link:
                     self._dispatch(frame)
                 if match(frame):
                     return frame
+                if frame.kind is Kind.SOLICITED:
+                    # Mirrors poll(): a solicited frame that does not match is
+                    # a late reply, not silence. Keep the bytes - see
+                    # recent_late_replies().
+                    self._late.append(frame)
+
+> Corrected after review: the printed version dropped a solicited frame that
+> did not match, on the wire but nowhere else, while `poll()` a few lines down
+> files the same frame in `self._late`. A discarded frame leaves only a
+> counter, and a counter cannot say what arrived - so `await_frame` now mirrors
+> `poll()` instead of silently discarding.
 
     def poll(self, timeout: float = 0.0) -> list[Frame]:
         with self._lock:
@@ -8892,16 +8988,27 @@ class Link:
             return
         try:
             self._on_event(frame)
-        except Exception:  # noqa: BLE001 - a bad callback must not lose a reply
+        except Exception:  # a bad callback must not lose a reply
             _log.warning("on_event callback raised for %r", frame, exc_info=True)
 ```
+
+> Corrected after review: BLE (flake8-bugbear's blind-except code) is not in
+> this repo's ruff `select` list, so the `# noqa: BLE001` above was dead and
+> RUF100 (unused noqa) flagged it. The committed code carries a plain comment
+> instead - the exception handling itself does not change.
 
 - [ ] **Step 4: Run the tests to verify they pass**
 
 Run: `.venv/bin/python -m pytest tests/unit/test_link.py -q`
-Expected: PASS, 48 passed. The file defines 27 test functions: 21 take the `station` fixture
-and so run twice, whole-frame and byte-at-a-time (42), and 6 take no fixture parameter, so
-21 * 2 + 6 = 48.
+Expected: PASS, 52 passed. The file defines 29 test functions: 23 take the `station` fixture
+and so run twice, whole-frame and byte-at-a-time (46), and 6 take no fixture parameter, so
+23 * 2 + 6 = 52.
+
+> Corrected after review: two tests were added to close review findings
+> (`test_close_closes_the_transport` and
+> `test_await_frame_files_a_non_matching_solicited_frame_as_a_late_reply`),
+> both taking the `station` fixture, which moves the count from 27/48 to
+> 29/52.
 
 - [ ] **Step 5: Run the whole suite and lint**
 

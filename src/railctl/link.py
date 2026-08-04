@@ -229,6 +229,11 @@ class Link:
                     self._dispatch(frame)
                 if match(frame):
                     return frame
+                if frame.kind is Kind.SOLICITED:
+                    # Mirrors poll(): a solicited frame that does not match is
+                    # a late reply, not silence. Keep the bytes - see
+                    # recent_late_replies().
+                    self._late.append(frame)
 
     def poll(self, timeout: float = 0.0) -> list[Frame]:
         with self._lock:
