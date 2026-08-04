@@ -6,7 +6,31 @@ import json
 
 from tools.probe.checks import CheckResult
 
-_WORDS = {True: "yes", False: "no", None: "unknown"}
+
+def _word(value: object) -> str:
+    """The Result column for one check.
+
+    Dispatch is on identity, deliberately, and not through a lookup table. The
+    table version read `_WORDS.get(value, "see below")` with `_WORDS` keyed on
+    True/False/None, which is wrong in a way that is invisible on inspection:
+    Python hashes 0 equal to False and 1 equal to True, so a capability whose
+    value was the integer 0 rendered as the word "no" and 1 rendered as "yes".
+
+    That is this project's characteristic failure written into the renderer. A
+    CV that reads back 0 is ordinary - CV265 reads 0 on the decoder this probe
+    was built for - and it would have appeared in the human report as a
+    capability the station does not have, while the JSON report of the same run
+    said 0. Only the machine output was ever right.
+    """
+    if value is True:
+        return "yes"
+    if value is False:
+        return "no"
+    if value is None:
+        return "unknown"
+    if isinstance(value, dict):
+        return "see below"
+    return str(value)
 
 
 def _flatten(results: list[CheckResult]) -> dict[str, object]:
@@ -66,11 +90,7 @@ def to_markdown(results: list[CheckResult], *, port: str, run_at: str) -> str:
         "| --- | --- | --- |",
     ]
     for result in results:
-        if isinstance(result.value, dict):
-            word = "see below"
-        else:
-            word = _WORDS.get(result.value, "see below")
-        lines.append(f"| `{result.name}` | {word} | {result.detail} |")
+        lines.append(f"| `{result.name}` | {_word(result.value)} | {result.detail} |")
 
     lines += [
         "",
