@@ -63,20 +63,23 @@ def main(argv: list[str] | None = None) -> int:
 
         # R5 is only side-effect free if we re-assert F0's existing value, so the
         # state has to be read first. If it cannot be read, skip rather than guess:
-        # sending "F0 off" blind would switch off someone's headlight.
-        f0_is_on, f0_frames = checks.read_f0(link, args.address)
-        if f0_is_on is None:
+        # sending "F0 off" blind would switch off someone's headlight. The same
+        # reply also carries the speed step mode and the busy flag, so it is
+        # reported in its own right rather than being read for F0 and discarded.
+        loco_result, info, _ = checks.check_loco_info(link, args.address)
+        results.append(loco_result)
+        if info is None:
             results.append(
                 checks.CheckResult(
                     "single_function_cmd",
                     None,
                     "skipped: could not read F0 for this address, and the probe will not "
                     "command a function whose current value it does not know",
-                    checks._hexdump(f0_frames),
+                    loco_result.frames,
                 )
             )
         else:
-            results.append(checks.check_single_function(link, args.address, f0_is_on=f0_is_on))
+            results.append(checks.check_single_function(link, args.address, f0_is_on=info.f0))
 
         results.append(checks.check_function_groups(link, args.address))
         if args.band_address:

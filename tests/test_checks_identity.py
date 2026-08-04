@@ -1,8 +1,15 @@
 import json
 from unittest.mock import patch
 
-from tools.probe.checks import DECODER_TYPES, check_address_band, check_identity, read_f0
+from tools.probe.checks import (
+    DECODER_TYPES,
+    check_address_band,
+    check_identity,
+    check_loco_info,
+    read_f0,
+)
 from tools.probe.fake import FakeLink
+from tools.probe.frames import build
 
 VERSION = b"\x21\x21"
 STATUS = b"\x21\x24"
@@ -56,6 +63,40 @@ def test_address_band_is_unknown_when_both_forms_answer():
     reply = b"\xff\xfe\xe4\x04\x00\x00\x00\xe0"
     link = FakeLink({long_form: [reply], short_form: [reply]})
     assert check_address_band(link, address=100).value is None
+
+
+def test_address_band_does_not_count_a_rejection_as_an_answer():
+    # A 61 82 rejection is a frame like any other. Testing merely whether frames
+    # came back makes an explicit "not supported" indistinguishable from a real
+    # locomotive information reply, which silences the only informative outcome.
+    short_form = b"\xe3\x00\x00\x64"
+    long_form = b"\xe3\x00\xc0\x64"
+    link = FakeLink(
+        {
+            short_form: [build(b"\x61\x82")],
+            long_form: [b"\xff\xfe\xe4\x04\x00\x00\x00\xe0"],
+        }
+    )
+    result = check_address_band(link, address=100)
+    assert result.value == 100
+    assert "long form" in result.detail
+
+
+def test_check_loco_info_reports_speed_steps_and_the_busy_flag():
+    # E4 0C: B=1 (another device is driving), FFF=100 (128 speed steps).
+    link = FakeLink({LOCO_INFO_AT_3: [build(b"\xe4\x0c\x20\x1f\x00")]})
+    result, info, _ = check_loco_info(link, address=3)
+    assert result.value == {"speed_step_mode": 128, "loco_busy": True, "f0": True}
+    assert info.f0 is True
+    assert "another XpressNet device" in result.detail
+
+
+def test_check_loco_info_is_unknown_without_a_locomotive_information_reply():
+    link = FakeLink({LOCO_INFO_AT_3: [build(b"\x61\x1f")]})
+    result, info, frames = check_loco_info(link, address=3)
+    assert result.value is None
+    assert info is None
+    assert len(frames) == 1
 
 
 def test_read_f0_returns_true_when_f0_is_on():

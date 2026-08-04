@@ -46,9 +46,40 @@ class Status:
 
 @dataclass(frozen=True)
 class CvValue:
+    """A service-mode or POM CV read result.
+
+    `raw_cv` is the byte exactly as it arrived. `cv` is the absolute CV number
+    when the reply header determines it without ambiguity, and None otherwise:
+
+    - 0x15/0x16/0x17 are unambiguous. Lenz 23151 sections 3.1.2.7 to 3.1.2.9
+      map C = 0..255 onto CV256..511, CV512..767 and CV768..1023.
+    - 0x14 is NOT decoded. In service mode it is one-based (C=1 is CV1, C=0 is
+      CV1024), but the same header carries POM results whose convention on this
+      command station is exactly what check_pom_read is measuring. Guessing here
+      would report a CV number the probe has not established.
+    """
+
     raw_cv: int
     value: int
     ident: int
+    cv: int | None = None
+
+
+@dataclass(frozen=True)
+class RegisterValue:
+    """Reply 0x63 0x10 - Register or Paged mode, NOT a direct CV read.
+
+    XpressNet section 2.1.5.5: when this arrives in answer to a Direct Mode
+    request, the command station has determined that the decoder does not
+    support Direct Mode and has fallen back. Data byte 2 is then a register
+    number, not a CV number, so it must never be read as a CV value.
+    """
+
+    register: int
+    value: int
+
+
+_SPEED_STEP_MODES = {0b000: 14, 0b001: 27, 0b010: 28, 0b100: 128}
 
 
 @dataclass(frozen=True)
@@ -58,6 +89,17 @@ class LocoInfo:
     f0: bool
     f1_f4: int
     f5_f12: int
+
+    # Identification byte is 0000 BFFF (XpressNet section 2.1.14.1).
+    @property
+    def busy(self) -> bool:
+        """True = another XpressNet device is controlling this locomotive."""
+        return bool(self.ident & 0x08)
+
+    @property
+    def speed_step_mode(self) -> int | None:
+        """14, 27, 28 or 128 speed steps; None for a reserved bit pattern."""
+        return _SPEED_STEP_MODES.get(self.ident & 0x07)
 
 
 @dataclass(frozen=True)
@@ -71,14 +113,28 @@ SHORT_CIRCUIT = Marker("short_circuit")
 NO_ACK = Marker("no_ack")
 BUSY = Marker("busy")
 UNSUPPORTED = Marker("unsupported")
+TRANSFER_ERROR = Marker("transfer_error")
+STATION_BUSY = Marker("station_busy")
 
-_PROGRAMMING_MARKERS = {
+# Every reply that shares header 0x61. The two at 0x80 and 0x81 are easy to
+# forget because they are not programming replies, but leaving them unparsed
+# is dangerous: an unrecognised frame looks like an ordinary reply, and a
+# station saying "I could not process that" would be recorded as one saying
+# "I support that". See TRANSIENT below.
+_HEADER_61_REPLIES = {
     0x11: READY,
     0x12: SHORT_CIRCUIT,
     0x13: NO_ACK,
     0x1F: BUSY,
+    0x80: TRANSFER_ERROR,
+    0x81: STATION_BUSY,
     0x82: UNSUPPORTED,
 }
+
+# The station told us it could not act right now. None of these say anything
+# about whether an opcode is implemented, so every capability check must treat
+# them as unresolved rather than as an answer either way.
+TRANSIENT = (SHORT_CIRCUIT, BUSY, STATION_BUSY, TRANSFER_ERROR)
 
 
 @dataclass(frozen=True)
@@ -86,7 +142,11 @@ class Unknown:
     telegram: bytes
 
 
-Reply = Version | Status | CvValue | LocoInfo | Marker | Unknown
+Reply = Version | Status | CvValue | RegisterValue | LocoInfo | Marker | Unknown
+
+# Lenz 23151 sections 3.1.2.7 to 3.1.2.9: the reply header names the band, and
+# C = 0..255 is an offset from its base. 0x14 is absent on purpose - see CvValue.
+_EXT_BAND_BASE = {0x15: 256, 0x16: 512, 0x17: 768}
 
 
 def parse(telegram: bytes) -> Reply:
@@ -103,8 +163,16 @@ def parse(telegram: bytes) -> Reply:
         )
     if header == 0x62 and db0 == 0x22 and len(telegram) >= 3:
         return Status(raw=telegram[2])
-    if header == 0x63 and db0 in (0x10, 0x14) and len(telegram) >= 4:
-        return CvValue(raw_cv=telegram[2], value=telegram[3], ident=db0)
+    if header == 0x63 and db0 == 0x10 and len(telegram) >= 4:
+        return RegisterValue(register=telegram[2], value=telegram[3])
+    if header == 0x63 and (db0 == 0x14 or db0 in _EXT_BAND_BASE) and len(telegram) >= 4:
+        base = _EXT_BAND_BASE.get(db0)
+        return CvValue(
+            raw_cv=telegram[2],
+            value=telegram[3],
+            ident=db0,
+            cv=None if base is None else base + telegram[2],
+        )
     if header == 0xE4 and len(telegram) >= 5:
         return LocoInfo(
             ident=db0,
@@ -113,8 +181,8 @@ def parse(telegram: bytes) -> Reply:
             f1_f4=telegram[3] & 0x0F,
             f5_f12=telegram[4],
         )
-    if header == 0x61 and db0 in _PROGRAMMING_MARKERS:
-        return _PROGRAMMING_MARKERS[db0]
+    if header == 0x61 and db0 in _HEADER_61_REPLIES:
+        return _HEADER_61_REPLIES[db0]
     if header == 0x01 and db0 == 0x04:
         return ACK
     return Unknown(telegram=telegram)
