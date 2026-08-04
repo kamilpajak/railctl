@@ -139,6 +139,38 @@ The request is **zero-based** (`23 11 00 07` reads CV8) and the reply echo is
 **one-based** (`63 14 08`). Band replies carry the offset from the band base: `63 15 09`
 is CV256 + 9 = CV265.
 
+### Service-mode WRITE works
+
+Tested on CV3 (acceleration rate), read first, changed, verified, restored:
+
+```
+read  CV3            = 26          original
+write 24 12 00 02 24 → 63 14 03 24 station echoes CV3 = 36
+read  CV3            = 36          change confirmed
+write 24 12 00 02 1A → restored
+read  CV3            = 26          back to the original value
+```
+
+The write reply **echoes the value that was written**, so a service-mode write can be
+verified from the protocol alone. POM writes have no acknowledgement at all by design, so
+this is a real advantage of the service-mode path, not just a fallback.
+
+`restore` therefore has a proven path. It is no longer gated.
+
+### Timing: the 4–5 s spacing claim was wrong
+
+Also an artefact of the missing poll. With the poll in place, nine consecutive reads at
+gaps of 0.2 s, 1.0 s and 2.5 s were all correct (CV8 = 145 every time). Spacing does not
+matter.
+
+Real hardware latency for one service read is **about 1.7 s**. A 77 CV backup is therefore
+roughly **2.2 minutes**, not the 6–7 minutes estimated earlier.
+
+**Open performance issue for M2:** `SerialLink.collect` always waits the full window even
+after the reply has arrived, so an 8 s `SERVICE_WINDOW` turns a 1.7 s read into an 8 s one
+and a backup into ten minutes of waiting. `collect` should return as soon as a satisfying
+reply is parsed.
+
 ### Consequence for the design
 
 The design chose **POM on the main track as the primary CV path**, with service mode
