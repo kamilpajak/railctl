@@ -91,6 +91,19 @@ def test_extended_read_picks_the_right_band_opcode():
     assert build(service_ext_read(1)) == b"\xff\xfe\x22\x18\x01\x3b"
     assert build(service_ext_read(256)) == b"\xff\xfe\x22\x19\x00\x3b"
     assert build(service_ext_read(300)) == b"\xff\xfe\x22\x19\x2c\x17"
+    assert build(service_ext_read(1023)) == build(b"\x22\x1b\xff")
+
+
+def test_cv1024_rides_on_the_first_band_at_offset_zero():
+    # Lenz 23151 section 3.2.7: on 0x22 0x18 the data byte 0 means CV1024,
+    # and 1..255 mean CV1..255. Rejecting CV1024 would make the top CV of the
+    # documented range unreachable.
+    assert service_ext_read(1024) == b"\x22\x18\x00"
+
+
+def test_the_extended_read_refuses_a_cv_above_the_documented_range():
+    with pytest.raises(ValueError, match="1025"):
+        service_ext_read(1025)
 
 
 def test_z21_service_read_uses_16_bit_zero_based_addressing():
