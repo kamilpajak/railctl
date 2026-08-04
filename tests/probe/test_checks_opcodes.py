@@ -123,9 +123,9 @@ def test_function_groups_re_assert_the_current_state_instead_of_clearing_it():
 
 # --- R2 / R4, anchored on a known constant instead of on a sibling opcode ---
 
-EXT_CV8 = b"\x22\x18\x08"          # service_ext_read(8), band 0
-EXT_CV265 = b"\x22\x19\x09"        # service_ext_read(265), band 1
-Z21_CV8 = b"\x23\x11\x00\x07"      # z21_service_read(8), zero-based
+EXT_CV8 = b"\x22\x18\x08"  # service_ext_read(8), band 0
+EXT_CV265 = b"\x22\x19\x09"  # service_ext_read(265), band 1
+Z21_CV8 = b"\x23\x11\x00\x07"  # z21_service_read(8), zero-based
 CV8_IS_145 = build(b"\x63\x14\x08\x91")
 CV265_ON_BAND_15 = build(b"\x63\x15\x09\x2d")
 

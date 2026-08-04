@@ -200,9 +200,7 @@ def test_a_reference_read_is_only_believed_when_the_constant_matches(value: int)
 
 
 @given(st.integers(min_value=0, max_value=255), st.integers(min_value=0, max_value=255))
-def test_a_pom_result_for_another_cv_is_not_an_answer_to_this_request(
-    echo: int, value: int
-):
+def test_a_pom_result_for_another_cv_is_not_an_answer_to_this_request(echo: int, value: int):
     """The echoed CV number decides whether the reply belongs to this request.
 
     Accepting a mismatched echo would publish another CV's value under this

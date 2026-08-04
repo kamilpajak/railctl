@@ -138,9 +138,12 @@ def test_f0_comes_from_bit_4_alone(fa: int, f0: bool, f1_f4: int):
 @pytest.mark.parametrize(
     ("band", "raw_cv", "cv"),
     [
-        (0x15, 0x00, 256), (0x15, 0xFF, 511),
-        (0x16, 0x00, 512), (0x16, 0xFF, 767),
-        (0x17, 0x00, 768), (0x17, 0xFF, 1023),
+        (0x15, 0x00, 256),
+        (0x15, 0xFF, 511),
+        (0x16, 0x00, 512),
+        (0x16, 0xFF, 767),
+        (0x17, 0x00, 768),
+        (0x17, 0xFF, 1023),
     ],
 )
 def test_each_band_decodes_at_both_of_its_ends(band: int, raw_cv: int, cv: int):

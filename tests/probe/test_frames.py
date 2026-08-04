@@ -99,7 +99,15 @@ def test_a_genuinely_incomplete_frame_is_still_kept_for_the_next_read():
 
 def test_a_frame_survives_arbitrary_leading_noise():
     good = build(b"\x63\x14\x08\x91")
-    for junk in (b"", b"\x00", b"\xff", LI_COMMAND, LI_BROADCAST, LI_COMMAND * 2,
-                 b"\xff\xfe\x63", b"[CS0] M: TC 0mA\r\n"):
+    for junk in (
+        b"",
+        b"\x00",
+        b"\xff",
+        LI_COMMAND,
+        LI_BROADCAST,
+        LI_COMMAND * 2,
+        b"\xff\xfe\x63",
+        b"[CS0] M: TC 0mA\r\n",
+    ):
         frames, _ = split_frames(junk + good)
         assert [f.telegram for f in frames] == [b"\x63\x14\x08\x91"], junk.hex()

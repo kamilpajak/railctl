@@ -1,29 +1,77 @@
 [project]
-name = "railctl-probe"
-version = "0.0.0"
-description = "Hardware capability probe for the YaMoRC YD7010 (railctl milestone M1)"
+name = "railctl"
+dynamic = ["version"]
+description = "Drive a YaMoRC YD7010 and read or write ZIMO decoder CVs over XpressNet"
+readme = "README.md"
 requires-python = ">=3.11"
-dependencies = []
+dependencies = ["typer>=0.12"]
 
-[project.optional-dependencies]
-# hypothesis drives the property tests in tests/test_*_properties.py.
-# cosmic-ray is the mutation-testing runner; see docs/test-hardening.md for the
-# per-module configs and the operator recipe. Neither is imported by the probe
-# itself, so a hardware run needs none of this.
-dev = [
-    "pytest>=8.0.0",
-    "ruff>=0.4.0",
-    "hypothesis>=6.140.0",
-    "cosmic-ray>=8.4.0",
-]
+[dependency-groups]
+# typer is the only runtime dependency; the serial port is stdlib os + termios.
+dev = ["pytest>=8", "pytest-cov>=5", "hypothesis>=6.100,<7", "ruff>=0.5"]
+# cosmic-ray is deliberately NOT in `dev`. It drags in aiohttp and gitpython,
+# it is only ever run by hand against mutation/*.toml, and CI must not have to
+# resolve it on four Python versions to tell us whether the codec is correct.
+# `[dependency-groups]` (PEP 735) rather than `[project.optional-dependencies]`:
+# these are development-only groups, never installable by someone who `pip
+# install`s the published distribution, which is exactly what a group is for
+# and an extra is not.
+mutation = ["cosmic-ray>=8.4.0"]
+
+[project.scripts]
+railctl = "railctl.cli.main:app"
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[tool.hatch.version]
+path = "src/railctl/__init__.py"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/railctl"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
-addopts = "-q"
+# "src" makes railctl importable without a reinstall; "." keeps `import tools.probe`
+# working now that the probe is no longer covered by an editable install.
+pythonpath = ["src", "."]
+addopts = "-q --strict-markers --strict-config -m 'not hardware'"
+markers = ["hardware: needs the physical YD7010; deselected by default"]
 
 [tool.ruff]
-line-length = 100
 target-version = "py311"
+line-length = 100
+# "." rather than the spec's "tests": `tools` and `tests` are both top-level
+# import roots in this repo, and isort classifies them as third-party without it.
+# It does NOT do the same job for `railctl` - see [tool.ruff.lint.isort] below.
+src = ["src", "."]
+# docs/ holds the design spec, the plans and the pre-M1 scratch script. ruff
+# formats fenced Python inside Markdown, and reformatting the authoritative spec
+# would be a silent edit to the document the plan is checked against.
+extend-exclude = ["docs"]
 
 [tool.ruff.lint]
-select = ["E", "F", "I", "UP", "B", "SIM"]
+select = ["E", "W", "F", "I", "B", "C4", "UP", "S", "RUF"]
+ignore = ["E501"]
+
+# `src` above does not make `railctl` first-party; only this does. Measured, not
+# assumed - see the paragraph under this block.
+[tool.ruff.lint.isort]
+known-first-party = ["railctl"]
+
+[tool.ruff.lint.per-file-ignores]
+"tests/**/*.py" = ["S101"]
+# tools/probe is frozen M1 output. Its cosmic-ray baseline in docs/test-hardening.md
+# was measured against this exact AST; rewriting map()+lambda into a generator
+# expression to satisfy a new lint rule would invalidate a measured number for a
+# cosmetic gain.
+"tools/**/*.py" = ["C417"]
+
+[tool.coverage.run]
+source = ["railctl"]
+branch = true
+omit = ["src/railctl/transport/serial_posix.py"]
+
+[tool.coverage.report]
+fail_under = 90
