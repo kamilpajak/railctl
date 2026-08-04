@@ -127,13 +127,19 @@ def test_a_read_that_finds_bytes_does_not_advance_the_clock(env):
 
 
 def test_chunk_size_one_replays_worst_case_usb_fragmentation(env):
+    """Asserts the size of every individual piece, not just the reassembled total.
+
+    A FakeTransport that ignores chunk_size and hands back the whole frame on
+    the first read (then b"" on every read after) would satisfy a bare
+    `got == framed` check. Asserting each piece is exactly one byte long is
+    what actually proves fragmentation was replayed.
+    """
     transport = _open(chunk_size=1)
     framed = env.frame(Kind.SOLICITED, VERSION_REPLY)
     transport.queue(framed)
-    got = b""
-    for _ in range(len(framed)):
-        got += transport.read(256, 0.1)
-    assert got == framed
+    pieces = [transport.read(256, 0.1) for _ in range(len(framed))]
+    assert [len(piece) for piece in pieces] == [1] * len(framed)
+    assert b"".join(pieces) == framed
 
 
 def test_max_write_splits_the_write_but_delivers_everything(env):
