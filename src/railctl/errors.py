@@ -14,6 +14,13 @@ The distinction this project exists to preserve is between three answers:
 They are three classes with three exit codes (5, 6, 7) because collapsing them
 is exactly how milestone M1 recorded four capabilities as absent when the
 instrument, not the hardware, was at fault.
+
+These sixteen exit codes are a versioned public contract. Within a major version
+no code may be renumbered, repurposed, or retired; a new error class claims an
+unused code above 20 instead of reusing one of these. A future JSON envelope (M5
+and later) can carry a stable machine-readable `error.code` string alongside the
+process exit status, and that is where new domain detail belongs, not in a new
+exit code.
 """
 
 from __future__ import annotations
@@ -90,7 +97,7 @@ class UnsupportedFeatureError(RailctlError):
 
 
 class StationError(RailctlError):
-    """Facade-level base."""
+    """Facade-level base. Has no row in EXIT_CODES on purpose; it resolves to the base 9."""
 
 
 class TrackPowerError(StationError):

@@ -3,6 +3,12 @@
 They are text scans, not import checks: an import check only fires once a module
 is imported, and these rules must hold for code no test exercises.
 
+Being line-oriented text scans, they cannot see a violation split across two lines,
+or one assembled by string concatenation. Rule 2's regexes additionally match only
+the literal spellings `cv - 1`, `% 256`, `>> 8`, and `<< 8`; the same arithmetic
+under a different variable name passes. They narrow where a violation can hide, not
+prove one is absent.
+
 Every guard is written so it cannot pass by finding nothing. `_offenders` is
 proved against a planted violation, and the whole-package rules assert that the
 file list they scanned is non-empty. A guard that silently scans zero files is
