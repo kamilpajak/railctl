@@ -1,0 +1,26 @@
+# Cosmic Ray mutation-testing config — target: tools/probe/commands.py
+#
+# Run from the REPO ROOT so the relative paths resolve. See
+# docs/test-hardening.md for the operator recipe and the triage rules.
+#
+#   uv run --active cosmic-ray init mutation/commands.toml /tmp/cr-commands.sqlite
+#   HYPOTHESIS_PROFILE=mutation .venv/bin/cosmic-ray exec mutation/commands.toml /tmp/cr-commands.sqlite
+#   .venv/bin/cr-rate /tmp/cr-commands.sqlite
+#
+# NEVER wrap `exec` in an external timeout or kill it with SIGTERM. cosmic-ray
+# mutates the file IN PLACE and reverts it after each mutant, so a hard kill
+# mid-mutant leaves the source mutated. Recover with:
+#   git checkout -- tools/probe/commands.py
+
+[cosmic-ray]
+module-path = "tools/probe/commands.py"
+# The whole suite, not a per-module subset. Survival is only meaningful against
+# the tests that actually run, and railctl's cross-module properties (a command
+# built here, its reply parsed there) live in files named after the other module.
+# At ~1.8 s a run under the mutation profile, the whole suite is affordable.
+test-command = ".venv/bin/python -m pytest -q -x"
+timeout = 60.0
+excluded-modules = []
+
+[cosmic-ray.distributor]
+name = "local"
