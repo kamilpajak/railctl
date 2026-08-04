@@ -81,6 +81,24 @@ def test_salvage_continues_scanning_after_it_rescues_a_frame():
     assert rest == b""
 
 
+def test_a_frame_already_returned_is_never_returned_again():
+    """Salvage resumes from where the scan is, never from where it started.
+
+    Restarting the scan at the front of the buffer re-finds a frame that was
+    already emitted, so the reply is counted twice and the scan position is
+    dragged backwards - which then walks into the same stray prefix and restarts
+    again. The buffer below has a frame BEFORE the stray prefix, which is what
+    makes the difference visible; every other test here has the stray prefix
+    first, where restarting from zero lands in the same place anyway.
+    """
+    first = b"\x63\x14\x08\x91"
+    second = b"\x61\x01"
+    buffer = build(first) + NOISE + LI_COMMAND + build(second)
+    frames, rest = split_frames(buffer)
+    assert [f.telegram for f in frames] == [first, second]
+    assert rest == b""
+
+
 def test_salvage_after_a_late_stray_prefix_still_returns_every_frame():
     """The two cases above, together: a far-in stray prefix and several frames."""
     payloads = [b"\x63\x14\x08\x91", b"\x61\x01", b"\x62\x22\x00"]
