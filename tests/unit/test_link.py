@@ -151,6 +151,18 @@ def test_a_timeout_does_not_flush_the_receive_buffer(station):
     """Flushing risks cutting a frame in half. A late reply is caught, counted as
     a stray by the next drain(), and KEPT.
 
+    The reply has to be sitting in the transport's receive buffer WHILE the
+    timeout budget is still running, not pushed in afterwards - otherwise a
+    flush_input() call inserted right before the raise would find nothing to
+    destroy and the test would stay green for the wrong reason. FakeTransport
+    burns the clock one _READ_SLICE at a time when there is nothing to read
+    (see FakeTransport.read), so the fake clock's sleep() is the one place a
+    test can land bytes exactly at the moment the budget runs out: the
+    injected sleep delivers the reply the instant the clock reaches the
+    deadline, and by then _pump has already decided remaining <= 0 and will
+    not call read() again to pick it up. That is what "sitting in the buffer
+    while the timeout is running" means here.
+
     docs/probe-results.md investigation R1 is a station that acknowledges a
     request and returns no result. The question there is whether something
     arrived late and what it was, so a counter alone is not enough: "one stray
@@ -159,9 +171,23 @@ def test_a_timeout_does_not_flush_the_receive_buffer(station):
     "POM read is slower than the budget".
     """
     station.open().expect(STATUS_REQUEST)
+    late_reply = station.envelope.frame(Kind.SOLICITED, STATUS_REPLY)
+    budget = 1.0
+    deadline = station.clock.monotonic() + budget
+    delivered = False
+    real_sleep = station.clock.sleep
+
+    def sleep_then_deliver_at_the_deadline(seconds: float) -> None:
+        real_sleep(seconds)
+        nonlocal delivered
+        if not delivered and station.clock.monotonic() >= deadline - 1e-9:
+            delivered = True
+            station.transport.queue(late_reply)
+
+    station.clock.sleep = sleep_then_deliver_at_the_deadline
     with pytest.raises(LinkTimeout):
-        station.link.request(STATUS_REQUEST, timeout=1.0)
-    station.push(Kind.SOLICITED, STATUS_REPLY)
+        station.link.request(STATUS_REQUEST, timeout=budget)
+    assert delivered, "the fake never reached the deadline; the timing rigging is broken"
     station.link.drain()
     assert station.link.stats().stray_replies == 1
     assert station.link.recent_late_replies() == [Frame(Kind.SOLICITED, STATUS_REPLY)]
@@ -334,6 +360,20 @@ def test_await_frame_that_never_matches_raises_link_timeout(station):
         station.link.await_frame(lambda f: False, timeout=1.0)
 
 
+def test_await_frame_files_a_non_matching_solicited_frame_as_a_late_reply(station):
+    """await_frame must mirror poll(): a solicited frame that does not match
+    the predicate is a late reply, not a frame silently thrown away. A
+    discarded frame leaves only a counter, and a counter cannot say what
+    arrived.
+    """
+    station.open()
+    station.push(Kind.SOLICITED, STATUS_REPLY)
+    station.push(Kind.SOLICITED, CV8_RESULT)
+    frame = station.link.await_frame(lambda f: f.payload[:2] == b"\x63\x14", timeout=1.0)
+    assert frame.payload == CV8_RESULT
+    assert station.link.recent_late_replies() == [Frame(Kind.SOLICITED, STATUS_REPLY)]
+
+
 def test_link_never_logs_wire_bytes(station, caplog):
     """The envelope owns the wire log in both directions. Two loggers means the
     same frame printed twice, or once with the framing and once without.
@@ -362,6 +402,12 @@ def test_description_and_identity_come_from_the_transport(station):
     station.open()
     assert station.link.description == "fake xpressnet"
     assert station.link.identity == "fake"
+
+
+def test_close_closes_the_transport(station):
+    station.open()
+    station.link.close()
+    assert station.transport.is_open is False
 
 
 def test_the_budgets_are_the_documented_ones():

@@ -129,7 +129,7 @@ def test_a_stray_prefix_further_into_the_buffer_still_resyncs(env):
     is always even) can coincide with it by chance and the mutant hides behind
     a green suite - that is exactly what happened when this test fed a stray
     prefix at an even offset: `_complete_at(1 << 1)` found the same frame
-    `_complete_at(2)` would have, and the mutant passed. The extra `\xff` here
+    `_complete_at(2)` would have, and the mutant passed. The extra `0xFF` here
     pushes the real frame to offset 3 so the two expressions diverge.
     """
     env.feed(b"\xff\xfe" + ACK + b"\xff\xfe\xff" + b"\xff\xfe" + VERSION_REPLY)
