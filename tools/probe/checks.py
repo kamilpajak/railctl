@@ -56,6 +56,16 @@ def check_pom_read(link: Link, address: int, cv: int = 8, *, poll: bool) -> Chec
     """R1. CV8 is used by default because its ZIMO value is a known constant (145),
     so a plausible-but-wrong reading is detectable."""
     wire = commands.cv_wire(cv)
+
+    # Drain first. 0x21 0x10 returns the station's STORED service-mode result, and
+    # that store lives in the command station, not in this process - flushing the
+    # host file descriptor does not clear it. A probe run after any service-mode
+    # read could otherwise poll up a leftover value and record pom_read as True on
+    # hardware that cannot do it at all. Whatever this discards belongs to an
+    # earlier operation by definition, because the POM read has not been sent yet.
+    if poll:
+        link.exchange(commands.service_result(), window=1.0)
+
     frames = link.exchange(commands.pom_read(address, cv), window=POM_WINDOW)
     channel = "broadcast"
 
@@ -78,6 +88,18 @@ def check_pom_read(link: Link, address: int, cv: int = 8, *, poll: bool) -> Chec
                 echo_zero_based = True
             elif reply.raw_cv == cv:
                 echo_zero_based = False
+            else:
+                # The reply is for a different CV than the one asked for, so it is
+                # not an answer to this request. Treat it as nothing established
+                # rather than reporting another CV's value under this CV's name.
+                return CheckResult(
+                    "pom_read",
+                    _unresolved(),
+                    f"a CV result came back but its echo is {reply.raw_cv}, which is"
+                    f" neither CV{cv} nor its zero-based form {wire}: not an answer"
+                    " to this request",
+                    dump,
+                )
             return CheckResult(
                 "pom_read",
                 {
@@ -224,145 +246,84 @@ def _read_value(link: Link, payload: bytes) -> ReadOutcome:
 # (265, 266, 273-277, 287, 288, 313, 314, 395-397).
 HIGH_BAND_CV = 265
 
+# A CV whose correct value is known independently of any opcode. CV8 carries the
+# NMRA manufacturer id and reads 145 on every ZIMO decoder.
+#
+# Anchoring on this rather than on a sibling opcode is deliberate. The checks used
+# to validate one opcode by comparing it against another, so when the comparison
+# opcode returned nothing the check reported "unknown" for a capability it had
+# just demonstrated - the instrument recording its own gap as a fact about the
+# hardware. That is the same failure as the missing 21 10 poll. A constant cannot
+# fail to answer.
+#
+# It also catches what a peer comparison cannot: an off-by-one in the CV encoding
+# returns a plausible number from the wrong CV, and two opcodes sharing the bug
+# would agree with each other.
+REFERENCE_CV = 8
+REFERENCE_VALUE = 145
+
+
+def _verdict(outcome: ReadOutcome, cv: int, expected: int | None) -> tuple[bool | None, str]:
+    """Grade one read against a known constant. Only contradiction may say False."""
+    if outcome.status == "unsupported":
+        return False, "station answered 61 82: opcode not implemented"
+    if outcome.status == "register_fallback":
+        return None, "station fell back to Register/Paged mode; no CV value established"
+    if outcome.status != "ok":
+        return None, f"no value came back ({outcome.status})"
+    if outcome.reply_cv is not None and outcome.reply_cv != cv:
+        return None, f"reply decodes as CV{outcome.reply_cv}, not the CV{cv} requested"
+    if expected is not None and outcome.value != expected:
+        return None, f"CV{cv} read back {outcome.value}, expected the known {expected}"
+    return True, f"CV{cv} read back {outcome.value}"
+
 
 def check_service_ext_cv(link: Link, high_cv: int = HIGH_BAND_CV) -> CheckResult:
-    """R2. Two separate questions, because passing the first does not imply the second.
+    """R2. Two separate questions, each anchored on evidence that cannot fail to answer.
 
-    1. Does the 4-byte format work at all? Read CV1 with 0x22 0x18 and compare
-       it against the legacy 0x22 0x15 read of CV1.
-    2. Do the bands ABOVE CV255 work? Band 0x18 overlaps the legacy opcode, so
-       a station could implement it and still reject 0x19/0x1A/0x1B. Only this
-       second question decides whether railctl can reach the ZIMO CVs it needs,
-       so it is asked explicitly instead of being inferred from the first.
+    1. Does the 4-byte format work at all? Read the reference CV with 0x22 0x18 and
+       require the known constant back.
+    2. Do the bands ABOVE CV255 work? Band 0x18 overlaps the legacy opcode, so a
+       station could implement it and still reject 0x19. Only this second question
+       decides whether railctl can reach the ZIMO CVs it needs. There is no known
+       constant up there, so the check requires the reply to decode back to the CV
+       that was asked for.
+
+    Neither question is answered by comparing one opcode against another.
     """
-    low = _read_value(link, commands.service_ext_read(1))
-    if low.status == "unsupported":
+    low = _read_value(link, commands.service_ext_read(REFERENCE_CV))
+    low_ok, low_detail = _verdict(low, REFERENCE_CV, REFERENCE_VALUE)
+
+    if low_ok is not True:
         return CheckResult(
             "service_ext_cv",
-            {"service_ext_cv": False, "service_ext_cv_high_band": False,
+            {"service_ext_cv": low_ok, "service_ext_cv_high_band": None,
              "service_ext_cv_high_value": None},
-            "station answered 61 82 to 22 18: extended opcodes absent, so the high"
-            " bands were not probed",
+            f"22 18: {low_detail}; the high band was not probed",
             _hexdump(low.frames),
         )
 
-    direct = _read_value(link, commands.service_direct_read(1))
-    base_dump = _hexdump(low.frames) + _hexdump(direct.frames)
-
-    if low.status == "register_fallback" or direct.status == "register_fallback":
-        return CheckResult(
-            "service_ext_cv",
-            {"service_ext_cv": None, "service_ext_cv_high_band": None,
-             "service_ext_cv_high_value": None},
-            "station answered 63 10: the decoder does not support Direct Mode and the"
-            " station fell back to Register/Paged mode, so no CV value was established",
-            base_dump,
-        )
-    if low.value is None or direct.value is None:
-        return CheckResult(
-            "service_ext_cv",
-            {"service_ext_cv": None, "service_ext_cv_high_band": None,
-             "service_ext_cv_high_value": None},
-            f"no value from one of the two CV1 reads (extended {low.status},"
-            f" direct {direct.status})",
-            base_dump,
-        )
-    if low.value != direct.value:
-        return CheckResult(
-            "service_ext_cv",
-            {"service_ext_cv": None, "service_ext_cv_high_band": None,
-             "service_ext_cv_high_value": None},
-            f"CV1 reads disagree: extended {low.value}, direct {direct.value}",
-            base_dump,
-        )
-
     high = _read_value(link, commands.service_ext_read(high_cv))
-    dump = base_dump + _hexdump(high.frames)
-    detail = f"extended and direct reads of CV1 both returned {low.value}"
-
-    if high.status == "unsupported":
-        return CheckResult(
-            "service_ext_cv",
-            {"service_ext_cv": True, "service_ext_cv_high_band": False,
-             "service_ext_cv_high_value": None},
-            f"{detail}, but the station answered 61 82 to the CV{high_cv} read:"
-            " CVs above 255 are NOT reachable this way",
-            dump,
-        )
-    if high.status != "ok":
-        return CheckResult(
-            "service_ext_cv",
-            {"service_ext_cv": True, "service_ext_cv_high_band": None,
-             "service_ext_cv_high_value": None},
-            f"{detail}, but the CV{high_cv} read came back {high.status}:"
-            " the high bands are not established",
-            dump,
-        )
-    if high.reply_cv is None:
-        # A value arrived, so the band was served, but the reply form does not
-        # identify which CV it answers for: the Z21 0x64 0x14 form carries the
-        # address under a convention this probe has not established. Report the
-        # capability, and say plainly that the echo could not be cross-checked.
-        return CheckResult(
-            "service_ext_cv",
-            {"service_ext_cv": True, "service_ext_cv_high_band": True,
-             "service_ext_cv_high_value": high.value},
-            f"{detail}; the CV{high_cv} read returned {high.value}, so CVs above 255"
-            " are reachable, but the reply form does not identify the CV it answers"
-            " for, so the echo was not cross-checked",
-            dump,
-        )
-    # The reply band echoes the CV it answers for, so a mismatch means the
-    # station is not using the banding this code assumes.
-    if high.reply_cv != high_cv:
-        return CheckResult(
-            "service_ext_cv",
-            {"service_ext_cv": True, "service_ext_cv_high_band": None,
-             "service_ext_cv_high_value": high.value},
-            f"{detail}, but the reply to the CV{high_cv} read decodes as CV{high.reply_cv}:"
-            " the station bands CVs differently than assumed",
-            dump,
-        )
+    high_ok, high_detail = _verdict(high, high_cv, None)
+    dump = _hexdump(low.frames) + _hexdump(high.frames)
     return CheckResult(
         "service_ext_cv",
-        {"service_ext_cv": True, "service_ext_cv_high_band": True,
+        {"service_ext_cv": True, "service_ext_cv_high_band": high_ok,
          "service_ext_cv_high_value": high.value},
-        f"{detail}; CV{high_cv} read back {high.value} on band 0x19, so CVs above 255"
-        " are reachable",
+        f"22 18: {low_detail}. 22 19 for CV{high_cv}: {high_detail}",
         dump,
     )
 
 
 def check_z21_opcodes(link: Link) -> CheckResult:
-    """R4. Only the READ opcode 23 11 is probed. Never 24 12, which would write."""
-    z21 = _read_value(link, commands.z21_service_read(29))
-    if z21.status == "unsupported":
-        return CheckResult(
-            "z21_cv_opcodes", False, "station answered 61 82 to 23 11: Z21 CV opcodes absent",
-            _hexdump(z21.frames),
-        )
-    direct = _read_value(link, commands.service_direct_read(29))
-    dump = _hexdump(z21.frames) + _hexdump(direct.frames)
-    if z21.status == "register_fallback" or direct.status == "register_fallback":
-        return CheckResult(
-            "z21_cv_opcodes", None,
-            "station answered 63 10: it fell back to Register/Paged mode, so the number"
-            " returned is a register and not a CV value", dump,
-        )
-    if z21.value is None or direct.value is None:
-        return CheckResult(
-            "z21_cv_opcodes", None,
-            f"no value from one of the two reads (Z21 {z21.status}, direct {direct.status})",
-            dump,
-        )
-    if z21.value != direct.value:
-        return CheckResult(
-            "z21_cv_opcodes", None,
-            f"reads disagree: Z21 {z21.value}, direct {direct.value}", dump,
-        )
-    return CheckResult(
-        "z21_cv_opcodes", True, f"Z21 and direct reads of CV29 both returned {z21.value}", dump
-    )
+    """R4. Only the READ opcode 23 11 is probed. Never 24 12, which would write.
+
+    Validated against the reference constant, not against another opcode: a silent
+    peer must never downgrade a capability this check has demonstrated.
+    """
+    z21 = _read_value(link, commands.z21_service_read(REFERENCE_CV))
+    ok, detail = _verdict(z21, REFERENCE_CV, REFERENCE_VALUE)
+    return CheckResult("z21_cv_opcodes", ok, f"23 11: {detail}", _hexdump(z21.frames))
 
 
 def _accepted(link: Link, payload: bytes, window: float = 2.0) -> tuple[bool | None, list]:
