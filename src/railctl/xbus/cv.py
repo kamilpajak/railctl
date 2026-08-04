@@ -86,15 +86,6 @@ SERVICE_RESULT_IDENTS = (0x14, 0x15, 0x16, 0x17)
 _BYTE_MIN = 0
 _BYTE_MAX = 255
 
-# The largest 1-based CV each zero-based encoding can address, used to bound the
-# INVERSE in decode_echo. The 16-bit wire field is not the bound: it holds 65536
-# values while these encodings address 1024 CVs, and an unbounded inverse turns
-# a garbage echo into a plausible-looking CV number.
-_ZERO_BASED_MAXIMA = {
-    CvEncoding.POM_ZERO_BASED: MAX_CV_POM,
-    CvEncoding.Z21_16BIT: MAX_CV_Z21,
-}
-
 
 def _check_range(cv: int, maximum: int, what: str) -> None:
     """Guard a 1-based USER CV number.
@@ -143,6 +134,26 @@ def direct_cv_byte(cv: int) -> int:
     return cv
 
 
+def _band_fields(cv: int) -> tuple[int, int]:
+    """`(page, C)` - the band arithmetic the extended encoding and the Z21 echo
+    share, factored out so there is exactly one place a CV becomes a band byte.
+
+    CV1024 rides band 0's vacant slot 0, so it stays reachable even though
+    `cv // 256` would put it past the last band. Bands 1..3 are 256 wide and
+    aligned, so `cv & 0xFF` is exactly `cv - 256 * page` for them, and the
+    identity for band 0.
+
+    This does NOT range-check `cv`: each caller has already checked it against
+    its own valid CV space, because that space differs between them (the
+    extended encoding excepts CV1024 from its normal 1..1023 range; Z21 does
+    not need the exception, since its range is 1..1024 outright). Folding a
+    range check in here would force one caller's bound onto the other.
+    """
+    if cv == CV_FOR_PAGE0_ZERO:
+        return 0, 0
+    return cv // EXT_PAGE_SIZE, cv & 0xFF
+
+
 def ext_cv_fields(cv: int) -> tuple[int, int]:
     """Extended (22 18..1B / 23 1C..1F) is ONE-based and band-relative.
 
@@ -155,12 +166,9 @@ def ext_cv_fields(cv: int) -> tuple[int, int]:
     Bands 1..3 are 256 wide and aligned, so `cv & 0xFF` is exactly
     `cv - 256 * page` for them, and the identity for band 0.
     """
-    if cv == CV_FOR_PAGE0_ZERO:
-        # CV1024 rides band 0's vacant slot 0, so it stays reachable even though
-        # cv // 256 would put it past the last band.
-        return 0, 0
-    _check_range(cv, MAX_CV_EXT - 1, f"extended (CV{CV_FOR_PAGE0_ZERO} excepted)")
-    return cv // EXT_PAGE_SIZE, cv & 0xFF
+    if cv != CV_FOR_PAGE0_ZERO:
+        _check_range(cv, MAX_CV_EXT - 1, f"extended (CV{CV_FOR_PAGE0_ZERO} excepted)")
+    return _band_fields(cv)
 
 
 def z21_cv_fields(cv: int) -> tuple[int, int]:
@@ -177,11 +185,59 @@ def join_cv_field(msb: int, lsb: int) -> int:
     return (msb << 8) | lsb
 
 
-def decode_echo(encoding: CvEncoding, raw: int, *, page_index: int = 0) -> int:
+def _decode_zero_based_echo(raw: int, limit: int) -> int:
+    """The zero-based inverse shared by POM (once its convention is stated) and
+    Z21 (always, since Z21's is measured).
+
+    Bounded by `limit`, the CV space of the encoding calling this - not by the
+    width of the 16-bit wire field. See `decode_echo` for why an inverse bounded
+    only by the field is dangerous.
+    """
+    if not 0 <= raw <= limit - 1:
+        raise ValueError(f"echo {raw} is not a wire CV in 0..{limit - 1}")
+    return raw + 1
+
+
+def decode_echo(
+    encoding: CvEncoding,
+    raw: int,
+    *,
+    page_index: int | None = None,
+    zero_based: bool | None = None,
+) -> int:
     """Turn the CV a reply echoed back into a 1-based CV number.
 
     `raw` is the 16-bit wire field for POM and Z21 (see `join_cv_field`) and the
     single C byte for the direct and extended opcodes.
+
+    `zero_based` applies ONLY to `POM_ZERO_BASED`, the one encoding whose echo
+    convention `echo_candidates` already documents as unmeasured on this
+    hardware (docs/probe-results.md, R1 - no POM reply has ever come back):
+
+    * `zero_based=True` - the existing behaviour: `raw` must be a zero-based
+      wire value in `0..MAX_CV_POM - 1`, and the answer is `raw + 1`.
+    * `zero_based=False` - the one-based reading: `raw` must already be the
+      1-based CV, in `CV_MIN..MAX_CV_POM`, and the answer is `raw` itself.
+    * `zero_based=None` (the default) raises, rather than guessing which
+      reading applies - a guessed convention could silently decode the first
+      genuine POM reply under the wrong CV number, which is the exact
+      "wrong value under the right name" failure this module exists to
+      prevent. `Capabilities.pom_echo_zero_based` is where the real answer
+      comes from once a POM reply is finally observed.
+
+    `Z21_16BIT` is NOT affected by `zero_based`: its echo is the measured
+    one-based band byte (see `echo_candidates`), never a guess.
+
+    `page_index` applies ONLY to `SERVICE_EXT`, because that is the one
+    encoding whose echo byte cannot carry its own band - the band comes from
+    the request the caller issued, and defaulting it to band 0 would silently
+    decode a band-1..3 echo as band 0: off by 256, 512 or 768, with no error.
+    `page_index=None` (the default) raises rather than assuming band 0.
+
+    Passing `zero_based` to any encoding but `POM_ZERO_BASED`, or `page_index`
+    to any encoding but `SERVICE_EXT`, raises `ValueError` rather than being
+    silently ignored: a parameter that does nothing is how the next reader
+    learns the wrong lesson about what it controls.
 
     The extended inverse is NOT `raw or 256`. That fudge belongs to the legacy
     direct opcode; used here it decodes CV256 as 512, CV512 as 768 and CV768 as
@@ -195,16 +251,45 @@ def decode_echo(encoding: CvEncoding, raw: int, *, page_index: int = 0) -> int:
     layer as a legitimate result, which is the "wrong value under the right name"
     failure this whole module exists to prevent.
     """
-    limit = _ZERO_BASED_MAXIMA.get(encoding)
-    if limit is not None:
-        if not 0 <= raw <= limit - 1:
-            raise ValueError(f"echo {raw} is not a wire CV in 0..{limit - 1}")
-        return raw + 1
+    if encoding is CvEncoding.POM_ZERO_BASED:
+        if page_index is not None:
+            raise ValueError("page_index has no meaning for POM_ZERO_BASED; omit it")
+        if zero_based is None:
+            raise ValueError(
+                "the POM echo convention is not established on this hardware: no "
+                "POM reply has ever been observed (docs/probe-results.md, R1), so "
+                "the caller must state zero_based explicitly. "
+                "Capabilities.pom_echo_zero_based is where that answer comes from "
+                "once a real reply is seen."
+            )
+        if zero_based:
+            return _decode_zero_based_echo(raw, MAX_CV_POM)
+        if not CV_MIN <= raw <= MAX_CV_POM:
+            raise ValueError(f"echo {raw} is not a wire CV in {CV_MIN}..{MAX_CV_POM}")
+        return raw
+    if zero_based is not None:
+        raise ValueError(
+            f"zero_based has no meaning for {encoding.name}; only "
+            f"POM_ZERO_BASED's echo convention is unmeasured"
+        )
+    if encoding is CvEncoding.Z21_16BIT:
+        if page_index is not None:
+            raise ValueError("page_index has no meaning for Z21_16BIT; omit it")
+        return _decode_zero_based_echo(raw, MAX_CV_Z21)
     _check_byte(raw, "echo")
     if encoding is CvEncoding.SERVICE_DIRECT:
+        if page_index is not None:
+            raise ValueError("page_index has no meaning for SERVICE_DIRECT; omit it")
         if raw == 0:
             raise ValueError("raw 0 is not a direct-mode CV echo")
         return raw
+    if page_index is None:
+        raise ValueError(
+            "SERVICE_EXT cannot decode an echo without page_index: the echo byte "
+            "carries no band of its own, so a caller who forgets it decodes a "
+            "band-1..3 echo as band 0 - off by 256, 512 or 768, with no error. "
+            "Pass the page_index the request itself carried."
+        )
     if not 0 <= page_index < len(EXT_READ_OPCODES):
         raise ValueError(f"page index {page_index} outside 0..{len(EXT_READ_OPCODES) - 1}")
     if page_index == 0 and raw == 0:
@@ -255,6 +340,9 @@ def echo_candidates(
         return frozenset({zero_form, one_form})
     if encoding is CvEncoding.SERVICE_DIRECT:
         return frozenset({direct_cv_byte(cv)})
+    if encoding is CvEncoding.Z21_16BIT:
+        _check_range(cv, MAX_CV_Z21, "Z21")
+        return frozenset({_band_fields(cv)[1]})
     return frozenset({ext_cv_fields(cv)[1]})
 
 
