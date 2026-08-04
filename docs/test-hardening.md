@@ -207,11 +207,13 @@ The remaining 49 survivors:
   or `0xFD`, and a prefix begins with `0xFF`. No frame can start at `pos + 1`,
   so starting the scan at `pos`, `pos + 1` or `pos + 2` finds the same frame.
 - **3 mutants on `if pos + 2 >= len(buffer)`** (`>=` to `==`, `>=` to `is`, and
-  `+ 2` to `+ 3`). Both callers guarantee `pos + 2 <= len(buffer)`, so `>=` and
-  `==` coincide. The guard is a redundant early-out: when it does not fire, the
-  `end > len(buffer)` check below returns `INCOMPLETE` anyway. Unreachable
-  rather than equivalent - a caller that stopped bounding `pos` would make this
-  live again.
+  `+ 2` to `+ 3`). Both callers bound `pos` so that `pos + 2 <= len(buffer)`,
+  which makes `>=` and `==` coincide. Verified rather than argued: instrumenting
+  `_frame_at` across 37116 calls over buffers built from real frames, stray
+  prefixes and noise produced **zero** calls where `pos + 2 > len(buffer)`. The
+  guard is a redundant early-out - when it does not fire, the `end >
+  len(buffer)` check below returns `INCOMPLETE` anyway. Unreachable rather than
+  equivalent: a caller that stopped bounding `pos` would make this live again.
 - **`pos += 1` becoming `pos += 2` in the corrupt branch.** Same argument as
   `_salvage`: the skipped position starts with `0xFE` or `0xFD` and can never
   begin a prefix.
@@ -380,9 +382,23 @@ Other killable survivors now pinned:
   was pointed at, while reporting that single-function commands work. R5 is only
   side-effect free because it re-asserts the value it just read.
 - **`reply.raw_cv == wire` weakened to `is`.** CPython caches small integers, so
-  `==` and `is` agree for every CV the tests happened to use. Above 256 the cache
-  stops and a correct read of a high CV is discarded as "not an answer". The
-  ZIMO CVs railctl needs to back up live at 265 and above.
+  `==` and `is` agree for every CV the tests happened to use. Both operands are
+  computed at runtime - `wire` from `cv - 1`, `raw_cv` from `(hi << 8) | lo` -
+  so once past the cache they are distinct objects and `is` returns False for
+  equal numbers. Measured, with runtime values rather than literals (the
+  compiler folds those and hides the effect):
+
+  | CV | wire | `==` | `is` |
+  |---|---|---|---|
+  | 8 | 7 | True | True |
+  | 256 | 255 | True | True |
+  | **265** | **264** | **True** | **False** |
+  | 1024 | 1023 | True | False |
+
+  The break is at CV258, and `HIGH_BAND_CV` - the CV this probe reads to decide
+  whether the bands above 255 work at all - is **265**. So the mutant does not
+  fail on some exotic CV: it fails on the first high CV the probe touches, and
+  the ZIMO CVs railctl must back up live at 265 and above.
 - **`outcome.reply_cv != cv` weakened to `>`.** Accepts every reply that decodes
   to a *lower* CV than the one requested - publishing one CV's value under
   another CV's name.
