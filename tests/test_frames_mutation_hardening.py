@@ -30,7 +30,6 @@ def test_a_frame_is_immutable_once_parsed():
     later stage rewrite the evidence for an earlier one.
     """
     frame = Frame(LI_COMMAND, b"\x61\x01")
-    assert dataclasses.fields(frame) is not None
     with pytest.raises(dataclasses.FrozenInstanceError):
         frame.telegram = b"\x61\x82"  # type: ignore[misc]
 

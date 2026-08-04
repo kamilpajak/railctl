@@ -20,7 +20,6 @@ from tools.probe.replies import (
 )
 
 POM_WINDOW = 5.0
-POLL_INTERVAL = 0.25
 
 
 def _hexdump(frames) -> list[str]:
