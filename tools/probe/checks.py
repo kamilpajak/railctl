@@ -296,8 +296,11 @@ def check_service_ext_cv(link: Link, high_cv: int = HIGH_BAND_CV) -> CheckResult
     if low_ok is not True:
         return CheckResult(
             "service_ext_cv",
-            {"service_ext_cv": low_ok, "service_ext_cv_high_band": None,
-             "service_ext_cv_high_value": None},
+            {
+                "service_ext_cv": low_ok,
+                "service_ext_cv_high_band": None,
+                "service_ext_cv_high_value": None,
+            },
             f"22 18: {low_detail}; the high band was not probed",
             _hexdump(low.frames),
         )
@@ -307,8 +310,11 @@ def check_service_ext_cv(link: Link, high_cv: int = HIGH_BAND_CV) -> CheckResult
     dump = _hexdump(low.frames) + _hexdump(high.frames)
     return CheckResult(
         "service_ext_cv",
-        {"service_ext_cv": True, "service_ext_cv_high_band": high_ok,
-         "service_ext_cv_high_value": high.value},
+        {
+            "service_ext_cv": True,
+            "service_ext_cv_high_band": high_ok,
+            "service_ext_cv_high_value": high.value,
+        },
         f"22 18: {low_detail}. 22 19 for CV{high_cv}: {high_detail}",
         dump,
     )
@@ -419,9 +425,7 @@ def read_function_state_13_28(link: Link, address: int) -> tuple[FunctionState13
     return None, frames
 
 
-def check_function_groups(
-    link: Link, address: int, *, f13_f20: int, f21_f28: int
-) -> CheckResult:
+def check_function_groups(link: Link, address: int, *, f13_f20: int, f21_f28: int) -> CheckResult:
     """Groups 4 (F13-F20) and 5 (F21-F28), re-asserting the values they already hold.
 
     Sending all-zero bits would switch OFF every function currently on in
@@ -450,8 +454,16 @@ def check_function_groups(
 
 
 DECODER_TYPES = {
-    6: "MS450", 7: "MS990", 8: "MS590", 9: "MS950", 10: "MS560",
-    11: "MS001", 12: "MS491", 13: "MS581", 14: "MS540", 15: "MS591",
+    6: "MS450",
+    7: "MS990",
+    8: "MS590",
+    9: "MS950",
+    10: "MS560",
+    11: "MS001",
+    12: "MS491",
+    13: "MS581",
+    14: "MS540",
+    15: "MS591",
 }
 
 
@@ -462,8 +474,12 @@ def check_identity(link: Link) -> CheckResult:
         None,
     )
     if version is None:
-        return CheckResult("identity", None, "no version reply; is this the XpressNet port?",
-                           _hexdump(version_frames))
+        return CheckResult(
+            "identity",
+            None,
+            "no version reply; is this the XpressNet port?",
+            _hexdump(version_frames),
+        )
 
     status_frames = link.exchange(commands.status(), window=2.0)
     status = next(
@@ -493,8 +509,12 @@ def check_identity(link: Link) -> CheckResult:
 def check_address_band(link: Link, address: int) -> CheckResult:
     """Addresses 100..127 are the XpressNet/Z21 divergence band."""
     if not 100 <= address <= 127:
-        return CheckResult("loco_address_threshold", None,
-                           f"address {address} is outside the 100..127 divergence band", [])
+        return CheckResult(
+            "loco_address_threshold",
+            None,
+            f"address {address} is outside the 100..127 divergence band",
+            [],
+        )
     short_high, short_low = commands.loco_address_bytes(address, threshold=128)
     long_high, long_low = commands.loco_address_bytes(address, threshold=100)
     short_frames = link.exchange(bytes([0xE3, 0x00, short_high, short_low]), window=2.0)
@@ -510,11 +530,14 @@ def check_address_band(link: Link, address: int) -> CheckResult:
 
     short_ok, long_ok = answered(short_frames), answered(long_frames)
     if short_ok == long_ok:
-        both = "both forms returned locomotive information" if short_ok else (
-            "neither form returned locomotive information"
+        both = (
+            "both forms returned locomotive information"
+            if short_ok
+            else ("neither form returned locomotive information")
         )
-        return CheckResult("loco_address_threshold", None,
-                           f"{both}; threshold not established", dump)
+        return CheckResult(
+            "loco_address_threshold", None, f"{both}; threshold not established", dump
+        )
     threshold = 100 if long_ok else 128
     form = "long" if long_ok else "short"
     detail = f"only the {form} form returned locomotive information; threshold is {threshold}"

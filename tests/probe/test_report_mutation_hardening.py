@@ -46,9 +46,7 @@ def test_the_two_integers_python_confuses_with_booleans_are_not_verdicts(value: 
     [(True, "yes"), (False, "no"), (None, "unknown")],
 )
 def test_each_verdict_keeps_its_own_word(value: object, word: str):
-    document = to_markdown(
-        [CheckResult("z21_cv_opcodes", value, "")], port="p", run_at="t"
-    )
+    document = to_markdown([CheckResult("z21_cv_opcodes", value, "")], port="p", run_at="t")
     assert f"| `z21_cv_opcodes` | {word} |" in document
 
 
