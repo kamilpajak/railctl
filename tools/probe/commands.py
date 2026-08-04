@@ -71,26 +71,37 @@ def service_direct_read(cv: int) -> bytes:
     CV256 is sent as 00". So CV1 goes on the wire as 0x01, CV29 as 0x1D.
     Do NOT route this through cv_wire() — that is the POM/Z21 convention.
 
-    CV256 is refused because its wire value 0 collides with CV1024 in the
-    newer LI-USB document, and nothing here needs to guess which the YD7010
-    implements.
+    CV256 is refused here as deliberate caution, not because the spec is
+    unclear: XpressNet section 2.1.5.6 says plainly that on this opcode "CV256
+    is represented as 0". The slot-0-means-CV1024 rule belongs to the extended
+    opcode 0x22 0x18, a different command. Since a station that implements both
+    could plausibly apply either rule to a bare 0, the probe reads CV256 and
+    above through service_ext_read, where the meaning is unambiguous.
     """
     if not 1 <= cv <= 256:
         raise ValueError(f"CV {cv} exceeds the 256 CV limit of the legacy direct read")
     if cv == 256:
-        raise ValueError("CV256 is sent as 0, which is ambiguous; use the extended opcodes")
+        raise ValueError("CV256 is sent as 0 here; use service_ext_read, which is unambiguous")
     return bytes([0x22, 0x15, cv & 0xFF])
 
 
 def service_ext_read(cv: int) -> bytes:
-    """Extended read, 0x22 0x18..0x1B. Also ONE-BASED, banded by cv >> 8:
-    0x18 covers CV1-255, 0x19 CV256-511, 0x1A CV512-767, 0x1B CV768-1023."""
-    if not 1 <= cv <= MAX_CV:
+    """Extended read, 0x22 0x18..0x1B (Lenz 23151 sections 3.2.7 to 3.2.10).
+
+    The data byte is an offset within the band, not the CV number:
+      0x18  CV1-255 at 1..255, and CV1024 at 0
+      0x19  CV256-511    0x1A  CV512-767    0x1B  CV768-1023, each at 0..255
+
+    Bands 1 to 3 are 256 wide and aligned, so `cv & 0xFF` is exactly
+    `cv - 256 * band` for them, and the identity for band 0.
+    """
+    if cv == MAX_CV:
+        # CV1024 rides on the first band at offset 0, so it is reachable even
+        # though cv >> 8 would put it out of range.
+        return bytes([0x22, 0x18, 0x00])
+    if not 1 <= cv < MAX_CV:
         raise ValueError(f"CV {cv} outside the extended opcode range 1..{MAX_CV}")
-    band = cv >> 8
-    if band > 3:
-        raise ValueError(f"CV {cv} outside the extended opcode range 1..{MAX_CV}")
-    return bytes([0x22, 0x18 + band, cv & 0xFF])
+    return bytes([0x22, 0x18 + (cv >> 8), cv & 0xFF])
 
 
 def z21_service_read(cv: int) -> bytes:
