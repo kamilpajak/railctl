@@ -24,10 +24,19 @@ settings.register_profile("default", max_examples=100, deadline=None)
 # suppress_health_check matters here: a mutated strategy or filter can make
 # Hypothesis complain about slow data generation, and a health-check failure
 # would count as a KILL that the assertions never earned.
+#
+# derandomize is the important one, and it is about measurement rather than
+# speed. With random draws, whether a marginal mutant dies depends on whether
+# that run happened to generate the input exposing it, so the same code scores
+# differently on consecutive runs and two runs cannot be compared. Two frames.py
+# mutants flapped exactly this way before it was set. A fixed seed makes a
+# mutation score a measurement instead of a sample; the default profile stays
+# random, because there the randomness is the point.
 settings.register_profile(
     "mutation",
     max_examples=25,
     deadline=None,
+    derandomize=True,
     suppress_health_check=list(HealthCheck),
 )
 
