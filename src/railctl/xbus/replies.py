@@ -21,6 +21,7 @@ own length guard, and none has one.
 from __future__ import annotations
 
 from dataclasses import dataclass
+from typing import Literal
 
 from railctl.errors import ProtocolError, XBusChecksumError
 from railctl.xbus import codec
@@ -302,11 +303,23 @@ class FunctionState13To28:
     f21_f28: int
 
 
+# The four causes `Other.reason` keeps apart. A plain `str` field lets a caller
+# compare against a mistyped literal and never match, which silently treats a
+# damaged cable the same as an unrecognised opcode - the distinction Other
+# exists to preserve is then lost again at the comparison site.
+Reason = Literal["checksum", "length", "empty", "unknown_form"]
+
+REASON_CHECKSUM: Reason = "checksum"
+REASON_LENGTH: Reason = "length"
+REASON_EMPTY: Reason = "empty"
+REASON_UNKNOWN_FORM: Reason = "unknown_form"
+
+
 @dataclass(frozen=True, slots=True)
 class Other:
     """Anything this module does not turn into a typed reply, bytes preserved.
 
-    `reason` keeps three different causes apart, because their remedies are
+    `reason` keeps four different causes apart, because their remedies are
     opposite:
 
     - "checksum" - the XOR did not hold. The LINK is damaging bytes; check the
@@ -326,7 +339,7 @@ class Other:
     """
 
     telegram: bytes
-    reason: str = "unknown_form"
+    reason: Reason = REASON_UNKNOWN_FORM
 
 
 Reply = (
@@ -427,7 +440,7 @@ def _loco_info(data: bytes) -> LocoInfo:
 def parse(telegram: bytes) -> Reply:
     """Turn one bare telegram into a typed reply. Never raises.
 
-    The three failure causes are kept apart in Other.reason - see Other. The
+    The four failure causes are kept apart in Other.reason - see Other. The
     XBusChecksumError branch must come first: it is a subclass of
     XBusDecodeError, so catching ProtocolError first would swallow it and every
     corrupt link would look like a truncated frame.
@@ -435,11 +448,11 @@ def parse(telegram: bytes) -> Reply:
     try:
         header, data = codec.decode(telegram)
     except XBusChecksumError:
-        return Other(telegram=telegram, reason="checksum")
+        return Other(telegram=telegram, reason=REASON_CHECKSUM)
     except ProtocolError:
-        return Other(telegram=telegram, reason="length")
+        return Other(telegram=telegram, reason=REASON_LENGTH)
     if not data:
-        return Other(telegram=telegram, reason="empty")
+        return Other(telegram=telegram, reason=REASON_EMPTY)
     db0 = data[0]
 
     if header == HDR_INTERFACE:
@@ -471,4 +484,4 @@ def parse(telegram: bytes) -> Reply:
     # speed steps and in_use_by_other for a locomotive nobody asked about.
     if header == HDR_LOCO_INFO and not data[0] & IDENT_RESERVED_MASK:
         return _loco_info(data)
-    return Other(telegram=telegram, reason="unknown_form")
+    return Other(telegram=telegram, reason=REASON_UNKNOWN_FORM)

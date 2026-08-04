@@ -175,24 +175,31 @@ def test_cv256_is_refused_on_the_direct_opcode_and_says_why():
 
 
 @pytest.mark.parametrize(
-    ("encoding", "raw", "page_index", "expected"),
+    ("encoding", "raw", "page_index", "zero_based", "expected"),
     [
-        (CvEncoding.POM_ZERO_BASED, 0, 0, 1),
-        (CvEncoding.POM_ZERO_BASED, 7, 0, 8),
-        (CvEncoding.POM_ZERO_BASED, 1023, 0, 1024),
-        (CvEncoding.Z21_16BIT, 7, 0, 8),
-        (CvEncoding.SERVICE_DIRECT, 1, 0, 1),
-        (CvEncoding.SERVICE_DIRECT, 255, 0, 255),
-        (CvEncoding.SERVICE_EXT, 0, 0, 1024),
-        (CvEncoding.SERVICE_EXT, 1, 0, 1),
-        (CvEncoding.SERVICE_EXT, 0, 1, 256),
-        (CvEncoding.SERVICE_EXT, 9, 1, 265),
-        (CvEncoding.SERVICE_EXT, 0, 2, 512),
-        (CvEncoding.SERVICE_EXT, 0, 3, 768),
+        (CvEncoding.POM_ZERO_BASED, 0, None, True, 1),
+        (CvEncoding.POM_ZERO_BASED, 7, None, True, 8),
+        (CvEncoding.POM_ZERO_BASED, 1023, None, True, 1024),
+        (CvEncoding.POM_ZERO_BASED, 1, None, False, 1),
+        (CvEncoding.POM_ZERO_BASED, 8, None, False, 8),
+        (CvEncoding.POM_ZERO_BASED, 1024, None, False, 1024),
+        (CvEncoding.Z21_16BIT, 7, None, None, 8),
+        (CvEncoding.SERVICE_DIRECT, 1, None, None, 1),
+        (CvEncoding.SERVICE_DIRECT, 255, None, None, 255),
+        (CvEncoding.SERVICE_EXT, 0, 0, None, 1024),
+        (CvEncoding.SERVICE_EXT, 1, 0, None, 1),
+        (CvEncoding.SERVICE_EXT, 0, 1, None, 256),
+        (CvEncoding.SERVICE_EXT, 9, 1, None, 265),
+        (CvEncoding.SERVICE_EXT, 0, 2, None, 512),
+        (CvEncoding.SERVICE_EXT, 0, 3, None, 768),
     ],
 )
 def test_decode_echo_inverts_each_encoding(
-    encoding: CvEncoding, raw: int, page_index: int, expected: int
+    encoding: CvEncoding,
+    raw: int,
+    page_index: int | None,
+    zero_based: bool | None,
+    expected: int,
 ):
     """The extended inverse is NOT `raw or 256`.
 
@@ -200,8 +207,10 @@ def test_decode_echo_inverts_each_encoding(
     as 512, CV512 as 768 and CV768 as 1024 - three CVs a ZIMO backup touches,
     each silently wrong. `page_index` is supplied by the caller from the request
     it issued, because the reply alone cannot say which band it came from.
+    `zero_based` is supplied for POM because its echo convention is unmeasured;
+    Z21's is measured, so it takes neither keyword.
     """
-    assert decode_echo(encoding, raw, page_index=page_index) == expected
+    assert decode_echo(encoding, raw, page_index=page_index, zero_based=zero_based) == expected
 
 
 def test_decode_echo_refuses_a_zero_on_the_direct_opcode():
@@ -209,32 +218,98 @@ def test_decode_echo_refuses_a_zero_on_the_direct_opcode():
         decode_echo(CvEncoding.SERVICE_DIRECT, 0)
 
 
+def test_decode_echo_refuses_pom_when_the_echo_convention_is_unstated():
+    """`zero_based=None` (the default) must not guess.
+
+    No POM reply has ever been observed on this hardware (docs/probe-results.md,
+    R1), so decoding one always requires the caller to say which convention
+    applies. Guessing would risk decoding the first genuine reply under the
+    wrong CV number - silently, since the wrong CV reads back fine under the
+    right name.
+    """
+    with pytest.raises(ValueError, match="pom_echo_zero_based"):
+        decode_echo(CvEncoding.POM_ZERO_BASED, 7)
+
+
 @pytest.mark.parametrize(
     ("encoding", "raw"),
     [
-        (CvEncoding.POM_ZERO_BASED, 1024),
-        (CvEncoding.POM_ZERO_BASED, 5000),
-        (CvEncoding.Z21_16BIT, 1024),
-        (CvEncoding.Z21_16BIT, 0xFFFF),
+        (CvEncoding.Z21_16BIT, 7),
+        (CvEncoding.SERVICE_DIRECT, 1),
+        (CvEncoding.SERVICE_EXT, 1),
     ],
 )
-def test_decode_echo_refuses_a_wire_cv_past_the_encoding_maximum(encoding: CvEncoding, raw: int):
+def test_decode_echo_refuses_zero_based_for_an_encoding_with_no_unmeasured_convention(
+    encoding: CvEncoding, raw: int
+):
+    """`zero_based` means something only for POM. Passing it anywhere else must
+    raise rather than be silently ignored - an ignored argument is how the next
+    reader learns the wrong lesson about what it controls."""
+    with pytest.raises(ValueError, match="zero_based"):
+        decode_echo(encoding, raw, zero_based=True)
+
+
+@pytest.mark.parametrize(
+    ("encoding", "raw"),
+    [
+        (CvEncoding.POM_ZERO_BASED, 7),
+        (CvEncoding.Z21_16BIT, 7),
+        (CvEncoding.SERVICE_DIRECT, 1),
+    ],
+)
+def test_decode_echo_refuses_page_index_for_an_encoding_with_no_band(
+    encoding: CvEncoding, raw: int
+):
+    """`page_index` means something only for SERVICE_EXT, the one encoding whose
+    echo byte carries no band of its own. Passing it elsewhere must raise rather
+    than be silently ignored."""
+    with pytest.raises(ValueError, match="page_index"):
+        decode_echo(encoding, raw, page_index=0)
+
+
+def test_decode_echo_refuses_service_ext_without_a_page_index():
+    """`page_index=None` (the default) must not assume band 0.
+
+    The echo byte cannot carry its own band; a caller who forgets `page_index`
+    would silently decode a band-1..3 echo as band 0 - off by 256, 512 or 768,
+    with no error. CV265 and CV266, the ZIMO sound-project and master-volume
+    CVs this tool backs up, sit in band 1.
+    """
+    with pytest.raises(ValueError, match="page_index"):
+        decode_echo(CvEncoding.SERVICE_EXT, 9)
+
+
+@pytest.mark.parametrize(
+    ("encoding", "raw", "zero_based"),
+    [
+        (CvEncoding.POM_ZERO_BASED, 1024, True),
+        (CvEncoding.POM_ZERO_BASED, 5000, True),
+        (CvEncoding.POM_ZERO_BASED, 1025, False),
+        (CvEncoding.Z21_16BIT, 1024, None),
+        (CvEncoding.Z21_16BIT, 0xFFFF, None),
+    ],
+)
+def test_decode_echo_refuses_a_wire_cv_past_the_encoding_maximum(
+    encoding: CvEncoding, raw: int, zero_based: bool | None
+):
     """The inverse is bounded by CV space, not by the width of the field.
 
     A 16-bit field holds 65536 values; POM and Z21 address 1024 CVs. Without
-    this bound `decode_echo(POM_ZERO_BASED, 5000)` returns 5001 - a CV number
-    outside every valid range, handed to the station layer as a legitimate
-    result. Every other function in this module range-checks; this one must too,
-    or it fabricates a plausible CV out of garbage, which is exactly the "wrong
-    value under the right name" failure the module exists to prevent.
+    this bound `decode_echo(POM_ZERO_BASED, 5000, zero_based=True)` returns 5001
+    - a CV number outside every valid range, handed to the station layer as a
+    legitimate result. Every other function in this module range-checks; this
+    one must too, or it fabricates a plausible CV out of garbage, which is
+    exactly the "wrong value under the right name" failure the module exists to
+    prevent. `zero_based=False` gets the same bound from the other side: raw is
+    already read as the 1-based CV, so 1025 is past MAX_CV_POM the same way.
     """
     with pytest.raises(ValueError, match="not a wire CV"):
-        decode_echo(encoding, raw)
+        decode_echo(encoding, raw, zero_based=zero_based)
 
 
 def test_decode_echo_accepts_the_last_valid_wire_cv_of_each_encoding():
     """The bound is inclusive at 1023 -> CV1024, one below the field maximum."""
-    assert decode_echo(CvEncoding.POM_ZERO_BASED, MAX_CV_POM - 1) == MAX_CV_POM
+    assert decode_echo(CvEncoding.POM_ZERO_BASED, MAX_CV_POM - 1, zero_based=True) == MAX_CV_POM
     assert decode_echo(CvEncoding.Z21_16BIT, MAX_CV_Z21 - 1) == MAX_CV_Z21
 
 
@@ -305,6 +380,22 @@ def test_a_z21_read_is_matched_against_the_one_based_echo_that_was_measured():
     # inverse, and only the first matches the hardware.
     assert resolve_service_cv(0x14, 8) == 8
     assert decode_echo(CvEncoding.Z21_16BIT, 8) == 9
+
+
+def test_echo_candidates_names_z21_not_extended_on_an_out_of_range_cv():
+    """A Z21 CV is bounded by MAX_CV_Z21, not by the extended encoding's bound.
+
+    Both encodings share the same band arithmetic, so the two bounds cover the
+    same CVs in practice - but the diagnostic must still say Z21 when a Z21
+    caller passes a bad CV, not "extended", or the error points whoever reads it
+    at the wrong opcode family entirely.
+    """
+    with pytest.raises(CvOutOfRangeError, match="Z21") as excinfo:
+        echo_candidates(CvEncoding.Z21_16BIT, 0)
+    assert excinfo.value.cv == 0
+    with pytest.raises(CvOutOfRangeError, match="Z21") as excinfo:
+        echo_candidates(CvEncoding.Z21_16BIT, 1025)
+    assert excinfo.value.cv == 1025
 
 
 def test_echo_candidates_alone_cannot_separate_two_cvs_in_different_bands():

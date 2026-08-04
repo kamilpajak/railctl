@@ -27,6 +27,10 @@ import pytest
 from railctl.xbus.codec import encode
 from railctl.xbus.replies import (
     HEADER_61_REPLIES,
+    REASON_CHECKSUM,
+    REASON_EMPTY,
+    REASON_LENGTH,
+    REASON_UNKNOWN_FORM,
     TRANSIENT_REPLIES,
     UNSUPPORTED,
     CvValue,
@@ -343,7 +347,7 @@ def test_an_unrecognised_but_well_formed_telegram_becomes_other_without_raising(
     reply = parse(tg("71 AA DB"))
     assert isinstance(reply, Other)
     assert reply.telegram == tg("71 AA DB")
-    assert reply.reason == "unknown_form"
+    assert reply.reason == REASON_UNKNOWN_FORM
 
 
 def test_a_telegram_with_a_broken_xor_says_so_instead_of_just_being_unknown():
@@ -358,7 +362,7 @@ def test_a_telegram_with_a_broken_xor_says_so_instead_of_just_being_unknown():
     """
     reply = parse(tg("62 22 07 48"))
     assert isinstance(reply, Other)
-    assert reply.reason == "checksum"
+    assert reply.reason == REASON_CHECKSUM
 
 
 def test_a_telegram_whose_length_disagrees_with_its_header_says_length():
@@ -366,7 +370,7 @@ def test_a_telegram_whose_length_disagrees_with_its_header_says_length():
     arrive. Truncation is never filled in with defaults."""
     reply = parse(tg("63 14"))
     assert isinstance(reply, Other)
-    assert reply.reason == "length"
+    assert reply.reason == REASON_LENGTH
 
 
 def test_a_well_formed_telegram_with_no_data_bytes_is_reported_as_empty():
@@ -376,7 +380,7 @@ def test_a_well_formed_telegram_with_no_data_bytes_is_reported_as_empty():
     and not a truncation."""
     reply = parse(tg("80 80"))
     assert isinstance(reply, Other)
-    assert reply.reason == "empty"
+    assert reply.reason == REASON_EMPTY
 
 
 @pytest.mark.parametrize(

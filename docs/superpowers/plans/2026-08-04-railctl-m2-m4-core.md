@@ -3156,7 +3156,11 @@ git commit -m "feat(xbus): add loco address and 128-step speed encoding"
     `EXT_WRITE_OPCODES[page_index]`
   - `railctl.xbus.cv.z21_cv_fields(cv: int) -> tuple[int, int]` returning `(MSB, LSB)`
   - `railctl.xbus.cv.join_cv_field(msb: int, lsb: int) -> int`
-  - `railctl.xbus.cv.decode_echo(encoding: CvEncoding, raw: int, *, page_index: int = 0) -> int`
+  - `railctl.xbus.cv.decode_echo(encoding: CvEncoding, raw: int, *, page_index: int | None = None, zero_based: bool | None = None) -> int` —
+    `zero_based` applies only to `POM_ZERO_BASED` (its echo convention is unmeasured; `None` raises
+    rather than guessing), `page_index` applies only to `SERVICE_EXT` (its echo carries no band of
+    its own; `None` raises rather than assuming band 0). Passing either to an encoding it does not
+    apply to raises `ValueError`.
   - `railctl.xbus.cv.echo_candidates(encoding: CvEncoding, cv: int, *, zero_based: bool | None = None) -> frozenset[int]`
   - `railctl.xbus.cv.resolve_service_cv(reply_ident: int, c: int) -> int`
   - Every function takes a **1-based** CV number and no function outside this module
@@ -3357,24 +3361,31 @@ def test_cv256_is_refused_on_the_direct_opcode_and_says_why():
 
 
 @pytest.mark.parametrize(
-    ("encoding", "raw", "page_index", "expected"),
+    ("encoding", "raw", "page_index", "zero_based", "expected"),
     [
-        (CvEncoding.POM_ZERO_BASED, 0, 0, 1),
-        (CvEncoding.POM_ZERO_BASED, 7, 0, 8),
-        (CvEncoding.POM_ZERO_BASED, 1023, 0, 1024),
-        (CvEncoding.Z21_16BIT, 7, 0, 8),
-        (CvEncoding.SERVICE_DIRECT, 1, 0, 1),
-        (CvEncoding.SERVICE_DIRECT, 255, 0, 255),
-        (CvEncoding.SERVICE_EXT, 0, 0, 1024),
-        (CvEncoding.SERVICE_EXT, 1, 0, 1),
-        (CvEncoding.SERVICE_EXT, 0, 1, 256),
-        (CvEncoding.SERVICE_EXT, 9, 1, 265),
-        (CvEncoding.SERVICE_EXT, 0, 2, 512),
-        (CvEncoding.SERVICE_EXT, 0, 3, 768),
+        (CvEncoding.POM_ZERO_BASED, 0, None, True, 1),
+        (CvEncoding.POM_ZERO_BASED, 7, None, True, 8),
+        (CvEncoding.POM_ZERO_BASED, 1023, None, True, 1024),
+        (CvEncoding.POM_ZERO_BASED, 1, None, False, 1),
+        (CvEncoding.POM_ZERO_BASED, 8, None, False, 8),
+        (CvEncoding.POM_ZERO_BASED, 1024, None, False, 1024),
+        (CvEncoding.Z21_16BIT, 7, None, None, 8),
+        (CvEncoding.SERVICE_DIRECT, 1, None, None, 1),
+        (CvEncoding.SERVICE_DIRECT, 255, None, None, 255),
+        (CvEncoding.SERVICE_EXT, 0, 0, None, 1024),
+        (CvEncoding.SERVICE_EXT, 1, 0, None, 1),
+        (CvEncoding.SERVICE_EXT, 0, 1, None, 256),
+        (CvEncoding.SERVICE_EXT, 9, 1, None, 265),
+        (CvEncoding.SERVICE_EXT, 0, 2, None, 512),
+        (CvEncoding.SERVICE_EXT, 0, 3, None, 768),
     ],
 )
 def test_decode_echo_inverts_each_encoding(
-    encoding: CvEncoding, raw: int, page_index: int, expected: int
+    encoding: CvEncoding,
+    raw: int,
+    page_index: int | None,
+    zero_based: bool | None,
+    expected: int,
 ):
     """The extended inverse is NOT `raw or 256`.
 
@@ -3382,8 +3393,10 @@ def test_decode_echo_inverts_each_encoding(
     as 512, CV512 as 768 and CV768 as 1024 - three CVs a ZIMO backup touches,
     each silently wrong. `page_index` is supplied by the caller from the request
     it issued, because the reply alone cannot say which band it came from.
+    `zero_based` is supplied for POM because its echo convention is unmeasured;
+    Z21's is measured, so it takes neither keyword.
     """
-    assert decode_echo(encoding, raw, page_index=page_index) == expected
+    assert decode_echo(encoding, raw, page_index=page_index, zero_based=zero_based) == expected
 
 
 def test_decode_echo_refuses_a_zero_on_the_direct_opcode():
@@ -3391,34 +3404,98 @@ def test_decode_echo_refuses_a_zero_on_the_direct_opcode():
         decode_echo(CvEncoding.SERVICE_DIRECT, 0)
 
 
+def test_decode_echo_refuses_pom_when_the_echo_convention_is_unstated():
+    """`zero_based=None` (the default) must not guess.
+
+    No POM reply has ever been observed on this hardware (docs/probe-results.md,
+    R1), so decoding one always requires the caller to say which convention
+    applies. Guessing would risk decoding the first genuine reply under the
+    wrong CV number - silently, since the wrong CV reads back fine under the
+    right name.
+    """
+    with pytest.raises(ValueError, match="pom_echo_zero_based"):
+        decode_echo(CvEncoding.POM_ZERO_BASED, 7)
+
+
 @pytest.mark.parametrize(
     ("encoding", "raw"),
     [
-        (CvEncoding.POM_ZERO_BASED, 1024),
-        (CvEncoding.POM_ZERO_BASED, 5000),
-        (CvEncoding.Z21_16BIT, 1024),
-        (CvEncoding.Z21_16BIT, 0xFFFF),
+        (CvEncoding.Z21_16BIT, 7),
+        (CvEncoding.SERVICE_DIRECT, 1),
+        (CvEncoding.SERVICE_EXT, 1),
+    ],
+)
+def test_decode_echo_refuses_zero_based_for_an_encoding_with_no_unmeasured_convention(
+    encoding: CvEncoding, raw: int
+):
+    """`zero_based` means something only for POM. Passing it anywhere else must
+    raise rather than be silently ignored - an ignored argument is how the next
+    reader learns the wrong lesson about what it controls."""
+    with pytest.raises(ValueError, match="zero_based"):
+        decode_echo(encoding, raw, zero_based=True)
+
+
+@pytest.mark.parametrize(
+    ("encoding", "raw"),
+    [
+        (CvEncoding.POM_ZERO_BASED, 7),
+        (CvEncoding.Z21_16BIT, 7),
+        (CvEncoding.SERVICE_DIRECT, 1),
+    ],
+)
+def test_decode_echo_refuses_page_index_for_an_encoding_with_no_band(
+    encoding: CvEncoding, raw: int
+):
+    """`page_index` means something only for SERVICE_EXT, the one encoding whose
+    echo byte carries no band of its own. Passing it elsewhere must raise rather
+    than be silently ignored."""
+    with pytest.raises(ValueError, match="page_index"):
+        decode_echo(encoding, raw, page_index=0)
+
+
+def test_decode_echo_refuses_service_ext_without_a_page_index():
+    """`page_index=None` (the default) must not assume band 0.
+
+    The echo byte cannot carry its own band; a caller who forgets `page_index`
+    would silently decode a band-1..3 echo as band 0 - off by 256, 512 or 768,
+    with no error. CV265 and CV266, the ZIMO sound-project and master-volume
+    CVs this tool backs up, sit in band 1.
+    """
+    with pytest.raises(ValueError, match="page_index"):
+        decode_echo(CvEncoding.SERVICE_EXT, 9)
+
+
+@pytest.mark.parametrize(
+    ("encoding", "raw", "zero_based"),
+    [
+        (CvEncoding.POM_ZERO_BASED, 1024, True),
+        (CvEncoding.POM_ZERO_BASED, 5000, True),
+        (CvEncoding.POM_ZERO_BASED, 1025, False),
+        (CvEncoding.Z21_16BIT, 1024, None),
+        (CvEncoding.Z21_16BIT, 0xFFFF, None),
     ],
 )
 def test_decode_echo_refuses_a_wire_cv_past_the_encoding_maximum(
-    encoding: CvEncoding, raw: int
+    encoding: CvEncoding, raw: int, zero_based: bool | None
 ):
     """The inverse is bounded by CV space, not by the width of the field.
 
     A 16-bit field holds 65536 values; POM and Z21 address 1024 CVs. Without
-    this bound `decode_echo(POM_ZERO_BASED, 5000)` returns 5001 - a CV number
-    outside every valid range, handed to the station layer as a legitimate
-    result. Every other function in this module range-checks; this one must too,
-    or it fabricates a plausible CV out of garbage, which is exactly the "wrong
-    value under the right name" failure the module exists to prevent.
+    this bound `decode_echo(POM_ZERO_BASED, 5000, zero_based=True)` returns 5001
+    - a CV number outside every valid range, handed to the station layer as a
+    legitimate result. Every other function in this module range-checks; this
+    one must too, or it fabricates a plausible CV out of garbage, which is
+    exactly the "wrong value under the right name" failure the module exists to
+    prevent. `zero_based=False` gets the same bound from the other side: raw is
+    already read as the 1-based CV, so 1025 is past MAX_CV_POM the same way.
     """
     with pytest.raises(ValueError, match="not a wire CV"):
-        decode_echo(encoding, raw)
+        decode_echo(encoding, raw, zero_based=zero_based)
 
 
 def test_decode_echo_accepts_the_last_valid_wire_cv_of_each_encoding():
     """The bound is inclusive at 1023 -> CV1024, one below the field maximum."""
-    assert decode_echo(CvEncoding.POM_ZERO_BASED, MAX_CV_POM - 1) == MAX_CV_POM
+    assert decode_echo(CvEncoding.POM_ZERO_BASED, MAX_CV_POM - 1, zero_based=True) == MAX_CV_POM
     assert decode_echo(CvEncoding.Z21_16BIT, MAX_CV_Z21 - 1) == MAX_CV_Z21
 
 
@@ -3489,6 +3566,22 @@ def test_a_z21_read_is_matched_against_the_one_based_echo_that_was_measured():
     # inverse, and only the first matches the hardware.
     assert resolve_service_cv(0x14, 8) == 8
     assert decode_echo(CvEncoding.Z21_16BIT, 8) == 9
+
+
+def test_echo_candidates_names_z21_not_extended_on_an_out_of_range_cv():
+    """A Z21 CV is bounded by MAX_CV_Z21, not by the extended encoding's bound.
+
+    Both encodings share the same band arithmetic, so the two bounds cover the
+    same CVs in practice - but the diagnostic must still say Z21 when a Z21
+    caller passes a bad CV, not "extended", or the error points whoever reads it
+    at the wrong opcode family entirely.
+    """
+    with pytest.raises(CvOutOfRangeError, match="Z21") as excinfo:
+        echo_candidates(CvEncoding.Z21_16BIT, 0)
+    assert excinfo.value.cv == 0
+    with pytest.raises(CvOutOfRangeError, match="Z21") as excinfo:
+        echo_candidates(CvEncoding.Z21_16BIT, 1025)
+    assert excinfo.value.cv == 1025
 
 
 def test_echo_candidates_alone_cannot_separate_two_cvs_in_different_bands():
@@ -3660,15 +3753,6 @@ SERVICE_RESULT_IDENTS = (0x14, 0x15, 0x16, 0x17)
 _BYTE_MIN = 0
 _BYTE_MAX = 255
 
-# The largest 1-based CV each zero-based encoding can address, used to bound the
-# INVERSE in decode_echo. The 16-bit wire field is not the bound: it holds 65536
-# values while these encodings address 1024 CVs, and an unbounded inverse turns
-# a garbage echo into a plausible-looking CV number.
-_ZERO_BASED_MAXIMA = {
-    CvEncoding.POM_ZERO_BASED: MAX_CV_POM,
-    CvEncoding.Z21_16BIT: MAX_CV_Z21,
-}
-
 
 def _check_range(cv: int, maximum: int, what: str) -> None:
     """Guard a 1-based USER CV number.
@@ -3722,6 +3806,26 @@ def direct_cv_byte(cv: int) -> int:
     return cv
 
 
+def _band_fields(cv: int) -> tuple[int, int]:
+    """`(page, C)` - the band arithmetic the extended encoding and the Z21 echo
+    share, factored out so there is exactly one place a CV becomes a band byte.
+
+    CV1024 rides band 0's vacant slot 0, so it stays reachable even though
+    `cv // 256` would put it past the last band. Bands 1..3 are 256 wide and
+    aligned, so `cv & 0xFF` is exactly `cv - 256 * page` for them, and the
+    identity for band 0.
+
+    This does NOT range-check `cv`: each caller has already checked it against
+    its own valid CV space, because that space differs between them (the
+    extended encoding excepts CV1024 from its normal 1..1023 range; Z21 does
+    not need the exception, since its range is 1..1024 outright). Folding a
+    range check in here would force one caller's bound onto the other.
+    """
+    if cv == CV_FOR_PAGE0_ZERO:
+        return 0, 0
+    return cv // EXT_PAGE_SIZE, cv & 0xFF
+
+
 def ext_cv_fields(cv: int) -> tuple[int, int]:
     """Extended (22 18..1B / 23 1C..1F) is ONE-based and band-relative.
 
@@ -3734,12 +3838,9 @@ def ext_cv_fields(cv: int) -> tuple[int, int]:
     Bands 1..3 are 256 wide and aligned, so `cv & 0xFF` is exactly
     `cv - 256 * page` for them, and the identity for band 0.
     """
-    if cv == CV_FOR_PAGE0_ZERO:
-        # CV1024 rides band 0's vacant slot 0, so it stays reachable even though
-        # cv // 256 would put it past the last band.
-        return 0, 0
-    _check_range(cv, MAX_CV_EXT - 1, f"extended (CV{CV_FOR_PAGE0_ZERO} excepted)")
-    return cv // EXT_PAGE_SIZE, cv & 0xFF
+    if cv != CV_FOR_PAGE0_ZERO:
+        _check_range(cv, MAX_CV_EXT - 1, f"extended (CV{CV_FOR_PAGE0_ZERO} excepted)")
+    return _band_fields(cv)
 
 
 def z21_cv_fields(cv: int) -> tuple[int, int]:
@@ -3756,16 +3857,64 @@ def join_cv_field(msb: int, lsb: int) -> int:
     return (msb << 8) | lsb
 ```
 
-- [ ] **Step 6: Implement the three inverse helpers**
+- [ ] **Step 6: Implement the inverse helpers**
 
 Append to `src/railctl/xbus/cv.py`:
 
 ```python
-def decode_echo(encoding: CvEncoding, raw: int, *, page_index: int = 0) -> int:
+def _decode_zero_based_echo(raw: int, limit: int) -> int:
+    """The zero-based inverse shared by POM (once its convention is stated) and
+    Z21 (always, since Z21's is measured).
+
+    Bounded by `limit`, the CV space of the encoding calling this - not by the
+    width of the 16-bit wire field. See `decode_echo` for why an inverse bounded
+    only by the field is dangerous.
+    """
+    if not 0 <= raw <= limit - 1:
+        raise ValueError(f"echo {raw} is not a wire CV in 0..{limit - 1}")
+    return raw + 1
+
+
+def decode_echo(
+    encoding: CvEncoding,
+    raw: int,
+    *,
+    page_index: int | None = None,
+    zero_based: bool | None = None,
+) -> int:
     """Turn the CV a reply echoed back into a 1-based CV number.
 
     `raw` is the 16-bit wire field for POM and Z21 (see `join_cv_field`) and the
     single C byte for the direct and extended opcodes.
+
+    `zero_based` applies ONLY to `POM_ZERO_BASED`, the one encoding whose echo
+    convention `echo_candidates` already documents as unmeasured on this
+    hardware (docs/probe-results.md, R1 - no POM reply has ever come back):
+
+    * `zero_based=True` - the existing behaviour: `raw` must be a zero-based
+      wire value in `0..MAX_CV_POM - 1`, and the answer is `raw + 1`.
+    * `zero_based=False` - the one-based reading: `raw` must already be the
+      1-based CV, in `CV_MIN..MAX_CV_POM`, and the answer is `raw` itself.
+    * `zero_based=None` (the default) raises, rather than guessing which
+      reading applies - a guessed convention could silently decode the first
+      genuine POM reply under the wrong CV number, which is the exact
+      "wrong value under the right name" failure this module exists to
+      prevent. `Capabilities.pom_echo_zero_based` is where the real answer
+      comes from once a POM reply is finally observed.
+
+    `Z21_16BIT` is NOT affected by `zero_based`: its echo is the measured
+    one-based band byte (see `echo_candidates`), never a guess.
+
+    `page_index` applies ONLY to `SERVICE_EXT`, because that is the one
+    encoding whose echo byte cannot carry its own band - the band comes from
+    the request the caller issued, and defaulting it to band 0 would silently
+    decode a band-1..3 echo as band 0: off by 256, 512 or 768, with no error.
+    `page_index=None` (the default) raises rather than assuming band 0.
+
+    Passing `zero_based` to any encoding but `POM_ZERO_BASED`, or `page_index`
+    to any encoding but `SERVICE_EXT`, raises `ValueError` rather than being
+    silently ignored: a parameter that does nothing is how the next reader
+    learns the wrong lesson about what it controls.
 
     The extended inverse is NOT `raw or 256`. That fudge belongs to the legacy
     direct opcode; used here it decodes CV256 as 512, CV512 as 768 and CV768 as
@@ -3779,16 +3928,45 @@ def decode_echo(encoding: CvEncoding, raw: int, *, page_index: int = 0) -> int:
     layer as a legitimate result, which is the "wrong value under the right name"
     failure this whole module exists to prevent.
     """
-    limit = _ZERO_BASED_MAXIMA.get(encoding)
-    if limit is not None:
-        if not 0 <= raw <= limit - 1:
-            raise ValueError(f"echo {raw} is not a wire CV in 0..{limit - 1}")
-        return raw + 1
+    if encoding is CvEncoding.POM_ZERO_BASED:
+        if page_index is not None:
+            raise ValueError("page_index has no meaning for POM_ZERO_BASED; omit it")
+        if zero_based is None:
+            raise ValueError(
+                "the POM echo convention is not established on this hardware: no "
+                "POM reply has ever been observed (docs/probe-results.md, R1), so "
+                "the caller must state zero_based explicitly. "
+                "Capabilities.pom_echo_zero_based is where that answer comes from "
+                "once a real reply is seen."
+            )
+        if zero_based:
+            return _decode_zero_based_echo(raw, MAX_CV_POM)
+        if not CV_MIN <= raw <= MAX_CV_POM:
+            raise ValueError(f"echo {raw} is not a wire CV in {CV_MIN}..{MAX_CV_POM}")
+        return raw
+    if zero_based is not None:
+        raise ValueError(
+            f"zero_based has no meaning for {encoding.name}; only "
+            f"POM_ZERO_BASED's echo convention is unmeasured"
+        )
+    if encoding is CvEncoding.Z21_16BIT:
+        if page_index is not None:
+            raise ValueError("page_index has no meaning for Z21_16BIT; omit it")
+        return _decode_zero_based_echo(raw, MAX_CV_Z21)
     _check_byte(raw, "echo")
     if encoding is CvEncoding.SERVICE_DIRECT:
+        if page_index is not None:
+            raise ValueError("page_index has no meaning for SERVICE_DIRECT; omit it")
         if raw == 0:
             raise ValueError("raw 0 is not a direct-mode CV echo")
         return raw
+    if page_index is None:
+        raise ValueError(
+            "SERVICE_EXT cannot decode an echo without page_index: the echo byte "
+            "carries no band of its own, so a caller who forgets it decodes a "
+            "band-1..3 echo as band 0 - off by 256, 512 or 768, with no error. "
+            "Pass the page_index the request itself carried."
+        )
     if not 0 <= page_index < len(EXT_READ_OPCODES):
         raise ValueError(f"page index {page_index} outside 0..{len(EXT_READ_OPCODES) - 1}")
     if page_index == 0 and raw == 0:
@@ -3839,6 +4017,9 @@ def echo_candidates(
         return frozenset({zero_form, one_form})
     if encoding is CvEncoding.SERVICE_DIRECT:
         return frozenset({direct_cv_byte(cv)})
+    if encoding is CvEncoding.Z21_16BIT:
+        _check_range(cv, MAX_CV_Z21, "Z21")
+        return frozenset({_band_fields(cv)[1]})
     return frozenset({ext_cv_fields(cv)[1]})
 
 
@@ -4792,9 +4973,12 @@ git commit -m "feat(xbus): add command encoders with golden byte vectors"
     error, both being ints. **Construct by keyword only.** `address` is always `None` from `parse`
     and is attached later with `dataclasses.replace`.
   - `class FunctionState13To28(f13_f20: int, f21_f28: int)` — the `E3 52` reply to `E3 09`
-  - `class Other(telegram: bytes, reason: str = "unknown_form")` — `reason` is one of
-    `"unknown_form"`, `"checksum"`, `"length"`, `"empty"`. The default keeps the spec's positional
-    `Other(telegram)` shape constructible.
+  - `Reason = Literal["checksum", "length", "empty", "unknown_form"]`, with module constants
+    `REASON_CHECKSUM`, `REASON_LENGTH`, `REASON_EMPTY`, `REASON_UNKNOWN_FORM` so a caller compares
+    against a named constant rather than a string literal that could be mistyped and silently never
+    match.
+  - `class Other(telegram: bytes, reason: Reason = REASON_UNKNOWN_FORM)`. The default keeps the
+    spec's positional `Other(telegram)` shape constructible.
   - `Reply` — the union type of all of the above
   - `parse(telegram: bytes) -> Reply`
   - `HEADER_61_REPLIES: dict[int, Reply]`, `SPEED_STEP_MODES: dict[int, int]`,
@@ -4838,6 +5022,10 @@ import pytest
 from railctl.xbus.codec import encode
 from railctl.xbus.replies import (
     HEADER_61_REPLIES,
+    REASON_CHECKSUM,
+    REASON_EMPTY,
+    REASON_LENGTH,
+    REASON_UNKNOWN_FORM,
     TRANSIENT_REPLIES,
     UNSUPPORTED,
     CvValue,
@@ -5144,7 +5332,7 @@ def test_an_unrecognised_but_well_formed_telegram_becomes_other_without_raising(
     reply = parse(tg("71 AA DB"))
     assert isinstance(reply, Other)
     assert reply.telegram == tg("71 AA DB")
-    assert reply.reason == "unknown_form"
+    assert reply.reason == REASON_UNKNOWN_FORM
 
 
 def test_a_telegram_with_a_broken_xor_says_so_instead_of_just_being_unknown():
@@ -5159,7 +5347,7 @@ def test_a_telegram_with_a_broken_xor_says_so_instead_of_just_being_unknown():
     """
     reply = parse(tg("62 22 07 48"))
     assert isinstance(reply, Other)
-    assert reply.reason == "checksum"
+    assert reply.reason == REASON_CHECKSUM
 
 
 def test_a_telegram_whose_length_disagrees_with_its_header_says_length():
@@ -5167,7 +5355,7 @@ def test_a_telegram_whose_length_disagrees_with_its_header_says_length():
     arrive. Truncation is never filled in with defaults."""
     reply = parse(tg("63 14"))
     assert isinstance(reply, Other)
-    assert reply.reason == "length"
+    assert reply.reason == REASON_LENGTH
 
 
 def test_a_well_formed_telegram_with_no_data_bytes_is_reported_as_empty():
@@ -5177,7 +5365,7 @@ def test_a_well_formed_telegram_with_no_data_bytes_is_reported_as_empty():
     and not a truncation."""
     reply = parse(tg("80 80"))
     assert isinstance(reply, Other)
-    assert reply.reason == "empty"
+    assert reply.reason == REASON_EMPTY
 
 
 @pytest.mark.parametrize(
@@ -5259,6 +5447,7 @@ own length guard, and none has one.
 from __future__ import annotations
 
 from dataclasses import dataclass
+from typing import Literal
 
 from railctl.errors import ProtocolError, XBusChecksumError
 from railctl.xbus import codec
@@ -5540,11 +5729,23 @@ class FunctionState13To28:
     f21_f28: int
 
 
+# The four causes `Other.reason` keeps apart. A plain `str` field lets a caller
+# compare against a mistyped literal and never match, which silently treats a
+# damaged cable the same as an unrecognised opcode - the distinction Other
+# exists to preserve is then lost again at the comparison site.
+Reason = Literal["checksum", "length", "empty", "unknown_form"]
+
+REASON_CHECKSUM: Reason = "checksum"
+REASON_LENGTH: Reason = "length"
+REASON_EMPTY: Reason = "empty"
+REASON_UNKNOWN_FORM: Reason = "unknown_form"
+
+
 @dataclass(frozen=True, slots=True)
 class Other:
     """Anything this module does not turn into a typed reply, bytes preserved.
 
-    `reason` keeps three different causes apart, because their remedies are
+    `reason` keeps four different causes apart, because their remedies are
     opposite:
 
     - "checksum" - the XOR did not hold. The LINK is damaging bytes; check the
@@ -5564,7 +5765,7 @@ class Other:
     """
 
     telegram: bytes
-    reason: str = "unknown_form"
+    reason: Reason = REASON_UNKNOWN_FORM
 
 
 Reply = (
@@ -5665,7 +5866,7 @@ def _loco_info(data: bytes) -> LocoInfo:
 def parse(telegram: bytes) -> Reply:
     """Turn one bare telegram into a typed reply. Never raises.
 
-    The three failure causes are kept apart in Other.reason - see Other. The
+    The four failure causes are kept apart in Other.reason - see Other. The
     XBusChecksumError branch must come first: it is a subclass of
     XBusDecodeError, so catching ProtocolError first would swallow it and every
     corrupt link would look like a truncated frame.
@@ -5673,11 +5874,11 @@ def parse(telegram: bytes) -> Reply:
     try:
         header, data = codec.decode(telegram)
     except XBusChecksumError:
-        return Other(telegram=telegram, reason="checksum")
+        return Other(telegram=telegram, reason=REASON_CHECKSUM)
     except ProtocolError:
-        return Other(telegram=telegram, reason="length")
+        return Other(telegram=telegram, reason=REASON_LENGTH)
     if not data:
-        return Other(telegram=telegram, reason="empty")
+        return Other(telegram=telegram, reason=REASON_EMPTY)
     db0 = data[0]
 
     if header == HDR_INTERFACE:
@@ -5709,7 +5910,7 @@ def parse(telegram: bytes) -> Reply:
     # speed steps and in_use_by_other for a locomotive nobody asked about.
     if header == HDR_LOCO_INFO and not data[0] & IDENT_RESERVED_MASK:
         return _loco_info(data)
-    return Other(telegram=telegram, reason="unknown_form")
+    return Other(telegram=telegram, reason=REASON_UNKNOWN_FORM)
 ```
 
 - [ ] **Step 4: Run the tests to verify they pass**
