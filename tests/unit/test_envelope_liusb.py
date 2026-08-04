@@ -119,16 +119,24 @@ def test_a_stray_prefix_in_front_of_a_real_frame_does_not_swallow_it(env):
 
 
 def test_a_stray_prefix_further_into_the_buffer_still_resyncs(env):
-    """Mutation pinning. docs/test-hardening.md records the most serious survivor
-    in frames.py as the salvage scan starting at pos << 1 instead of pos + 1:
-    with the noise at the FRONT the doubled offset still lands near the frame,
-    and every test passed. With the noise further in it jumps past the frame and
-    nothing comes back at all.
+    """Mutation pinning for `_salvage_start`'s own offset arithmetic (`pos`
+    doubled to `pos << 1` instead of used directly), not the `_salvage(buffer,
+    pos + 1)` base-offset shape docs/test-hardening.md records for
+    tools/probe/frames.py - LiUsbEnvelope's scan has no base-offset argument to
+    mutate that way.
+
+    The real salvage offset has to land on an odd number, or `pos << 1` (which
+    is always even) can coincide with it by chance and the mutant hides behind
+    a green suite - that is exactly what happened when this test fed a stray
+    prefix at an even offset: `_complete_at(1 << 1)` found the same frame
+    `_complete_at(2)` would have, and the mutant passed. The extra `\xff` here
+    pushes the real frame to offset 3 so the two expressions diverge.
     """
-    env.feed(b"\xff\xfe" + ACK + b"\xff\xfe" + b"\xff\xfe" + VERSION_REPLY)
+    env.feed(b"\xff\xfe" + ACK + b"\xff\xfe\xff" + b"\xff\xfe" + VERSION_REPLY)
     assert env.pop() == Frame(Kind.SOLICITED, ACK)
     assert env.pop() == Frame(Kind.SOLICITED, VERSION_REPLY)
     assert env.pop() is None
+    assert env.stats.bytes_dropped == 3
 
 
 def test_an_incomplete_frame_with_nothing_behind_it_is_waited_for(env):
