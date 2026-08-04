@@ -1125,7 +1125,8 @@ class AmbiguousPort(TransportError):
 
 
 class PortBusy(TransportError):
-    """The port exists but another process holds it."""
+    """The port exists but could not be opened - another process holds it,
+    or permission was denied. The message carries the OS strerror either way."""
 
 
 class PortConfigError(TransportError):
@@ -1255,6 +1256,13 @@ def exit_code_for(exc: BaseException) -> int:
             return code
     return UNMAPPED_EXIT_CODE
 ```
+
+> Corrected after review: `PortBusy`'s docstring said only "another process holds
+> it", but `serial_posix.py`'s `open()` raises `PortBusy` for every `OSError`
+> that is not `FileNotFoundError`, including `PermissionError`. The docstring
+> now names both causes instead of describing one and silently covering the
+> other. No new error class, and the exception raised does not change - the
+> message already carries `strerror`, and both causes map to the same exit code.
 
 Note on codes 0, 2 and 8: they are never in `EXIT_CODES`. 0 is success, 2 is a Typer usage error or
 a plain `ValueError` from the facade, and 8 is partial success - all three are decided by
@@ -9077,13 +9085,17 @@ git commit -m "feat(link): add the one-command link with retries, timeouts and s
 `transport.open_link()` - is satisfied because `transport_for()` is the single place that
 looks inside the string, and nothing above `transport` may split it. `serial_posix.py` is the
 only module in `railctl` that owns a file descriptor and is omitted from coverage because it
-has no logic. The spec puts the budget at "~60 lines"; the file Step 3 writes measures **88**
+has no logic. The spec puts the budget at "~60 lines"; the file Step 3 writes measures **94**
 code lines by the count in Step 6 (non-blank, non-comment, docstring excluded), because the
 spec's estimate predates the error handling, the three properties and the context manager.
 **Step 6 fails above 95** - past that, logic has leaked into the one module coverage does not
 watch and belongs in `Link` or the envelope instead. `open_link` imports `Link` inside the function body: `link.py`
 type-hints `Transport` under `TYPE_CHECKING`, so a module-level import here would be the only
 edge closing the cycle.
+
+> Corrected after review: the figure was **88** before the review's `termios.error`
+> and end-of-file findings each added a handler to `open()` and `read()`. The
+> file now measures 94, still under the 95 budget this step enforces.
 
 - [ ] **Step 1: Write the failing target-grammar tests**
 
@@ -9204,6 +9216,8 @@ from dataclasses import dataclass
 from railctl.errors import PortBusy, PortConfigError, PortNotFound, PortNotOpen, TransportError
 
 BAUDRATE = 57600
+# Suggested read size for callers; Link uses its own private _READ_CHUNK, a
+# second constant with the same value that can drift without anything noticing.
 READ_CHUNK = 256
 WRITE_SELECT_TIMEOUT = 1.0
 # Link quotes this whenever a handshake or an exchange fails on a serial port.
@@ -9259,6 +9273,9 @@ class SerialTransport:
             if (termios.tcgetattr(fd)[2] & termios.CSIZE) != termios.CS8:
                 raise PortConfigError(f"{self._config.port} silently rejected 8-N-1")
             termios.tcflush(fd, termios.TCIOFLUSH)
+        except termios.error as exc:
+            os.close(fd)
+            raise PortConfigError(f"{self._config.port} is not a serial device: {exc}") from exc
         except BaseException:
             os.close(fd)
             raise
@@ -9301,12 +9318,54 @@ class SerialTransport:
         if not select.select([fd], [], [], max(0.0, timeout))[0]:
             return b""
         try:
-            return os.read(fd, max_bytes)
+            data = os.read(fd, max_bytes)
         except BlockingIOError:
             return b""
         except OSError as exc:
             raise TransportError(f"read from {self._config.port} failed: {exc}") from exc
+        if not data:
+            # select() said readable, then os.read() returned nothing: that is
+            # end of file, not an idle port. Returning b"" here would read as
+            # silence one layer up and the real fault would only surface on the
+            # next write.
+            raise TransportError(f"{self._config.port} closed while reading")
+        return data
 ```
+
+> Corrected after review: three findings from the review of this file were
+> closed here.
+>
+> `termios.error` is not an `OSError` subclass, so it escaped `open()` untyped -
+> a bad path like `/dev/null` raised a bare `termios.error` instead of a
+> `RailctlError`, and the CLI printed a traceback instead of a message plus
+> hint. `except termios.error` is added before the `except BaseException`
+> cleanup arm, closing the fd itself before raising `PortConfigError` so the
+> cleanup is not lost by intercepting the exception earlier in the chain.
+>
+> `read()` could not tell a closed port from an idle one: on a pty with the
+> master closed, `os.read()` returns `b""` forever after `select()` reports
+> readable, which is end of file, not silence. Read the code path and weigh
+> this one - it is what the note below covers.
+>
+> `READ_CHUNK` is exported here and referenced nowhere; `link.py`'s private
+> `_READ_CHUNK` is the constant that actually governs reads. A comment now
+> says so at the definition, so the next reader does not assume changing one
+> changes the other.
+>
+> **Risk the owner must weigh before the hardware acceptance run**: turning an
+> end-of-file `read()` into `TransportError` is safe on every POSIX read
+> semantics this project has exercised - a pty with the master closed, and by
+> extension a real USB CDC port that has been unplugged or reset by the OS.
+> The one scenario that would make this the wrong call is a real USB CDC port
+> on Darwin that can report readable and then return `b""` while the device is
+> still alive and about to send more data - POSIX read() never does that for a
+> character device in this driver class, but the CDC-ACM driver is a black box
+> from user space, and this project has not run this exact path against the
+> physical YD7010 yet. Task 13's hardware acceptance suite is what settles it:
+> if `test_open_link_auto_completes_the_handshake` or a real session ever
+> raises this `TransportError` while the station is provably still connected,
+> this change is wrong and needs to fall back to treating a single `b""` as
+> idle, escalating only after a run of them.
 
 - [ ] **Step 4: Implement discovery and `open_link`**
 
@@ -9418,11 +9477,15 @@ Run:
 .venv/bin/python -c "import ast,pathlib; s=pathlib.Path('src/railctl/transport/serial_posix.py').read_text(); print(len([l for l in s.splitlines() if l.strip() and not l.strip().startswith('#')]) - len(ast.get_docstring(ast.parse(s)).splitlines()) - 1)"
 ```
 
-Expected: `88` for the file Step 3 writes. **Fail the step above 95.** If it climbs past that,
+Expected: `94` for the file Step 3 writes. **Fail the step above 95.** If it climbs past that,
 protocol logic has leaked into the one module coverage does not watch - move it into `Link`
 or the envelope. Nothing currently in the file is removable: it is `open`, `close`, `read`,
 `write`, `flush_input`, three properties, the context manager and the `SerialConfig`
 dataclass, with no branch that is not an error path.
+
+> Corrected after review: the figure was `88` before review findings added a
+> `termios.error` handler to `open()` and an end-of-file check to `read()`,
+> which moved the count to 94, still under the 95 ceiling.
 
 - [ ] **Step 7: Verify the `hardware` marker is registered - do not register it again**
 

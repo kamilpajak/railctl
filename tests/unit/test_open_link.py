@@ -3,12 +3,18 @@ from __future__ import annotations
 
 import pytest
 
+import railctl.transport as transport_module
+from railctl.envelope import Kind
+from railctl.envelope.liusb import LiUsbEnvelope
 from railctl.errors import AmbiguousPort, PortNotFound, TransportError, UnsupportedFeatureError
-from railctl.transport import find_xpressnet_port, transport_for
+from railctl.transport import find_xpressnet_port, list_candidate_ports, open_link, transport_for
+from railctl.transport.fake import FakeClock, FakeTransport
 from railctl.transport.serial_posix import BAUDRATE, CDC_INDEX_HINT, SerialTransport
 
 PORT_43 = "/dev/cu.usbmodem7010A00011943"
 PORT_OTHER = "/dev/cu.usbmodemAAAA3"
+VERSION_REQUEST = b"\x21\x21\x00"
+VERSION_REPLY = b"\x63\x21\x40\x12\x10"
 
 # str(exc) is the message alone and exc.hint is the hint, because the CLI prints
 # them on separate lines (spec line 159). Anything asserted about advice is read
@@ -75,3 +81,62 @@ def test_an_unknown_target_names_the_forms_that_work():
 
 def test_the_baudrate_is_the_one_lenz_23151_specifies():
     assert BAUDRATE == 57600
+
+
+def test_list_candidate_ports_globs_the_xpressnet_pattern_and_sorts(monkeypatch):
+    """PORT_GLOB picks the CDC interface railctl talks to. Get the pattern wrong
+    - for example "*1", the silent LocoNet interface - and this is the only test
+    that would notice. sorted() is what decides which port AmbiguousPort names
+    first in its hint, so an unsorted glob.glob() result must come back sorted.
+    """
+    seen_patterns = []
+    unsorted = [PORT_OTHER, PORT_43]
+
+    def fake_glob(pattern):
+        seen_patterns.append(pattern)
+        return unsorted
+
+    monkeypatch.setattr(transport_module.glob, "glob", fake_glob)
+
+    result = list_candidate_ports()
+
+    assert seen_patterns == ["/dev/cu.usbmodem*3"]
+    assert result == sorted(unsorted)
+
+
+def test_z21_host_with_no_port_is_unsupported_not_malformed():
+    """z21:HOST with no explicit port is understood and refused, never a parse
+    error - Z21_DEFAULT_PORT must be filled in for the message.
+    """
+    with pytest.raises(UnsupportedFeatureError) as caught:
+        transport_for("z21:192.168.0.111")
+    assert "192.168.0.111:21105" in str(caught.value)
+
+
+def test_z21_host_with_trailing_colon_and_no_port_is_malformed():
+    with pytest.raises(TransportError):
+        transport_for("z21:192.168.0.111:")
+
+
+def test_transport_for_auto_uses_the_discovered_port(monkeypatch):
+    monkeypatch.setattr(transport_module, "list_candidate_ports", lambda: [PORT_43])
+
+    transport = transport_for("auto")
+
+    assert transport.identity == PORT_43
+
+
+def test_open_link_completes_the_handshake_through_a_fake_transport(monkeypatch):
+    envelope = LiUsbEnvelope()
+    fake = FakeTransport(clock=FakeClock())
+    fake.expect(
+        envelope.frame(Kind.SOLICITED, VERSION_REQUEST),
+        reply=envelope.frame(Kind.SOLICITED, VERSION_REPLY),
+    )
+    monkeypatch.setattr(transport_module, "transport_for", lambda target: fake)
+
+    link = open_link("auto")
+    try:
+        assert link.version_telegram == VERSION_REPLY
+    finally:
+        link.close()
