@@ -27,6 +27,8 @@ from dataclasses import dataclass
 from railctl.errors import PortBusy, PortConfigError, PortNotFound, PortNotOpen, TransportError
 
 BAUDRATE = 57600
+# Suggested read size for callers; Link uses its own private _READ_CHUNK, a
+# second constant with the same value that can drift without anything noticing.
 READ_CHUNK = 256
 WRITE_SELECT_TIMEOUT = 1.0
 # Link quotes this whenever a handshake or an exchange fails on a serial port.
@@ -82,6 +84,9 @@ class SerialTransport:
             if (termios.tcgetattr(fd)[2] & termios.CSIZE) != termios.CS8:
                 raise PortConfigError(f"{self._config.port} silently rejected 8-N-1")
             termios.tcflush(fd, termios.TCIOFLUSH)
+        except termios.error as exc:
+            os.close(fd)
+            raise PortConfigError(f"{self._config.port} is not a serial device: {exc}") from exc
         except BaseException:
             os.close(fd)
             raise
@@ -124,8 +129,15 @@ class SerialTransport:
         if not select.select([fd], [], [], max(0.0, timeout))[0]:
             return b""
         try:
-            return os.read(fd, max_bytes)
+            data = os.read(fd, max_bytes)
         except BlockingIOError:
             return b""
         except OSError as exc:
             raise TransportError(f"read from {self._config.port} failed: {exc}") from exc
+        if not data:
+            # select() said readable, then os.read() returned nothing: that is
+            # end of file, not an idle port. Returning b"" here would read as
+            # silence one layer up and the real fault would only surface on the
+            # next write.
+            raise TransportError(f"{self._config.port} closed while reading")
+        return data
