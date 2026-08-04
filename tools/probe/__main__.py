@@ -3,8 +3,10 @@
 Read-only: no decoder CV is ever written.
 
 The function checks re-assert a function's EXISTING value, so nothing on the
-layout changes -- but that only holds because the entry point reads F0 first.
-When F0 cannot be read the R5 check is skipped, not guessed.
+layout changes -- but that only holds because the entry point reads the state
+first: F0 for the single-function check, and the whole F13-F28 bitmask for the
+group check, whose commands carry every bit at once. When either cannot be
+read, that check is skipped, not guessed.
 """
 
 from __future__ import annotations
@@ -19,22 +21,32 @@ from tools.probe.commands import version as version_cmd
 from tools.probe.link import SerialLink, discover_ports
 from tools.probe.replies import Version, parse
 
+DISCOVERY_WINDOW = 2.5
+DISCOVERY_ATTEMPTS = 2
+
 
 def find_xpressnet_port() -> str:
-    """The XpressNet port is the one that answers the version request."""
+    """The XpressNet port is the one that answers the version request.
+
+    Each port gets more than one attempt. Measured on the YD7010 on 2026-08-04:
+    the first exchange after the device enumerates can take longer than a
+    second and a half, while every later one answers in under 300 ms. A single
+    short attempt therefore reports a working station as a dead port.
+    """
     candidates = discover_ports()
     if not candidates:
         raise SystemExit("no /dev/cu.usbmodem7010* ports found; is the YD7010 connected?")
     for path in candidates:
-        try:
-            with SerialLink(path) as link:
-                frames = link.exchange(version_cmd(), window=1.5)
-        except (OSError, termios.error):
-            # termios.error is NOT a subclass of OSError, so a failure inside
-            # tcgetattr/tcsetattr would otherwise escape and abort discovery.
-            continue
-        if any(isinstance(parse(f.telegram), Version) for f in frames):
-            return path
+        for _ in range(DISCOVERY_ATTEMPTS):
+            try:
+                with SerialLink(path) as link:
+                    frames = link.exchange(version_cmd(), window=DISCOVERY_WINDOW)
+            except (OSError, termios.error):
+                # termios.error is NOT a subclass of OSError, so a failure inside
+                # tcgetattr/tcsetattr would otherwise escape and abort discovery.
+                break
+            if any(isinstance(parse(f.telegram), Version) for f in frames):
+                return path
     raise SystemExit(
         "none of these ports answered a version request: "
         + ", ".join(candidates)
@@ -81,7 +93,26 @@ def main(argv: list[str] | None = None) -> int:
         else:
             results.append(checks.check_single_function(link, args.address, f0_is_on=info.f0))
 
-        results.append(checks.check_function_groups(link, args.address))
+        # The group commands carry the whole F13-F28 bitmask, so sending them
+        # blind would switch off every function currently on. Read the state
+        # and hand it straight back, or skip - never guess.
+        fn_state, fn_frames = checks.read_function_state_13_28(link, args.address)
+        if fn_state is None:
+            results.append(
+                checks.CheckResult(
+                    "function_groups_4_5",
+                    None,
+                    "skipped: could not read the current F13-F28 state, and the probe will "
+                    "not send a function group whose bits it would have to guess",
+                    checks._hexdump(fn_frames),
+                )
+            )
+        else:
+            results.append(
+                checks.check_function_groups(
+                    link, args.address, f13_f20=fn_state.f13_f20, f21_f28=fn_state.f21_f28
+                )
+            )
         if args.band_address:
             results.append(checks.check_address_band(link, args.band_address))
         if not args.no_programming_track:

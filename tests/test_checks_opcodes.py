@@ -155,7 +155,7 @@ def test_function_groups_need_both_group_4_and_group_5():
             GROUP5_AT_3: [b"\xff\xfe\x61\x82\xe3"],
         }
     )
-    assert check_function_groups(link, address=3).value is False
+    assert check_function_groups(link, address=3, f13_f20=0, f21_f28=0).value is False
 
 
 def test_function_groups_true_when_both_are_accepted():
@@ -165,26 +165,26 @@ def test_function_groups_true_when_both_are_accepted():
             GROUP5_AT_3: [b"\xff\xfe\x01\x04\x05"],
         }
     )
-    assert check_function_groups(link, address=3).value is True
+    assert check_function_groups(link, address=3, f13_f20=0, f21_f28=0).value is True
 
 
 def test_function_groups_false_when_group_4_rejected_and_group_5_silent():
     link = FakeLink({GROUP4_AT_3: [b"\xff\xfe\x61\x82\xe3"]})
-    result = check_function_groups(link, address=3)
+    result = check_function_groups(link, address=3, f13_f20=0, f21_f28=0)
     assert result.value is False
     assert "rejected" in result.detail
 
 
 def test_function_groups_false_when_group_4_silent_and_group_5_rejected():
     link = FakeLink({GROUP5_AT_3: [b"\xff\xfe\x61\x82\xe3"]})
-    result = check_function_groups(link, address=3)
+    result = check_function_groups(link, address=3, f13_f20=0, f21_f28=0)
     assert result.value is False
     assert "rejected" in result.detail
 
 
 def test_function_groups_unknown_when_both_groups_silent():
     link = FakeLink({})
-    result = check_function_groups(link, address=3)
+    result = check_function_groups(link, address=3, f13_f20=0, f21_f28=0)
     assert result.value is None
     assert "no reply" in result.detail
 
@@ -196,7 +196,7 @@ def test_function_groups_unknown_when_one_group_busy_and_the_other_accepted():
             GROUP5_AT_3: [b"\xff\xfe\x61\x1f\x7e"],
         }
     )
-    result = check_function_groups(link, address=3)
+    result = check_function_groups(link, address=3, f13_f20=0, f21_f28=0)
     assert result.value is None
     # Verify frame was actually parsed (not dropped for bad checksum) and BUSY was seen
     assert len(result.frames) == 2  # One ACK from G4, one BUSY marker from G5
@@ -228,7 +228,7 @@ def test_command_station_busy_is_not_acceptance_of_a_function_group():
             GROUP5_AT_3: [build(b"\x61\x81")],
         }
     )
-    assert check_function_groups(link, address=3).value is None
+    assert check_function_groups(link, address=3, f13_f20=0, f21_f28=0).value is None
 
 
 def test_z21_opcodes_unknown_when_z21_succeeds_but_direct_silent():
@@ -253,3 +253,16 @@ def test_a_z21_form_high_band_reply_is_reported_without_a_confirmed_echo():
     assert result.value["service_ext_cv_high_band"] is True
     assert result.value["service_ext_cv_high_value"] == 0x2D
     assert "not cross-checked" in result.detail
+
+
+def test_function_groups_re_assert_the_current_state_instead_of_clearing_it():
+    # The group commands carry the whole bitmask, so all-zero bits would switch
+    # off every function currently on. F13, F15 and F22 are on here, and both
+    # commands must go out carrying exactly those bits back.
+    f13_f20, f21_f28 = 0b0000_0101, 0b0000_0010
+    link = FakeLink({})
+    check_function_groups(link, address=3, f13_f20=f13_f20, f21_f28=f21_f28)
+    assert link.sent == [
+        build(bytes([0xE4, 0x23, 0x00, 0x03, f13_f20])),
+        build(bytes([0xE4, 0x28, 0x00, 0x03, f21_f28])),
+    ]

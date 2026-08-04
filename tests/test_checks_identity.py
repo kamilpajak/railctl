@@ -7,6 +7,7 @@ from tools.probe.checks import (
     check_identity,
     check_loco_info,
     read_f0,
+    read_function_state_13_28,
 )
 from tools.probe.fake import FakeLink
 from tools.probe.frames import build
@@ -169,3 +170,19 @@ def test_main_skips_single_function_check_without_crashing_on_non_loco_info_repl
     assert payload["capabilities"]["single_function_cmd"] is None
     skipped = next(c for c in payload["checks"] if c["name"] == "single_function_cmd")
     assert "could not read F0" in skipped["detail"]
+
+
+def test_read_function_state_13_28_parses_the_e3_52_reply():
+    # Lenz 23151 section 3.1.9.2: E3 52 D1 D2, where D1 bit 0 is F13 and D2
+    # bit 0 is F21.
+    link = FakeLink({b"\xe3\x09\x00\x03": [build(b"\xe3\x52\x05\x02")]})
+    state, frames = read_function_state_13_28(link, address=3)
+    assert (state.f13_f20, state.f21_f28) == (0b0000_0101, 0b0000_0010)
+    assert len(frames) == 1
+
+
+def test_read_function_state_13_28_returns_none_without_a_state_reply():
+    link = FakeLink({b"\xe3\x09\x00\x03": [build(b"\x61\x82")]})
+    state, frames = read_function_state_13_28(link, address=3)
+    assert state is None
+    assert len(frames) == 1

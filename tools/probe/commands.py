@@ -52,6 +52,18 @@ def loco_info(address: int) -> bytes:
     return bytes([0xE3, 0x00, high, low])
 
 
+def function_state_13_28(address: int) -> bytes:
+    """Request the ON/OFF state of F13-F28 (Lenz 23151 section 3.2.25.3, from V3.6).
+
+    Note the German distinction in that document: "Funktionszustand" (0xE3 0x09)
+    is the on/off state, which is what this asks for. "Funktionsstatus"
+    (0xE3 0x08) is whether each function is momentary or latching, which is a
+    different question.
+    """
+    high, low = loco_address_bytes(address)
+    return bytes([0xE3, 0x09, high, low])
+
+
 def service_result() -> bytes:
     return b"\x21\x10"
 
