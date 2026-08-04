@@ -1,0 +1,59 @@
+# .github/workflows/ci.yml
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        python-version: ["3.11", "3.12", "3.13", "3.14"]
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: astral-sh/setup-uv@v9
+        with:
+          enable-cache: true
+          python-version: ${{ matrix.python-version }}
+
+      - name: Install the package and dev dependencies
+        # --frozen refuses to re-resolve: if uv.lock is stale relative to
+        # pyproject.toml, this step fails instead of silently installing a
+        # resolution nobody committed and nobody can reproduce locally.
+        run: uv sync --frozen
+
+      - name: Assert no serial port is attached
+        # The whole non-hardware suite must pass on a machine that has never seen
+        # a YD7010. If a runner ever grew a serial device, a test could start
+        # passing for the wrong reason and nothing would say so.
+        run: |
+          ! ls /dev/ttyUSB* /dev/ttyACM* 2>/dev/null
+
+      - name: Ruff check
+        run: uv run ruff check .
+
+      - name: Ruff format
+        run: uv run ruff format --check .
+
+      - name: Tests
+        # The `ci` hypothesis profile in tests/conftest.py raises max_examples from
+        # 100 to 500. It costs about 13 s locally and is the whole point of having
+        # property tests run somewhere slower than a developer's patience.
+        env:
+          HYPOTHESIS_PROFILE: ci
+        run: uv run pytest
+
+      - name: The M1 probe still imports
+        # tools/ is deliberately outside the wheel. This is the only thing that
+        # would notice if the pytest pythonpath entry that keeps it importable
+        # were removed.
+        run: uv run python -c "import tools.probe; print(tools.probe.__file__)"
