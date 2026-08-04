@@ -728,12 +728,17 @@ recorded cosmic-ray baseline for `checks.py` in `docs/test-hardening.md` (462 mu
 - [ ] **Step 12: Format the tree and prove the probe's AST is unchanged**
 
 Run: `.venv/bin/python -m ruff format .`
-Expected: `8 files reformatted, 31 files left unchanged`
+Expected: `8 files reformatted, 33 files left unchanged`
 
 39 Python files in total: 30 exist today, and this task adds nine (`src/railctl/__init__.py`, six
 `__init__.py` files under `tests/`, `tests/hardware/test_marker.py`, `tests/unit/test_version.py`).
-`src/railctl/py.typed` is not a `.py` file, `README.md`, `LICENSE` and `CHANGELOG.md` are not code,
-and `docs/` is excluded by `extend-exclude`, so none of them is counted.
+`src/railctl/py.typed` is not a `.py` file, `LICENSE` has no extension, and `docs/` is excluded by
+`extend-exclude`, so none of them is counted.
+
+The other two are `README.md` and `CHANGELOG.md`. Measured on ruff 0.16.1: this version formats
+Markdown as well as Python, so both files are counted and left unchanged, which is why the total
+reads 33 rather than the 31 the Python-file arithmetic alone gives. A different ruff version may
+report 31. What matters is the eight reformatted files below, not the total.
 
 The eight are `tools/probe/checks.py` and seven files under `tests/probe/`; the repo has never been
 run through `ruff format`, and CI runs `ruff format --check`, so this has to happen once.
@@ -756,7 +761,8 @@ PY
 Expected: `AST identical after ruff format: True`
 
 Then: `.venv/bin/python -m ruff check . && .venv/bin/python -m ruff format --check .`
-Expected: `All checks passed!` followed by `39 files already formatted`
+Expected: `All checks passed!` followed by `41 files already formatted` (39 Python files plus the
+two Markdown files ruff 0.16.1 also formats)
 
 - [ ] **Step 13: Prove the mutation runner still works under the new addopts**
 
@@ -1242,7 +1248,8 @@ Expected: `335 passed, 1 deselected in 4.4s`
 - [ ] **Step 5: Lint**
 
 Run: `.venv/bin/python -m ruff check . && .venv/bin/python -m ruff format --check .`
-Expected: `All checks passed!` then `41 files already formatted`
+Expected: `All checks passed!` then `43 files already formatted` (Task 1's 41 plus the two files
+this task adds)
 
 - [ ] **Step 6: Commit**
 
@@ -1614,7 +1621,7 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
-      - uses: astral-sh/setup-uv@v9
+      - uses: astral-sh/setup-uv@v9.0.0
         with:
           enable-cache: true
           python-version: ${{ matrix.python-version }}
@@ -1653,11 +1660,20 @@ jobs:
         run: uv run python -c "import tools.probe; print(tools.probe.__file__)"
 ```
 
-`astral-sh/setup-uv@v9` (the current major, checked against the action's tags on 2026-08-04)
-replaces `actions/setup-python@v5`: it installs uv itself, and uv then
+`astral-sh/setup-uv@v9.0.0` replaces `actions/setup-python@v5`: it installs uv itself, and uv then
 provisions the interpreter named by `python-version` (mirroring `matrix.python-version`) the same
 way `.python-version` does locally, so there is no separate Python setup step. `enable-cache: true`
 caches the uv download cache between runs, keyed on `uv.lock`.
+
+The exact release tag, not a moving major. `astral-sh/setup-uv` publishes moving major tags only up
+to `v7`; from `v8` on there is no plain `v8` or `v9` ref, only exact releases (`v9.0.0` is the
+newest as of 2026-08-04). Writing `@v9` fails the job before a line of test code runs, at `Set up
+job`, with `Unable to resolve action astral-sh/setup-uv@v9, unable to find version v9`. Confirm the
+tag still exists before trusting this line:
+
+```bash
+gh api repos/astral-sh/setup-uv/releases/latest --jq '.tag_name'
+```
 
 `uv sync --frozen` is used here rather than a bare `uv sync`, and that choice is deliberate: a bare
 `uv sync` re-resolves and rewrites `uv.lock` if `pyproject.toml` changed since it was last
@@ -1685,13 +1701,14 @@ uv run ruff check . \
   && uv run python -c "import tools.probe; print(tools.probe.__file__)"
 ```
 
-Expected: `All checks passed!`, `42 files already formatted`, `342 passed, 1 deselected in 13s`,
+Expected: `All checks passed!`, `44 files already formatted`, `342 passed, 1 deselected in 13s`,
 then `/Users/jacoren/Developer/Personal/railctl/tools/probe/__init__.py`.
 
-42, not 43: Task 1 left 39 Python files, Task 2 added two (`src/railctl/errors.py`,
+42 Python files: Task 1 left 39, Task 2 added two (`src/railctl/errors.py`,
 `tests/unit/test_exit_codes.py`) for 41, and this task adds one (`tests/test_layering.py`).
 `.github/workflows/ci.yml` is YAML and is not counted, and `src/railctl/_layering_canary.py` was
-deleted in step 7.
+deleted in step 7. The count reads 44 because ruff 0.16.1 also formats `README.md` and
+`CHANGELOG.md`.
 
 - [ ] **Step 10: Commit**
 
