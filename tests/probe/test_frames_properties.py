@@ -110,7 +110,7 @@ def test_split_frames_never_raises_on_arbitrary_bytes(buffer: bytes):
 
 @given(st.binary(max_size=200))
 def test_the_remainder_is_always_a_suffix_of_the_input(buffer: bytes):
-    frames, rest = split_frames(buffer)
+    _frames, rest = split_frames(buffer)
     assert buffer.endswith(rest)
     assert len(rest) <= len(buffer)
 
