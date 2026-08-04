@@ -94,9 +94,13 @@ def run_pom(telegrams: list[bytes]):
 replies = st.lists(st.sampled_from(NON_REJECTIONS), max_size=4)
 
 
-@given(replies, replies, replies, replies)
+@given(replies, replies, replies, replies, replies)
 def test_only_an_explicit_rejection_can_ever_produce_false(
-    z21: list[bytes], single: list[bytes], group4: list[bytes], pom: list[bytes]
+    z21: list[bytes],
+    single: list[bytes],
+    group4: list[bytes],
+    group5: list[bytes],
+    pom: list[bytes],
 ):
     """Nothing short of `61 82` may be reported as a missing capability.
 
@@ -106,7 +110,11 @@ def test_only_an_explicit_rejection_can_ever_produce_false(
     """
     assert run_z21(z21) is not False
     assert run_single_function(single) is not False
-    assert run_groups(group4, group4) is not False
+    # The two groups are drawn independently: handing the same replies to both
+    # would leave the mixed cases - one group answering, the other not - to the
+    # Kleene truth table alone, and those are the cases the combination rule
+    # exists for.
+    assert run_groups(group4, group5) is not False
     assert run_pom(pom) is not False
 
 

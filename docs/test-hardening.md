@@ -485,6 +485,13 @@ rest is safe:
 - **`DECODER_TYPES`.** A data table with no consumer until the M2 identity gate.
 - **JSON indentation** and the exact quantity of noise `split_frames` discards.
   Neither is a contract.
+- **Markdown escaping in `_word`.** Its fallback is `str(value)`, so a capability
+  value containing `|` or a newline would break the table row it is rendered in.
+  Nothing reachable today produces one - the only scalars the checks publish are
+  integers, booleans and `None` - so no escaping was added rather than guess at
+  a rule for a case that does not exist. The property test restricts its
+  alphabet for the same reason and says so. A check that starts publishing free
+  text needs this revisited.
 
 ## When to run this again
 
