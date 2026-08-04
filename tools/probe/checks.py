@@ -11,6 +11,7 @@ from tools.probe.replies import (
     TRANSIENT,
     UNSUPPORTED,
     CvValue,
+    FunctionState13To28,
     LocoInfo,
     RegisterValue,
     Status,
@@ -417,10 +418,29 @@ def check_single_function(link: Link, address: int, *, f0_is_on: bool) -> CheckR
     return CheckResult("single_function_cmd", accepted, detail, _hexdump(frames))
 
 
-def check_function_groups(link: Link, address: int) -> CheckResult:
-    """Groups 4 (F13-F20) and F21-F28 (group 5). All bits zero, so nothing switches on."""
-    g4, g4_frames = _accepted(link, commands.function_group(address, 0x23, 0x00))
-    g5, g5_frames = _accepted(link, commands.function_group(address, 0x28, 0x00))
+def read_function_state_13_28(link: Link, address: int) -> tuple[FunctionState13To28 | None, list]:
+    """Current ON/OFF state of F13-F28, or (None, frames) if it could not be read."""
+    frames = link.exchange(commands.function_state_13_28(address), window=1.5)
+    for frame in frames:
+        reply = parse(frame.telegram)
+        if isinstance(reply, FunctionState13To28):
+            return reply, frames
+    return None, frames
+
+
+def check_function_groups(
+    link: Link, address: int, *, f13_f20: int, f21_f28: int
+) -> CheckResult:
+    """Groups 4 (F13-F20) and 5 (F21-F28), re-asserting the values they already hold.
+
+    Sending all-zero bits would switch OFF every function currently on in
+    F13-F28 - on a sound locomotive that is most of the interesting ones. The
+    caller must read the current state first and pass it here, exactly as the
+    R5 check requires the current F0 state. The two bytes come off the wire in
+    the layout these commands expect, so they can be handed straight back.
+    """
+    g4, g4_frames = _accepted(link, commands.function_group(address, 0x23, f13_f20))
+    g5, g5_frames = _accepted(link, commands.function_group(address, 0x28, f21_f28))
     dump = _hexdump(g4_frames) + _hexdump(g5_frames)
     # Three-valued AND (Kleene): a confirmed rejection of either group settles the
     # pair as unusable, even if the other group never answered. Testing for None

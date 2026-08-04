@@ -105,6 +105,21 @@ class LocoInfo:
 
 
 @dataclass(frozen=True)
+class FunctionState13To28:
+    """Reply 0xE3 0x52 (Lenz 23151 section 3.1.9.2): the ON/OFF state of F13-F28.
+
+    The two bytes are laid out exactly as the group 4 and group 5 function
+    commands expect them, so they can be handed straight back to re-assert the
+    current state:
+      f13_f20 = F20 F19 F18 F17 F16 F15 F14 F13  (bit 0 is F13)
+      f21_f28 = F28 F27 F26 F25 F24 F23 F22 F21  (bit 0 is F21)
+    """
+
+    f13_f20: int
+    f21_f28: int
+
+
+@dataclass(frozen=True)
 class Marker:
     name: str
 
@@ -144,7 +159,9 @@ class Unknown:
     telegram: bytes
 
 
-Reply = Version | Status | CvValue | RegisterValue | LocoInfo | Marker | Unknown
+Reply = (
+    Version | Status | CvValue | RegisterValue | LocoInfo | FunctionState13To28 | Marker | Unknown
+)
 
 # Lenz 23151 sections 3.1.2.7 to 3.1.2.9: the reply header names the band, and
 # C = 0..255 is an offset from its base. 0x14 is absent on purpose - see CvValue.
@@ -187,6 +204,8 @@ def parse(telegram: bytes) -> Reply:
             ident=db0,
             cv=None if base is None else base + telegram[2],
         )
+    if header == 0xE3 and db0 == 0x52 and len(telegram) >= 4:
+        return FunctionState13To28(f13_f20=telegram[2], f21_f28=telegram[3])
     if header == 0xE4 and len(telegram) >= 5:
         return LocoInfo(
             ident=db0,
