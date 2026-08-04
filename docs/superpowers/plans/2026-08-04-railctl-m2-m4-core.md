@@ -985,7 +985,18 @@ def test_subclasses_without_their_own_row_inherit_the_parent_code(exc: RailctlEr
 
 
 def test_every_class_in_the_tree_resolves_to_a_code_above_one():
-    unresolved = sorted(k.__name__ for k in _tree() if exit_code_for(k("x")) == UNMAPPED_EXIT_CODE)
+    """Builds each class with k.__new__(k), not k("x").
+
+    exit_code_for reads only type(exc).__mro__ and never touches instance state, so an
+    uninitialised instance is safe here. This removes the coupling to constructor
+    signatures: a future exception with a required keyword argument would otherwise raise
+    TypeError inside this comprehension, and the failure would read as unrelated. Plain
+    object.__new__(k) does not work here: BaseException defines its own __new__, and calling
+    object.__new__ directly on a class that inherits it is refused as unsafe.
+    """
+    unresolved = sorted(
+        k.__name__ for k in _tree() if exit_code_for(k.__new__(k)) == UNMAPPED_EXIT_CODE
+    )
     assert unresolved == []
 
 
@@ -1033,6 +1044,12 @@ def test_a_programming_error_carries_the_human_cv_number():
 
 
 def test_errors_is_the_only_module_defining_exception_types():
+    """Only sees classes reachable through __subclasses__(), which only finds imported classes.
+
+    A rogue exception class in a module nobody imports is invisible to this test.
+    tests/test_layering.py RULE_3 is the other half: a text scan that catches an exception
+    class outside errors.py whether or not anything ever imports it.
+    """
     classes = [
         name
         for name, obj in inspect.getmembers(errors, inspect.isclass)
@@ -1073,6 +1090,13 @@ The distinction this project exists to preserve is between three answers:
 They are three classes with three exit codes (5, 6, 7) because collapsing them
 is exactly how milestone M1 recorded four capabilities as absent when the
 instrument, not the hardware, was at fault.
+
+These sixteen exit codes are a versioned public contract. Within a major version
+no code may be renumbered, repurposed, or retired; a new error class claims an
+unused code above 20 instead of reusing one of these. A future JSON envelope (M5
+and later) can carry a stable machine-readable `error.code` string alongside the
+process exit status, and that is where new domain detail belongs, not in a new
+exit code.
 """
 
 from __future__ import annotations
@@ -1149,7 +1173,7 @@ class UnsupportedFeatureError(RailctlError):
 
 
 class StationError(RailctlError):
-    """Facade-level base."""
+    """Facade-level base. Has no row in EXIT_CODES on purpose; it resolves to the base 9."""
 
 
 class TrackPowerError(StationError):
@@ -1349,6 +1373,12 @@ self-test exists to detect.
 
 They are text scans, not import checks: an import check only fires once a module
 is imported, and these rules must hold for code no test exercises.
+
+Being line-oriented text scans, they cannot see a violation split across two lines,
+or one assembled by string concatenation. Rule 2's regexes additionally match only
+the literal spellings `cv - 1`, `% 256`, `>> 8`, and `<< 8`; the same arithmetic
+under a different variable name passes. They narrow where a violation can hide, not
+prove one is absent.
 
 Every guard is written so it cannot pass by finding nothing. `_offenders` is
 proved against a planted violation, and the whole-package rules assert that the

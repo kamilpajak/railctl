@@ -95,7 +95,18 @@ def test_subclasses_without_their_own_row_inherit_the_parent_code(exc: RailctlEr
 
 
 def test_every_class_in_the_tree_resolves_to_a_code_above_one():
-    unresolved = sorted(k.__name__ for k in _tree() if exit_code_for(k("x")) == UNMAPPED_EXIT_CODE)
+    """Builds each class with k.__new__(k), not k("x").
+
+    exit_code_for reads only type(exc).__mro__ and never touches instance state, so an
+    uninitialised instance is safe here. This removes the coupling to constructor
+    signatures: a future exception with a required keyword argument would otherwise raise
+    TypeError inside this comprehension, and the failure would read as unrelated. Plain
+    object.__new__(k) does not work here: BaseException defines its own __new__, and calling
+    object.__new__ directly on a class that inherits it is refused as unsafe.
+    """
+    unresolved = sorted(
+        k.__name__ for k in _tree() if exit_code_for(k.__new__(k)) == UNMAPPED_EXIT_CODE
+    )
     assert unresolved == []
 
 
@@ -143,6 +154,12 @@ def test_a_programming_error_carries_the_human_cv_number():
 
 
 def test_errors_is_the_only_module_defining_exception_types():
+    """Only sees classes reachable through __subclasses__(), which only finds imported classes.
+
+    A rogue exception class in a module nobody imports is invisible to this test.
+    tests/test_layering.py RULE_3 is the other half: a text scan that catches an exception
+    class outside errors.py whether or not anything ever imports it.
+    """
     classes = [
         name
         for name, obj in inspect.getmembers(errors, inspect.isclass)
