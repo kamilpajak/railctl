@@ -80,7 +80,7 @@ def test_short_circuit_reply_leaves_pom_read_unknown():
     link = FakeLink({POM_CV8_AT_3: [b"\xff\xfe\x61\x12\x73"]})
     result = check_pom_read(link, address=3, cv=8, poll=False)
     assert result.value["pom_read"] is None
-    assert "short circuit" in result.detail
+    assert "short_circuit" in result.detail
 
 
 def test_busy_reply_leaves_pom_read_unknown():

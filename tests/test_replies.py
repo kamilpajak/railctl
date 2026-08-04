@@ -4,9 +4,12 @@ from tools.probe.replies import (
     NO_ACK,
     READY,
     SHORT_CIRCUIT,
+    STATION_BUSY,
+    TRANSFER_ERROR,
     UNSUPPORTED,
     CvValue,
     LocoInfo,
+    RegisterValue,
     Status,
     Unknown,
     Version,
@@ -40,8 +43,59 @@ def test_parses_a_direct_cv_result():
     assert parse(b"\x63\x14\x07\x91") == CvValue(raw_cv=0x07, value=0x91, ident=0x14)
 
 
-def test_parses_a_register_or_paged_result():
-    assert parse(b"\x63\x10\x01\x03") == CvValue(raw_cv=0x01, value=0x03, ident=0x10)
+def test_a_register_or_paged_result_is_not_a_cv_value():
+    # XpressNet 2.1.5.5: 63 10 in answer to a Direct Mode request means the
+    # station fell back to Register/Paged mode, and data byte 2 is then a
+    # register number. Parsing it as a CvValue would let a register value be
+    # reported as the contents of a CV.
+    reply = parse(b"\x63\x10\x01\x03")
+    assert reply == RegisterValue(register=0x01, value=0x03)
+    assert not isinstance(reply, CvValue)
+
+
+def test_parses_the_cv256_to_511_band_and_decodes_the_absolute_cv():
+    # Lenz 23151 section 3.1.2.7: on header 0x15, C = 0..255 maps to CV256..511.
+    assert parse(b"\x63\x15\x09\x2d") == CvValue(raw_cv=0x09, value=0x2D, ident=0x15, cv=265)
+
+
+def test_parses_the_cv512_to_767_band():
+    assert parse(b"\x63\x16\x00\x2d") == CvValue(raw_cv=0x00, value=0x2D, ident=0x16, cv=512)
+
+
+def test_parses_the_cv768_to_1023_band():
+    assert parse(b"\x63\x17\xff\x2d") == CvValue(raw_cv=0xFF, value=0x2D, ident=0x17, cv=1023)
+
+
+def test_the_direct_band_leaves_the_absolute_cv_undecoded():
+    # 0x14 carries both service-mode results (one-based) and POM results, whose
+    # convention on this station is what the probe is measuring. Decoding it
+    # would report a CV number that has not been established.
+    assert parse(b"\x63\x14\x07\x91").cv is None
+
+
+def test_parses_command_station_busy():
+    assert parse(b"\x61\x81") is STATION_BUSY
+
+
+def test_parses_transfer_error():
+    assert parse(b"\x61\x80") is TRANSFER_ERROR
+
+
+def test_loco_info_exposes_the_speed_step_mode():
+    # Identification byte is 0000 BFFF (XpressNet 2.1.14.1).
+    assert parse(b"\xe4\x00\x00\x00\x00").speed_step_mode == 14
+    assert parse(b"\xe4\x01\x00\x00\x00").speed_step_mode == 27
+    assert parse(b"\xe4\x02\x00\x00\x00").speed_step_mode == 28
+    assert parse(b"\xe4\x04\x00\x00\x00").speed_step_mode == 128
+
+
+def test_loco_info_reports_a_reserved_speed_step_pattern_as_unknown():
+    assert parse(b"\xe4\x03\x00\x00\x00").speed_step_mode is None
+
+
+def test_loco_info_exposes_the_busy_flag():
+    assert parse(b"\xe4\x0c\x00\x00\x00").busy is True
+    assert parse(b"\xe4\x04\x00\x00\x00").busy is False
 
 
 def test_parses_the_generic_interface_acknowledgement():

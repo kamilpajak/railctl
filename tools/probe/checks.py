@@ -7,12 +7,12 @@ from dataclasses import dataclass, field
 from tools.probe import commands
 from tools.probe.link import Link
 from tools.probe.replies import (
-    BUSY,
     NO_ACK,
-    SHORT_CIRCUIT,
+    TRANSIENT,
     UNSUPPORTED,
     CvValue,
     LocoInfo,
+    RegisterValue,
     Status,
     Version,
     parse,
@@ -32,6 +32,11 @@ class CheckResult:
     value: object | None
     detail: str
     frames: list[str] = field(default_factory=list)
+
+
+def _transient(replies: list) -> object | None:
+    """The transient marker present in these replies, or None."""
+    return next((marker for marker in TRANSIENT if marker in replies), None)
 
 
 def _unresolved() -> dict[str, object | None]:
@@ -109,12 +114,14 @@ def check_pom_read(link: Link, address: int, cv: int = 8, *, poll: bool) -> Chec
     # Transient station conditions. Neither proves anything about the capability,
     # so pom_read stays None — but the dict shape is kept so every caller can
     # subscript CheckResult.value without a type check.
-    if SHORT_CIRCUIT in seen:
+    transient = _transient(seen)
+    if transient is not None:
         return CheckResult(
-            "pom_read", _unresolved(), "short circuit reported; fix the track and retry", dump
+            "pom_read",
+            _unresolved(),
+            f"station reported {transient.name}; nothing established, retry",
+            dump,
         )
-    if BUSY in seen:
-        return CheckResult("pom_read", _unresolved(), "station busy; retry", dump)
 
     return CheckResult(
         "pom_read",
@@ -133,94 +140,241 @@ def check_pom_read(link: Link, address: int, cv: int = 8, *, poll: bool) -> Chec
 SERVICE_WINDOW = 8.0
 
 
-def _read_value(link: Link, payload: bytes) -> tuple[int | None, list, bool]:
-    """Returns (value, replies, was_rejected)."""
+@dataclass(frozen=True)
+class ReadOutcome:
+    """What a single CV read attempt established.
+
+    status is one of:
+      "ok"                a CV value came back
+      "unsupported"       the station answered 61 82
+      "register_fallback" the station answered 63 10, meaning the decoder does
+                          not support Direct Mode and the station dropped to
+                          Register/Paged mode. The number in that reply is a
+                          register, not a CV, so it is NOT a CV value.
+      "transient"         busy, short circuit or transfer error
+      "silent"            nothing came back
+    """
+
+    status: str
+    value: int | None
+    reply_cv: int | None
+    frames: list
+
+
+def _read_value(link: Link, payload: bytes) -> ReadOutcome:
     frames = link.exchange(payload, window=SERVICE_WINDOW)
     replies = [parse(f.telegram) for f in frames]
     for reply in replies:
         if isinstance(reply, CvValue):
-            return reply.value, frames, False
-    return None, frames, UNSUPPORTED in replies
+            return ReadOutcome("ok", reply.value, reply.cv, frames)
+    if UNSUPPORTED in replies:
+        return ReadOutcome("unsupported", None, None, frames)
+    if any(isinstance(reply, RegisterValue) for reply in replies):
+        return ReadOutcome("register_fallback", None, None, frames)
+    if _transient(replies) is not None:
+        return ReadOutcome("transient", None, None, frames)
+    return ReadOutcome("silent", None, None, frames)
 
 
-def check_service_ext_cv(link: Link) -> CheckResult:
-    """R2. Compare the extended read of CV1 against the legacy direct read of CV1."""
-    ext_value, ext_frames, rejected = _read_value(link, commands.service_ext_read(1))
-    if rejected:
+# CV265 is the ZIMO sound-project/loco-type selector. It is used as the high-band
+# probe because it exists on the MS decoder on this layout and sits in the
+# 256-511 band, which is where the CVs railctl actually needs to back up live
+# (265, 266, 273-277, 287, 288, 313, 314, 395-397).
+HIGH_BAND_CV = 265
+
+
+def check_service_ext_cv(link: Link, high_cv: int = HIGH_BAND_CV) -> CheckResult:
+    """R2. Two separate questions, because passing the first does not imply the second.
+
+    1. Does the 4-byte format work at all? Read CV1 with 0x22 0x18 and compare
+       it against the legacy 0x22 0x15 read of CV1.
+    2. Do the bands ABOVE CV255 work? Band 0x18 overlaps the legacy opcode, so
+       a station could implement it and still reject 0x19/0x1A/0x1B. Only this
+       second question decides whether railctl can reach the ZIMO CVs it needs,
+       so it is asked explicitly instead of being inferred from the first.
+    """
+    low = _read_value(link, commands.service_ext_read(1))
+    if low.status == "unsupported":
         return CheckResult(
-            "service_ext_cv", False, "station answered 61 82 to 22 18: extended opcodes absent",
-            _hexdump(ext_frames),
+            "service_ext_cv",
+            {"service_ext_cv": False, "service_ext_cv_high_band": False,
+             "service_ext_cv_high_value": None},
+            "station answered 61 82 to 22 18: extended opcodes absent, so the high"
+            " bands were not probed",
+            _hexdump(low.frames),
         )
-    direct_value, direct_frames, _ = _read_value(link, commands.service_direct_read(1))
-    dump = _hexdump(ext_frames) + _hexdump(direct_frames)
-    if ext_value is None or direct_value is None:
-        return CheckResult("service_ext_cv", None, "no value from one of the two reads", dump)
-    if ext_value != direct_value:
+
+    direct = _read_value(link, commands.service_direct_read(1))
+    base_dump = _hexdump(low.frames) + _hexdump(direct.frames)
+
+    if low.status == "register_fallback" or direct.status == "register_fallback":
         return CheckResult(
-            "service_ext_cv", None,
-            f"reads disagree: extended {ext_value}, direct {direct_value}", dump,
+            "service_ext_cv",
+            {"service_ext_cv": None, "service_ext_cv_high_band": None,
+             "service_ext_cv_high_value": None},
+            "station answered 63 10: the decoder does not support Direct Mode and the"
+            " station fell back to Register/Paged mode, so no CV value was established",
+            base_dump,
+        )
+    if low.value is None or direct.value is None:
+        return CheckResult(
+            "service_ext_cv",
+            {"service_ext_cv": None, "service_ext_cv_high_band": None,
+             "service_ext_cv_high_value": None},
+            f"no value from one of the two CV1 reads (extended {low.status},"
+            f" direct {direct.status})",
+            base_dump,
+        )
+    if low.value != direct.value:
+        return CheckResult(
+            "service_ext_cv",
+            {"service_ext_cv": None, "service_ext_cv_high_band": None,
+             "service_ext_cv_high_value": None},
+            f"CV1 reads disagree: extended {low.value}, direct {direct.value}",
+            base_dump,
+        )
+
+    high = _read_value(link, commands.service_ext_read(high_cv))
+    dump = base_dump + _hexdump(high.frames)
+    detail = f"extended and direct reads of CV1 both returned {low.value}"
+
+    if high.status == "unsupported":
+        return CheckResult(
+            "service_ext_cv",
+            {"service_ext_cv": True, "service_ext_cv_high_band": False,
+             "service_ext_cv_high_value": None},
+            f"{detail}, but the station answered 61 82 to the CV{high_cv} read:"
+            " CVs above 255 are NOT reachable this way",
+            dump,
+        )
+    if high.status != "ok":
+        return CheckResult(
+            "service_ext_cv",
+            {"service_ext_cv": True, "service_ext_cv_high_band": None,
+             "service_ext_cv_high_value": None},
+            f"{detail}, but the CV{high_cv} read came back {high.status}:"
+            " the high bands are not established",
+            dump,
+        )
+    # The reply band echoes the CV it answers for, so a mismatch means the
+    # station is not using the banding this code assumes.
+    if high.reply_cv != high_cv:
+        return CheckResult(
+            "service_ext_cv",
+            {"service_ext_cv": True, "service_ext_cv_high_band": None,
+             "service_ext_cv_high_value": high.value},
+            f"{detail}, but the reply to the CV{high_cv} read decodes as CV{high.reply_cv}:"
+            " the station bands CVs differently than assumed",
+            dump,
         )
     return CheckResult(
-        "service_ext_cv", True, f"extended and direct reads of CV1 both returned {ext_value}", dump
+        "service_ext_cv",
+        {"service_ext_cv": True, "service_ext_cv_high_band": True,
+         "service_ext_cv_high_value": high.value},
+        f"{detail}; CV{high_cv} read back {high.value} on band 0x19, so CVs above 255"
+        " are reachable",
+        dump,
     )
 
 
 def check_z21_opcodes(link: Link) -> CheckResult:
     """R4. Only the READ opcode 23 11 is probed. Never 24 12, which would write."""
-    z21_value, z21_frames, rejected = _read_value(link, commands.z21_service_read(29))
-    if rejected:
+    z21 = _read_value(link, commands.z21_service_read(29))
+    if z21.status == "unsupported":
         return CheckResult(
             "z21_cv_opcodes", False, "station answered 61 82 to 23 11: Z21 CV opcodes absent",
-            _hexdump(z21_frames),
+            _hexdump(z21.frames),
         )
-    direct_value, direct_frames, _ = _read_value(link, commands.service_direct_read(29))
-    dump = _hexdump(z21_frames) + _hexdump(direct_frames)
-    if z21_value is None or direct_value is None:
-        return CheckResult("z21_cv_opcodes", None, "no value from one of the two reads", dump)
-    if z21_value != direct_value:
+    direct = _read_value(link, commands.service_direct_read(29))
+    dump = _hexdump(z21.frames) + _hexdump(direct.frames)
+    if z21.status == "register_fallback" or direct.status == "register_fallback":
         return CheckResult(
             "z21_cv_opcodes", None,
-            f"reads disagree: Z21 {z21_value}, direct {direct_value}", dump,
+            "station answered 63 10: it fell back to Register/Paged mode, so the number"
+            " returned is a register and not a CV value", dump,
+        )
+    if z21.value is None or direct.value is None:
+        return CheckResult(
+            "z21_cv_opcodes", None,
+            f"no value from one of the two reads (Z21 {z21.status}, direct {direct.status})",
+            dump,
+        )
+    if z21.value != direct.value:
+        return CheckResult(
+            "z21_cv_opcodes", None,
+            f"reads disagree: Z21 {z21.value}, direct {direct.value}", dump,
         )
     return CheckResult(
-        "z21_cv_opcodes", True, f"Z21 and direct reads of CV29 both returned {z21_value}", dump
+        "z21_cv_opcodes", True, f"Z21 and direct reads of CV29 both returned {z21.value}", dump
     )
 
 
 def _accepted(link: Link, payload: bytes, window: float = 2.0) -> tuple[bool | None, list]:
     """Did the station accept this command? True / False / None-for-unresolved.
 
-    A transient condition must NOT be read as acceptance: a station that
-    answers `61 1F` (busy) or `61 12` (short circuit) has told us nothing about
-    whether it implements the opcode, so the capability stays unresolved.
-    Returning True there would record an unsupported command as supported.
+    A transient condition must NOT be read as acceptance. A station answering
+    `61 1F` (programming busy), `61 12` (short circuit), `61 81` (command
+    station busy) or `61 80` (transfer error) has told us nothing about whether
+    it implements the opcode, so the capability stays unresolved. Returning True
+    there would record an unsupported command as supported — which is exactly
+    what happened while 61 80 and 61 81 went unparsed and fell through to the
+    "some frame came back, so it must be accepted" branch below.
     """
     frames = link.exchange(payload, window=window)
     replies = [parse(f.telegram) for f in frames]
     if UNSUPPORTED in replies:
         return False, frames
-    if SHORT_CIRCUIT in replies or BUSY in replies:
+    if _transient(replies) is not None:
         return None, frames
     if not frames:
         return None, frames
     return True, frames
 
 
-def read_f0(link: Link, address: int) -> tuple[bool | None, list]:
-    """Read the current F0 state for the locomotive.
+def read_loco_info(link: Link, address: int) -> tuple[LocoInfo | None, list]:
+    """Request locomotive information. Frames are raw Frame objects, not hex-dumped.
 
-    Returns (True, frames) if F0 is on, (False, frames) if F0 is off, or
-    (None, frames) if the locomotive information request did not return a valid reply.
-    Frames are returned as raw Frame objects, not hex-dumped.
+    Note what this reply cannot do: XpressNet section 2.1.14.1 defines it as
+    `0xE4 <0000 BFFF> <speed> <FA> <FB>` — there is no address in it. So the
+    answer cannot be verified against the address that was asked for; the only
+    correlation is request/response ordering on a link used by one client.
     """
     frames = link.exchange(commands.loco_info(address), window=1.5)
-
     for frame in frames:
         reply = parse(frame.telegram)
         if isinstance(reply, LocoInfo):
-            return reply.f0, frames
-
+            return reply, frames
     return None, frames
+
+
+def read_f0(link: Link, address: int) -> tuple[bool | None, list]:
+    """Current F0 state, or (None, frames) when no valid reply came back."""
+    info, frames = read_loco_info(link, address)
+    return (None if info is None else info.f0), frames
+
+
+def check_loco_info(link: Link, address: int) -> tuple[CheckResult, LocoInfo | None, list]:
+    """Report what the locomotive information reply already tells us.
+
+    The speed step mode answers a question the design left open, and the busy
+    flag says whether another throttle is holding this locomotive — which is
+    the one situation where re-asserting F0 in R5 could race someone else.
+    """
+    info, frames = read_loco_info(link, address)
+    dump = _hexdump(frames)
+    if info is None:
+        detail = f"no locomotive information for address {address}"
+        return CheckResult("loco_info", None, detail, dump), None, frames
+    value = {
+        "speed_step_mode": info.speed_step_mode,
+        "loco_busy": info.busy,
+        "f0": info.f0,
+    }
+    steps = info.speed_step_mode or "reserved bit pattern"
+    detail = f"address {address}: {steps} speed steps, F0 {'on' if info.f0 else 'off'}"
+    if info.busy:
+        detail += "; another XpressNet device is controlling this locomotive"
+    return CheckResult("loco_info", value, detail, dump), info, frames
 
 
 def check_single_function(link: Link, address: int, *, f0_is_on: bool) -> CheckResult:
@@ -311,10 +465,22 @@ def check_address_band(link: Link, address: int) -> CheckResult:
     short_frames = link.exchange(bytes([0xE3, 0x00, short_high, short_low]), window=2.0)
     long_frames = link.exchange(bytes([0xE3, 0x00, long_high, long_low]), window=2.0)
     dump = _hexdump(short_frames) + _hexdump(long_frames)
-    if bool(short_frames) == bool(long_frames):
+
+    # "Some frame came back" is not an answer. A 61 82 rejection is a frame, and
+    # so is an unsolicited broadcast; counting either as a successful reply makes
+    # the only informative outcome — one form answering and the other not —
+    # indistinguishable from both forms answering.
+    def answered(frames: list) -> bool:
+        return any(isinstance(parse(f.telegram), LocoInfo) for f in frames)
+
+    short_ok, long_ok = answered(short_frames), answered(long_frames)
+    if short_ok == long_ok:
+        both = "both forms returned locomotive information" if short_ok else (
+            "neither form returned locomotive information"
+        )
         return CheckResult("loco_address_threshold", None,
-                           "both encodings behaved identically; threshold not established", dump)
-    threshold = 100 if long_frames else 128
-    form = "long" if long_frames else "short"
-    detail = f"only the {form} form answered; threshold is {threshold}"
+                           f"{both}; threshold not established", dump)
+    threshold = 100 if long_ok else 128
+    form = "long" if long_ok else "short"
+    detail = f"only the {form} form returned locomotive information; threshold is {threshold}"
     return CheckResult("loco_address_threshold", threshold, detail, dump)
