@@ -80,6 +80,25 @@ alter that.
 This remains an inference: YaMoRC does not publish a hardware block diagram, and nothing
 found so far states outright that the YD7010 lacks a global detector.
 
+### POM WRITE works, even though POM read does not
+
+Measured 2026-08-04. CV3 was written over POM with the locomotive on the main track, then
+the locomotive was moved to the programming track and the CV read back in service mode:
+
+```
+main track   E6 30 00 03 EC 02 24   POM write CV3 = 36, only an interface ACK
+prog track   read CV3 = 36          the write landed
+             restored CV3 = 26      original value back
+```
+
+This asymmetry is not surprising: a POM write needs no return path from the decoder,
+while a POM read needs RailCom channel 2 to come back to the command station. It is the
+read half that has no receiver.
+
+**Consequence:** tuning by ear on the main track is possible. Volume and sound CVs can be
+changed while the locomotive runs. What cannot be done on the main track is reading a
+value back — verification requires the programming track.
+
 ### Next step for R1
 
 Read any CV through the YaMoRC tool's own **"Loco POM"** mode (Prog.Track CV Programming
