@@ -6533,8 +6533,22 @@ step and before `The M1 probe still imports`:
         # package was __init__.py plus errors.py, and a 90% gate over that measures
         # nothing. It stays out of addopts permanently, because mutation/*.toml run
         # the suite once per mutant.
+        #
+        # HYPOTHESIS_PROFILE is not optional here. Hypothesis turns derandomize on
+        # by itself when it sees CI in the environment, so a job that names no
+        # profile runs the `default` profile with a value `default` never declared,
+        # and tests/unit/test_properties.py fails on the mismatch - which is what it
+        # is there for. It also means an unnamed job would be the only run in CI
+        # drawing random examples, so a newly discovered counterexample could fail
+        # a build that changed nothing.
+        env:
+          HYPOTHESIS_PROFILE: ci
         run: uv run pytest --cov --cov-report=term-missing
 ```
+
+That `env:` block is load-bearing and was missing when this step was first written: all four CI jobs
+went red on `assert True is ('default' in {'ci', 'mutation'})` while the same command passed on a
+developer's machine, because the machine has no `CI` variable for Hypothesis to notice.
 
 `uv run`, not `python -m pytest`: every other command in this workflow goes through `uv run` since
 Task 3, and the job never puts a bare `python` on the path — `astral-sh/setup-uv` provisions the
