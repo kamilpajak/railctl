@@ -53,6 +53,11 @@ A capability recorded as absent because of a defect in the instrument measuring 
 
 - Commit style: Conventional Commits (`type(scope): description`). Never mention AI assistance in a commit message, body, or list.
 - Test and lint run through the existing venv: `.venv/bin/python -m pytest …`, `.venv/bin/python -m ruff check …`.
+- `pyproject.toml`'s `addopts` already carries `-q`, so the commands in this plan do not repeat it: a
+  second command-line `-q` takes the quiet level to 2, and at that level pytest prints no summary
+  line at all - the `N passed` this plan expects would never appear. The one place a doubled `-q`
+  is used on purpose is Task 3 Step 13, which demonstrates that exact silence for the mutation
+  runner's fixed `test-command`.
 - The 292 probe tests already in `tests/` must stay green through every task in this plan.
 - Git identity in this repo is already configured as `Kamil Pająk <kamilpajak@users.noreply.github.com>`.
 
@@ -3091,7 +3096,7 @@ and still finish in well under a second.
 
 - [ ] **Step 9: Run the property file under the CI profile**
 
-Run: `HYPOTHESIS_PROFILE=ci .venv/bin/python -m pytest tests/unit/test_properties.py -q`
+Run: `HYPOTHESIS_PROFILE=ci .venv/bin/python -m pytest tests/unit/test_properties.py`
 
 Expected: PASS — 7 passed, at 500 examples each with a fixed seed.
 `test_the_loaded_profile_matches_the_environment` is the check that makes this step mean
@@ -3102,7 +3107,7 @@ random examples and at 500 fixed ones, so both runs pass either way.
 
 Then confirm the negative case, so the check is known to be able to fail:
 
-Run: `.venv/bin/python -m pytest tests/unit/test_properties.py -q -k loaded_profile`
+Run: `.venv/bin/python -m pytest tests/unit/test_properties.py -k loaded_profile`
 
 Expected: PASS — 1 passed. This is the same test under the `default` profile, where it now
 asserts `derandomize is False` and `max_examples == 100`. If it passed identically under
@@ -4055,7 +4060,7 @@ Expected: PASS — 93 passed.
 
 - [ ] **Step 8: Run the whole unit suite**
 
-Run: `.venv/bin/python -m pytest tests/unit -q`
+Run: `.venv/bin/python -m pytest tests/unit`
 
 Expected: PASS — 240 passed. That is 197 from this part (49 from Task 4, 55 from Task 5,
 93 from Task 6) on top of the 43 Task 1 and Task 2 already put in `tests/unit/`
@@ -4269,7 +4274,7 @@ def test_pack_function_bits_refuses_a_function_index_that_does_not_exist():
 
 - [ ] **Step 2: Run the tests to verify they fail**
 
-Run: `.venv/bin/python -m pytest tests/unit/test_xbus_commands.py -q`
+Run: `.venv/bin/python -m pytest tests/unit/test_xbus_commands.py`
 Expected: collection ERROR — `ModuleNotFoundError: No module named 'railctl.xbus.commands'`
 
 - [ ] **Step 3: Create the module with the headers, the function tables and `pack_function_bits`**
@@ -4445,7 +4450,7 @@ def pack_function_bits(group: FunctionGroup, state: Mapping[int, bool]) -> int:
 
 - [ ] **Step 4: Run the tests to verify they pass**
 
-Run: `.venv/bin/python -m pytest tests/unit/test_xbus_commands.py -q`
+Run: `.venv/bin/python -m pytest tests/unit/test_xbus_commands.py`
 Expected: PASS, 19 tests
 
 - [ ] **Step 5: Add the failing golden-vector tests for every encoder**
@@ -4575,7 +4580,7 @@ def test_the_emergency_stop_for_one_loco_is_the_dedicated_92_instruction():
 
 - [ ] **Step 6: Run the tests to verify they fail**
 
-Run: `.venv/bin/python -m pytest tests/unit/test_xbus_commands.py -q`
+Run: `.venv/bin/python -m pytest tests/unit/test_xbus_commands.py`
 Expected: collection ERROR — `ImportError: cannot import name 'cmd_drive_128' from 'railctl.xbus.commands'`
 
 - [ ] **Step 7: Implement the encoders**
@@ -4757,7 +4762,7 @@ def cmd_pom_write_bit(address: int, cv: int, bit: int, value: bool, *, threshold
 
 - [ ] **Step 8: Run the tests to verify they pass**
 
-Run: `.venv/bin/python -m pytest tests/unit/test_xbus_commands.py -q`
+Run: `.venv/bin/python -m pytest tests/unit/test_xbus_commands.py`
 Expected: PASS, 68 tests
 
 - [ ] **Step 9: Add the failing tests for `timeout_class`**
@@ -4854,7 +4859,7 @@ def test_every_service_mode_encoder_is_in_the_programming_table():
 
 - [ ] **Step 10: Run the tests to verify they fail**
 
-Run: `.venv/bin/python -m pytest tests/unit/test_xbus_commands.py -q`
+Run: `.venv/bin/python -m pytest tests/unit/test_xbus_commands.py`
 Expected: collection ERROR — `ImportError: cannot import name 'TimeoutClass' from 'railctl.xbus.commands'`
 
 - [ ] **Step 11: Implement `TimeoutClass` and `timeout_class`**
@@ -4905,7 +4910,7 @@ def timeout_class(telegram: bytes) -> TimeoutClass:
 
 - [ ] **Step 12: Run the tests to verify they pass**
 
-Run: `.venv/bin/python -m pytest tests/unit/test_xbus_commands.py -q`
+Run: `.venv/bin/python -m pytest tests/unit/test_xbus_commands.py`
 Expected: PASS, 96 tests
 
 - [ ] **Step 13: Prove the module obeys layering rule 2 (no CV arithmetic outside `cv.py`)**
@@ -5426,7 +5431,7 @@ def test_the_header_nibble_is_the_only_length_guard_parse_needs():
 
 - [ ] **Step 2: Run the tests to verify they fail**
 
-Run: `.venv/bin/python -m pytest tests/unit/test_xbus_replies.py -q`
+Run: `.venv/bin/python -m pytest tests/unit/test_xbus_replies.py`
 Expected: collection ERROR — `ModuleNotFoundError: No module named 'railctl.xbus.replies'`
 
 - [ ] **Step 3: Write the reply dataclasses and `parse`**
@@ -5923,7 +5928,7 @@ def parse(telegram: bytes) -> Reply:
 
 - [ ] **Step 4: Run the tests to verify they pass**
 
-Run: `.venv/bin/python -m pytest tests/unit/test_xbus_replies.py -q`
+Run: `.venv/bin/python -m pytest tests/unit/test_xbus_replies.py`
 Expected: PASS, 51 tests
 
 - [ ] **Step 5: Add the exhaustive dispatch test and its converse**
@@ -6123,7 +6128,7 @@ def test_the_loco_info_function_layout_agrees_with_the_command_byte_layout():
 
 - [ ] **Step 6: Run the new tests and see them pass**
 
-Run: `.venv/bin/python -m pytest tests/unit/test_xbus_replies.py -q`
+Run: `.venv/bin/python -m pytest tests/unit/test_xbus_replies.py`
 Expected: PASS, 57 tests
 
 - [ ] **Step 7: Prove the exhaustive test can fail — weaken one header comparison**
@@ -6136,14 +6141,14 @@ exactly header comparisons weakened from `==` to `>=` or `<=`. Edit
     if header == HDR_RESULT_5 and db0 <= DB_PAGED_RESULT:
 ```
 
-Run: `.venv/bin/python -m pytest tests/unit/test_xbus_replies.py -q -k dispatch_table`
+Run: `.venv/bin/python -m pytest tests/unit/test_xbus_replies.py -k dispatch_table`
 Expected: FAIL —
 `AssertionError: 16 misparsed pairs, first few: [('0x63', '0x0', 'Other', 'PagedCvValue'), ('0x63', '0x1', 'Other', 'PagedCvValue'), ...]`
 — the sixteen db0 values 0x00..0x0F that `<=` swallows and `==` does not.
 
 Then revert the line to `if header == HDR_RESULT_5 and db0 == DB_PAGED_RESULT:` and re-run:
 
-Run: `.venv/bin/python -m pytest tests/unit/test_xbus_replies.py -q`
+Run: `.venv/bin/python -m pytest tests/unit/test_xbus_replies.py`
 Expected: PASS, 57 tests
 
 - [ ] **Step 8: Prove the converse test can fail — add a header nobody documented**
@@ -6156,13 +6161,13 @@ final `return Other(telegram=telegram, reason="unknown_form")` in `parse`:
         return CvValue(raw_cv=data[0], value=0, ident=0x71, z21_form=False)
 ```
 
-Run: `.venv/bin/python -m pytest tests/unit/test_xbus_replies.py -q -k "outside_the_table or entitles"`
+Run: `.venv/bin/python -m pytest tests/unit/test_xbus_replies.py -k "outside_the_table or entitles"`
 Expected: FAIL, 2 tests — `test_no_header_pair_outside_the_table_produces_a_typed_reply` and
 `test_parse_only_claims_what_the_header_entitles_it_to`, the second reporting `71 aa`.
 
 Then delete those two lines and re-run:
 
-Run: `.venv/bin/python -m pytest tests/unit/test_xbus_replies.py -q`
+Run: `.venv/bin/python -m pytest tests/unit/test_xbus_replies.py`
 Expected: PASS, 57 tests
 
 - [ ] **Step 9: Prove no CV arithmetic escaped into the parser**
@@ -6314,7 +6319,7 @@ def test_the_table_is_not_silently_empty():
 
 - [ ] **Step 3: Run the tests to verify they fail**
 
-Run: `.venv/bin/python -m pytest tests/unit/test_xbus_vectors.py -q`
+Run: `.venv/bin/python -m pytest tests/unit/test_xbus_vectors.py`
 Expected: collection ERROR — `ModuleNotFoundError: No module named 'tests.vectors'`
 
 The module name in that message carries the `tests.` prefix because Task 1 made `tests/` a package. A bare `No module named 'vectors'` would mean the import in Step 2 was written as `from vectors import ...`, which cannot work under this layout — go back and fix the import rather than the expectation.
@@ -6588,7 +6593,7 @@ ALL_VECTORS: tuple[EncodeVector | DecodeVector, ...] = ENCODE_VECTORS + DECODE_V
 
 - [ ] **Step 5: Run the tests to verify they pass**
 
-Run: `.venv/bin/python -m pytest tests/unit/test_xbus_vectors.py -q`
+Run: `.venv/bin/python -m pytest tests/unit/test_xbus_vectors.py`
 Expected: PASS, 67 tests
 
 - [ ] **Step 6: Prove the self-consistency tests can fail**
@@ -6596,13 +6601,13 @@ Expected: PASS, 67 tests
 Edit `tests/vectors.py`, changing the `service_ext_read(1024)` row from `22 18 00 3A` to
 `22 18 00 3B`.
 
-Run: `.venv/bin/python -m pytest tests/unit/test_xbus_vectors.py -q -k xor`
+Run: `.venv/bin/python -m pytest tests/unit/test_xbus_vectors.py -k xor`
 Expected: FAIL, 1 test — `test_every_vector_carries_a_correct_xor[service_ext_read(1024)]`,
 `assert 58 == 59`.
 
 Restore `3A` and re-run:
 
-Run: `.venv/bin/python -m pytest tests/unit/test_xbus_vectors.py -q`
+Run: `.venv/bin/python -m pytest tests/unit/test_xbus_vectors.py`
 Expected: PASS, 67 tests
 
 - [ ] **Step 7: Write the failing encode and decode tests that consume the table**
@@ -6670,7 +6675,7 @@ def test_no_decode_row_raises(vector):
 
 - [ ] **Step 8: Run the tests and see them pass**
 
-Run: `.venv/bin/python -m pytest tests/unit/test_xbus_vectors.py -q`
+Run: `.venv/bin/python -m pytest tests/unit/test_xbus_vectors.py`
 Expected: PASS, 103 tests
 
 These tests cannot be seen red by writing them first: the encoders and the parser they consume
@@ -6685,14 +6690,14 @@ Both directions, one mutation each, each reverted before the next.
 **The encode direction.** Edit `src/railctl/xbus/commands.py` and change `cmd_service_ext_read` to
 use `EXT_READ_OPCODES[0]` unconditionally instead of `EXT_READ_OPCODES[page]`.
 
-Run: `.venv/bin/python -m pytest tests/unit/test_xbus_vectors.py -q -k service_ext_read`
+Run: `.venv/bin/python -m pytest tests/unit/test_xbus_vectors.py -k service_ext_read`
 Expected: FAIL, 1 test — `test_each_encoder_produces_the_bytes_in_the_table[service_ext_read(256)]`,
 showing `22 18 00` where `22 19 00` was expected. This is the exact confusion the row exists for:
 `22 18 00` is CV1024, not CV256.
 
 Revert the edit and re-run:
 
-Run: `.venv/bin/python -m pytest tests/unit/test_xbus_vectors.py -q`
+Run: `.venv/bin/python -m pytest tests/unit/test_xbus_vectors.py`
 Expected: PASS, 103 tests
 
 **The decode direction.** Edit `src/railctl/xbus/replies.py` and change the final line of `parse`
@@ -6700,7 +6705,7 @@ from `return Other(telegram=telegram, reason="unknown_form")` to
 `return Other(telegram=telegram, reason="length")` — a parser that files a well-formed telegram it
 does not recognise under the label meaning "the frame did not arrive".
 
-Run: `.venv/bin/python -m pytest tests/unit/test_xbus_vectors.py -q -k decode_row`
+Run: `.venv/bin/python -m pytest tests/unit/test_xbus_vectors.py -k decode_row`
 Expected: `1 failed, 11 passed` —
 `test_each_decode_row_parses_to_the_whole_object_in_the_table[unknown 71 AA]`, with
 `AssertionError: assert Other(telegram=b'q\xaa\xdb', reason='length') == Other(telegram=b'q\xaa\xdb', reason='unknown_form')`.
@@ -6714,12 +6719,12 @@ test module.)
 
 Revert the line and re-run:
 
-Run: `.venv/bin/python -m pytest tests/unit/test_xbus_vectors.py -q`
+Run: `.venv/bin/python -m pytest tests/unit/test_xbus_vectors.py`
 Expected: PASS, 103 tests
 
 - [ ] **Step 10: Run the whole suite so nothing in the probe collides**
 
-Run: `.venv/bin/python -m pytest -q`
+Run: `.venv/bin/python -m pytest`
 Expected: PASS — the 292 M1 probe tests, now under `tests/probe/`, plus every railctl test added
 by Tasks 1–9, with no `import file mismatch` error. Task 1 put an `__init__.py` in every test
 directory, so `tests.probe.test_commands` and `tests.unit.test_xbus_commands` are distinct module
@@ -6791,7 +6796,7 @@ over the whole table. No hardware needed." One command covers all three clauses,
 last task of M3, so it is checked here:
 
 ```bash
-.venv/bin/python -m pytest tests/unit/test_xbus_vectors.py -q
+.venv/bin/python -m pytest tests/unit/test_xbus_vectors.py
 ```
 
 Expected: `103 passed`. Read the three clauses off that run:
@@ -7267,7 +7272,7 @@ def test_the_framing_bytes_appear_only_where_they_are_allowed():
 
 - [ ] **Step 3: Run the tests to verify they fail**
 
-Run: `.venv/bin/python -m pytest tests/unit/test_envelope_liusb.py -q`
+Run: `.venv/bin/python -m pytest tests/unit/test_envelope_liusb.py`
 Expected: FAIL - `ModuleNotFoundError: No module named 'railctl.envelope'`
 
 If it says `No module named 'railctl'` instead, the M2 scaffolding task has not been run;
@@ -7550,12 +7555,12 @@ def envelope_factory(request):
 
 - [ ] **Step 7: Run the tests to verify they pass**
 
-Run: `.venv/bin/python -m pytest tests/unit/test_envelope_liusb.py tests/unit/test_envelope_isolation.py -q`
+Run: `.venv/bin/python -m pytest tests/unit/test_envelope_liusb.py tests/unit/test_envelope_isolation.py`
 Expected: PASS, 27 passed
 
 - [ ] **Step 8: Run the whole suite so the probe tests are not disturbed**
 
-Run: `.venv/bin/python -m pytest -q`
+Run: `.venv/bin/python -m pytest`
 Expected: PASS, the 292 M1 tests plus the new ones, 0 failed
 
 - [ ] **Step 9: Check formatting and lint**
@@ -7839,7 +7844,7 @@ def test_script_pending_shows_what_was_never_sent(env):
 
 - [ ] **Step 2: Run the tests to verify they fail**
 
-Run: `.venv/bin/python -m pytest tests/unit/test_fake_transport.py -q`
+Run: `.venv/bin/python -m pytest tests/unit/test_fake_transport.py`
 Expected: FAIL - `ModuleNotFoundError: No module named 'railctl.transport'`
 
 - [ ] **Step 3: Write the `Transport` protocol**
@@ -8104,12 +8109,12 @@ def chunk_size(request):
 
 - [ ] **Step 6: Run the tests to verify they pass**
 
-Run: `.venv/bin/python -m pytest tests/unit/test_fake_transport.py -q`
+Run: `.venv/bin/python -m pytest tests/unit/test_fake_transport.py`
 Expected: PASS, 15 passed
 
 - [ ] **Step 7: Check the framing guard still holds and lint**
 
-Run: `.venv/bin/python -m pytest tests/unit/test_envelope_isolation.py -q && .venv/bin/python -m ruff format . && .venv/bin/python -m ruff check .`
+Run: `.venv/bin/python -m pytest tests/unit/test_envelope_isolation.py && .venv/bin/python -m ruff format . && .venv/bin/python -m ruff check .`
 Expected: `1 passed`, then `All checks passed!`
 
 `1 passed` here is the point of Step 1's `hex_bytes` rendering. If it reports `1 failed`
@@ -8123,7 +8128,7 @@ switch the guard off for every future edit to it.
 syntax error, a fixture name collision or an import that fails on a half-installed
 scaffolding breaks every one of them, and no gate so far has looked.
 
-Run: `.venv/bin/python -m pytest -q`
+Run: `.venv/bin/python -m pytest`
 Expected: PASS, the 292 M1 tests plus the new ones, 0 failed
 
 - [ ] **Step 9: Check the coverage gate before committing**
@@ -8636,7 +8641,7 @@ def test_the_budgets_are_the_documented_ones():
 
 - [ ] **Step 2: Run the tests to verify they fail**
 
-Run: `.venv/bin/python -m pytest tests/unit/test_link.py -q`
+Run: `.venv/bin/python -m pytest tests/unit/test_link.py`
 Expected: FAIL - `ModuleNotFoundError: No module named 'railctl.link'`
 
 - [ ] **Step 3: Implement `Link`**
@@ -9007,7 +9012,7 @@ class Link:
 
 - [ ] **Step 4: Run the tests to verify they pass**
 
-Run: `.venv/bin/python -m pytest tests/unit/test_link.py -q`
+Run: `.venv/bin/python -m pytest tests/unit/test_link.py`
 Expected: PASS, 52 passed. The file defines 29 test functions: 23 take the `station` fixture
 and so run twice, whole-frame and byte-at-a-time (46), and 6 take no fixture parameter, so
 23 * 2 + 6 = 52.
@@ -9020,7 +9025,7 @@ and so run twice, whole-frame and byte-at-a-time (46), and 6 take no fixture par
 
 - [ ] **Step 5: Run the whole suite and lint**
 
-Run: `.venv/bin/python -m pytest -q && .venv/bin/python -m ruff format . && .venv/bin/python -m ruff check .`
+Run: `.venv/bin/python -m pytest && .venv/bin/python -m ruff format . && .venv/bin/python -m ruff check .`
 Expected: `0 failed`, then `All checks passed!`
 
 - [ ] **Step 6: Check the coverage gate before committing**
@@ -9248,7 +9253,7 @@ def test_open_link_completes_the_handshake_through_a_fake_transport(monkeypatch)
 
 - [ ] **Step 2: Run the tests to verify they fail**
 
-Run: `.venv/bin/python -m pytest tests/unit/test_open_link.py -q`
+Run: `.venv/bin/python -m pytest tests/unit/test_open_link.py`
 Expected: FAIL - `ImportError: cannot import name 'find_xpressnet_port' from 'railctl.transport'`
 
 - [ ] **Step 3: Implement the serial transport**
@@ -9594,7 +9599,7 @@ def open_link(target: str = "auto", *, on_event: Callable[[Frame], None] | None 
 
 - [ ] **Step 5: Run the unit tests to verify they pass**
 
-Run: `.venv/bin/python -m pytest tests/unit/test_open_link.py -q`
+Run: `.venv/bin/python -m pytest tests/unit/test_open_link.py`
 Expected: PASS, 14 passed - five tests were added when the review findings were closed
 (`test_list_candidate_ports_globs_the_xpressnet_pattern_and_sorts`,
 `test_z21_host_with_no_port_is_unsupported_not_malformed`,
@@ -9653,7 +9658,7 @@ deselected count would never appear.
 # tests/hardware/test_m4_acceptance.py
 """M4 acceptance. NEEDS THE PHYSICAL YD7010 ATTACHED.
 
-Run explicitly:  .venv/bin/python -m pytest -m hardware -q -s
+Run explicitly:  .venv/bin/python -m pytest -m hardware -s
 These are skipped by the default addopts.
 """
 
@@ -9724,7 +9729,7 @@ def test_the_telemetry_port_shows_bytes_dropped_climbing_with_no_frames():
 
 - [ ] **Step 9: Run the software suite and confirm the hardware tests are excluded**
 
-Run: `.venv/bin/python -m pytest -q`
+Run: `.venv/bin/python -m pytest`
 Expected: `0 failed`, and the collection report shows **4 deselected** - the three written in
 Step 8 plus the `tests/hardware/test_marker.py` canary Task 1 left there. If it shows
 `0 deselected` and failures naming `PortNotFound`, the marker registration from Task 1 is
@@ -9740,7 +9745,7 @@ Connect the YD7010 over USB, then run in order:
 Expected on the reference unit: `/dev/cu.usbmodem7010A00011943`
 
 ```bash
-.venv/bin/python -m pytest -m hardware -q -s
+.venv/bin/python -m pytest -m hardware -s
 ```
 Expected: `4 passed` - the three written in Step 8 plus Task 1's `tests/hardware/test_marker.py`
 canary, which asserts nothing about the hardware and exists only so that the deselected count in
@@ -9765,10 +9770,10 @@ here as one gate rather than left to whoever remembers which task they were in. 
 order:
 
 ```bash
-.venv/bin/python -m pytest tests/unit/test_envelope_liusb.py -q
-.venv/bin/python -m pytest tests/unit/test_fake_transport.py -q -k "second_command_while_a_reply_is_outstanding"
+.venv/bin/python -m pytest tests/unit/test_envelope_liusb.py
+.venv/bin/python -m pytest tests/unit/test_fake_transport.py -k "second_command_while_a_reply_is_outstanding"
 .venv/bin/python -c "from railctl.transport import find_xpressnet_port; print(find_xpressnet_port())"
-.venv/bin/python -m pytest -m hardware -q -s
+.venv/bin/python -m pytest -m hardware -s
 ```
 
 | Clause of line 1581 | What proves it |

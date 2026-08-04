@@ -99,6 +99,10 @@ class Link:
     # -- lifecycle ---------------------------------------------------------
     def open(self) -> None:
         with self._lock:
+            # Cleared before anything can fail: a Link that opened once, closed,
+            # and then fails to re-open must not keep reporting the previous
+            # connection's version telegram as though it were current.
+            self._version_telegram = None
             self._transport.open()
             self._transport.flush_input()
             self._envelope.reset()
@@ -125,7 +129,21 @@ class Link:
                     raise self._wrong_version_reply(frame)
                 self._version_telegram = frame.payload
             except BaseException:
-                self._transport.close()
+                # close() itself can fail - os.close() on a tty whose USB
+                # device has just been unplugged is exactly the moment that
+                # is most likely - and if it did, letting it propagate here
+                # would replace the real cause of the failure with whatever
+                # went wrong while cleaning up. Log it and keep it from
+                # shadowing the original exception, but do not swallow it
+                # silently: a close that fails is worth knowing about.
+                try:
+                    self._transport.close()
+                except BaseException:
+                    _log.warning(
+                        "%s: close() failed while handling a failed open",
+                        self._transport.description,
+                        exc_info=True,
+                    )
                 raise
 
     def _not_xpressnet(self, seen: bytes) -> PortNotXpressNet:

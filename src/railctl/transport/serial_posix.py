@@ -138,6 +138,10 @@ class SerialTransport:
             # select() said readable, then os.read() returned nothing: that is
             # end of file, not an idle port. Returning b"" here would read as
             # silence one layer up and the real fault would only surface on the
-            # next write.
+            # next write. Needs hardware validation: some macOS USB serial
+            # drivers have been reported to briefly mark the descriptor
+            # readable with zero bytes available around the device going to
+            # sleep or waking up. If this ever misfires on a port that is
+            # actually still alive, that is the scenario to look for first.
             raise TransportError(f"{self._config.port} closed while reading")
         return data

@@ -410,6 +410,46 @@ def test_close_closes_the_transport(station):
     assert station.transport.is_open is False
 
 
+class _CloseRaisesTransport(FakeTransport):
+    """A transport whose close() fails, the way os.close() can on a tty whose
+    USB device has just been unplugged.
+    """
+
+    def close(self) -> None:
+        super().close()
+        raise OSError("device disappeared")
+
+
+def test_a_close_failure_during_a_failed_open_does_not_replace_the_original_error(caplog):
+    """If close() raises during handling of a failed handshake, its exception
+    must not shadow the handshake failure: the handshake failure is the fact
+    worth keeping, and a close error is worth logging, not worth losing the
+    cause for.
+    """
+    envelope = LiUsbEnvelope()
+    clock = FakeClock()
+    transport = _CloseRaisesTransport(clock=clock)
+    link = Link(transport, envelope, clock=clock)
+    transport.expect(envelope.frame(Kind.SOLICITED, VERSION_REQUEST))
+    with caplog.at_level(logging.WARNING, logger="railctl.link"):
+        with pytest.raises(PortNotXpressNet):
+            link.open()
+    assert any(record.exc_info for record in caplog.records)
+
+
+def test_open_clears_a_stale_version_telegram_before_a_failed_reopen(station):
+    """A Link that opened successfully, closed, and then fails to re-open must
+    not keep reporting the previous connection's version telegram as current.
+    """
+    station.open()
+    assert station.link.version_telegram == VERSION_REPLY
+    station.link.close()
+    station.expect(VERSION_REQUEST)  # silent this time: the handshake fails
+    with pytest.raises(PortNotXpressNet):
+        station.link.open()
+    assert station.link.version_telegram is None
+
+
 def test_the_budgets_are_the_documented_ones():
     assert DEFAULT_TIMEOUT == 5.0
     assert PROGRAMMING_TIMEOUT == 95.0
