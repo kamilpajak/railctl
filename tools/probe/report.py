@@ -10,12 +10,31 @@ _WORDS = {True: "yes", False: "no", None: "unknown"}
 
 
 def _flatten(results: list[CheckResult]) -> dict[str, object]:
+    """Merge every check into one capability namespace.
+
+    Raises on a duplicate key rather than letting the last writer win. This
+    output is a versioned contract (`railctl/probe-results/v1`) where fields may
+    be added but never renamed or repurposed, so a new check silently destroying
+    an existing field is exactly the failure the version number is supposed to
+    rule out. No collision exists today; the guard is here so that adding one is
+    a loud test failure instead of a quiet hole in the report.
+    """
     capabilities: dict[str, object] = {}
+
+    def claim(key: str, value: object, owner: str) -> None:
+        if key in capabilities:
+            raise ValueError(
+                f"capability key {key!r} claimed twice; check {owner!r} would"
+                " overwrite a field already published by another check"
+            )
+        capabilities[key] = value
+
     for result in results:
         if isinstance(result.value, dict):
-            capabilities.update(result.value)
+            for key, value in result.value.items():
+                claim(key, value, result.name)
         else:
-            capabilities[result.name] = result.value
+            claim(result.name, result.value, result.name)
     return capabilities
 
 

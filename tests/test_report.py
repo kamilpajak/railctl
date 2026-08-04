@@ -48,7 +48,7 @@ def test_markdown_renders_dict_valued_results_as_see_below():
             "pom_read": True,
             "pom_result_channel": "broadcast",
             "pom_echo_zero_based": False,
-            "value": 145,
+            "pom_value": 145,
         },
         "POM read of CV8 returned 145 via broadcast",
         ["FE E6 30 00 03 E4 07 00 36"],
@@ -64,7 +64,7 @@ def test_json_flattens_dict_valued_results():
             "pom_read": True,
             "pom_result_channel": "broadcast",
             "pom_echo_zero_based": False,
-            "value": 145,
+            "pom_value": 145,
         },
         "POM read of CV8 returned 145 via broadcast",
         [],
@@ -74,7 +74,7 @@ def test_json_flattens_dict_valued_results():
     assert payload["capabilities"]["pom_read"] is True
     assert payload["capabilities"]["pom_result_channel"] == "broadcast"
     assert payload["capabilities"]["pom_echo_zero_based"] is False
-    assert payload["capabilities"]["value"] == 145
+    assert payload["capabilities"]["pom_value"] == 145
 
 
 def test_mixed_scalar_and_dict_valued_results_render_correctly():
@@ -85,7 +85,7 @@ def test_mixed_scalar_and_dict_valued_results_render_correctly():
                 "pom_read": True,
                 "pom_result_channel": "broadcast",
                 "pom_echo_zero_based": None,
-                "value": 145,
+                "pom_value": 145,
             },
             "POM read succeeded",
             [],
@@ -98,3 +98,28 @@ def test_mixed_scalar_and_dict_valued_results_render_correctly():
     assert payload["capabilities"]["pom_echo_zero_based"] is None
     # Scalar should also be there
     assert payload["capabilities"]["single_function_cmd"] is False
+
+
+def test_a_duplicate_capability_key_raises_instead_of_overwriting():
+    # The flattened output is a versioned contract: fields may be added, never
+    # renamed or repurposed. A new check quietly clobbering an existing field is
+    # the failure the version number exists to rule out, so it must be loud.
+    import pytest
+
+    from tools.probe.checks import CheckResult
+    from tools.probe.report import _flatten
+
+    clash = [CheckResult("first", {"shared": 1}, ""), CheckResult("second", {"shared": 2}, "")]
+    with pytest.raises(ValueError, match="claimed twice"):
+        _flatten(clash)
+
+
+def test_a_check_name_colliding_with_a_dict_key_also_raises():
+    import pytest
+
+    from tools.probe.checks import CheckResult
+    from tools.probe.report import _flatten
+
+    clash = [CheckResult("owner", {"pom_read": True}, ""), CheckResult("pom_read", False, "")]
+    with pytest.raises(ValueError, match="claimed twice"):
+        _flatten(clash)
