@@ -67,11 +67,55 @@ vendor anticipates this failure.
 - If the vendor tool **cannot**, POM read is unavailable on this hardware and the design
   must fall back to service mode on the programming track as the primary CV path.
 
-## R2, R4 — not attempted
+## R2, R4 — service mode on the programming track: SETTLED
 
-Both are service-mode checks and need the decoder on the **programming track**. The
-locomotive was on the main track for R1, so these were skipped with
-`--no-programming-track`.
+**Service-mode CV reading works, through the Z21 opcode `23 11` and only that one.**
+
+| Opcode | Result |
+| --- | --- |
+| `23 11` — Z21 service read, 16-bit CV | **works, every time** |
+| `22 15` — Lenz legacy direct read | silent |
+| `22 18` — Lenz extended, band CV1–255 | silent |
+| `22 19` — Lenz extended, band CV256–511 | silent |
+
+Reproduced over three alternating rounds on the same CV: `22 15 01` returned only the
+interface ACK each time, `23 11 00 00` returned `63 14 01 03` each time. This is
+consistent with the station reporting command station id `0x12`, the Z21 family.
+
+### CVs read from the ZIMO MS450P22
+
+| CV | Request | Reply | Value | Cross-check |
+| --- | --- | --- | --- | --- |
+| 8 | `23 11 00 07` | `63 14 08 91` | **145** | ZIMO manufacturer id — the known constant |
+| 29 | `23 11 00 1C` | `63 14 1D 0E` | **14** | bit 3 set, RailCom enabled at the decoder |
+| 250 | `23 11 00 F9` | `63 14 FA 06` | **6** | decoder type 6 = MS450, matches the hardware |
+| 265 | `23 11 01 08` | `63 15 09 00` | **0** | sound project |
+| 266 | `23 11 01 09` | `63 15 0A 40` | **64** | master volume |
+
+**CVs above 255 are reachable** — but through the 16-bit address of `23 11`, answered on
+the `63 15` band, not through the Lenz extended opcodes the R2 check was written around.
+CV265 and CV266 both read correctly.
+
+The request is **zero-based** (`23 11 00 07` reads CV8) and the reply echo is
+**one-based** (`63 14 08`). Band replies carry the offset from the band base: `63 15 09`
+is CV256 + 9 = CV265.
+
+### Consequence for the design
+
+The design chose **POM on the main track as the primary CV path**, with service mode
+secondary. The measurements invert that: POM returns nothing, service mode through
+`23 11` returns everything asked of it, including the high CVs the ZIMO backup needs.
+**The primary CV path should be service mode on the programming track using `23 11`.**
+
+The R2 check must be rewritten: as written it probes `22 18` and `22 19`, which this
+station does not answer, so it reports "unknown" for a capability the station has by
+another route.
+
+### Operational note
+
+Each service-mode read makes the YD7010 switch its output between the main and the
+programming track with an audible relay. Space reads out rather than firing them back to
+back — consecutive reads without a pause returned silence where spaced reads succeeded.
 
 ## Measurement note
 
