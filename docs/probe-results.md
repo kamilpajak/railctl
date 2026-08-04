@@ -132,6 +132,14 @@ Verified with the poll, three rounds each, all correct against known constants:
 > the station was holding for it. The capability was declared absent because of a defect in
 > the instrument measuring it — the precise failure this probe exists to prevent. Fixed;
 > `_read_value` now polls.
+>
+> The poll is not a workaround for this station's quirk. It is the documented protocol.
+> XpressNet section 2.2.8, verbatim: *"The read instruction does not require an answer by
+> the command station! A result must be specifically requested with the 'Request for
+> Service Mode results' request. Only after receiving the response to programming results
+> request can it be determined whether the read instruction was successful or not."*
+> The answer was in a document already on disk. The Z21 opcode pushing its result without
+> being asked is the exception here, not the rule.
 
 ### CVs read from the ZIMO MS450P22
 
@@ -158,6 +166,10 @@ The request is **zero-based** (`23 11 00 07` reads CV8) and the reply echo is
 **one-based** (`63 14 08`). Band replies carry the offset from the band base: `63 15 09`
 is CV256 + 9 = CV265.
 
+For M2, the `63 14` band maps as Lenz 23151 section 3.1.2.6 states: **C = 0 means CV1024**,
+C = 1..255 means CV1..255. Not 0xFF for CV1024 — a plausible-sounding claim that the
+document contradicts.
+
 ### Service-mode WRITE works
 
 Tested on CV3 (acceleration rate), read first, changed, verified, restored:
@@ -170,9 +182,22 @@ write 24 12 00 02 1A → restored
 read  CV3            = 26          back to the original value
 ```
 
-The write reply **echoes the value that was written**, so a service-mode write can be
-verified from the protocol alone. POM writes have no acknowledgement at all by design, so
-this is a real advantage of the service-mode path, not just a fallback.
+The write is followed by a `63 14` result carrying the written value. Two cautions before
+treating that as proof:
+
+- `63 14` is the **direct-CV read-result** format (Lenz 23151 section 3.1.2.6), not a
+  documented "write echo". It shows the command station produced that value; it does not
+  by itself prove the decoder accepted and retained it. What proves that here is the
+  independent read afterwards, which is why the test above reads CV3 back rather than
+  trusting the reply.
+- **Stale-result hazard.** `21 10` asks for the *stored* result. If an operation fails
+  quietly, a poll can return the result of a previous one. In the test above the value
+  changed from 26 to 36, so the result was demonstrably fresh — but `railctl` must not
+  rely on the poll alone to confirm a write. Read back with the value expected to differ,
+  or the confirmation is circular.
+
+Even so, service mode is strictly better placed than POM here: it has *a* verification
+channel, where a POM write has none at all by design.
 
 `restore` therefore has a proven path. It is no longer gated.
 
