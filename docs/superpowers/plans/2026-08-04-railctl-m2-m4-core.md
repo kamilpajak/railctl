@@ -1426,7 +1426,18 @@ RULE_2_PATTERNS = (
     re.compile(r"<<\s*8"),
 )
 
-RULE_3_PATTERN = re.compile(r"^\s*class\s+\w*(?:Error|Exception|Timeout)\b", re.MULTILINE)
+# The trailing `\s*\(` is what separates an exception from a dataclass that merely
+# reads like one. Nothing can be raised without deriving from BaseException, so a
+# real rogue exception always declares a base and always has that parenthesis;
+# `class TransferError:` in xbus/replies.py - the frozen view of the 61 80 reply -
+# never does. Matching the name alone caught that dataclass, and the first fix for
+# it excluded the whole of replies.py from this rule, which blinded the guard to
+# all 21 classes in the file to silence one false positive.
+#
+# The name must END in one of the three words, not merely contain one: `TimeoutClass`
+# in xbus/commands.py is an enum of reply-wait budgets, and a `\w*` between the word
+# and the parenthesis makes the rule fire on it.
+RULE_3_PATTERN = re.compile(r"^\s*class\s+\w*(?:Error|Exception|Timeout)\s*\(", re.MULTILINE)
 
 RULE_4_PATTERNS = (re.compile(r"/dev/"), re.compile(r"usbmodem"))
 
@@ -1476,6 +1487,21 @@ def test_the_scanner_reports_a_planted_exception_class(tmp_path: Path):
     planted = tmp_path / "rogue.py"
     planted.write_text("class RogueError(Exception):\n    pass\n", encoding="utf-8")
     assert len(_offenders([planted], (RULE_3_PATTERN,))) == 1
+
+
+def test_a_dataclass_named_like_an_exception_is_not_a_hit(tmp_path: Path):
+    """The false positive that nearly cost the rule its coverage of xbus/replies.py.
+
+    A base-less class cannot be raised, so it is not an exception whatever it is
+    called. If someone re-widens RULE_3_PATTERN to match the name alone, this goes
+    red before the whole file gets excluded again to quiet it.
+    """
+    planted = tmp_path / "reply.py"
+    planted.write_text(
+        "@dataclass(frozen=True, slots=True)\nclass TransferError:\n    raw: int\n",
+        encoding="utf-8",
+    )
+    assert _offenders([planted], (RULE_3_PATTERN,)) == []
 ```
 
 - [ ] **Step 2: Run it and see it fail**
@@ -1614,10 +1640,15 @@ rm src/railctl/_layering_canary.py
 ```
 
 Run: `.venv/bin/python -m pytest tests/test_layering.py`
-Expected: `7 passed in 0.09s`
+Expected: `8 passed in 0.09s`
 
 Run: `.venv/bin/python -m pytest`
-Expected: `342 passed, 1 deselected in 4.4s`
+Expected: `343 passed, 1 deselected in 4.4s`
+
+The eighth guard test - `test_a_dataclass_named_like_an_exception_is_not_a_hit` - was added while M3
+was being written, after this milestone had already run at 342. Every running total stated in Tasks 4
+to 13 was computed before it existed and therefore reads one lower than a fresh execution produces.
+Add one to each rather than chasing a discrepancy of exactly one.
 
 Confirm the canary is really gone before committing:
 
