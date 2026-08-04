@@ -401,7 +401,9 @@ def direct_cv_byte(cv: int) -> int: ...                   # cv, 1..255
 def ext_cv_fields(cv: int) -> tuple[int, int]: ...        # (page 0..3, C byte)
 def z21_cv_fields(cv: int) -> tuple[int, int]: ...        # (MSB, LSB)
 def join_cv_field(msb: int, lsb: int) -> int: ...         # for 64 14 replies
-def decode_echo(encoding: CvEncoding, raw: int, *, page_index: int = 0) -> int: ...
+def decode_echo(encoding: CvEncoding, raw: int, *,   # page_index required for SERVICE_EXT,
+                page_index: int | None = None,       # zero_based required for POM: neither
+                zero_based: bool | None = None) -> int: ...   # may be guessed, both raise
 def echo_candidates(encoding: CvEncoding, cv: int, *,
                     zero_based: bool | None = None) -> frozenset[int]: ...
 def resolve_service_cv(reply_ident: int, c: int) -> int: ...   # 63 14..17 -> CV number
