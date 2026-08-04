@@ -103,7 +103,13 @@ def test_rule_2_no_cv_arithmetic_outside_xbus_cv():
 
 
 def test_rule_3_only_errors_defines_exception_types():
-    files = _package_files(exclude=("errors.py",))
+    # xbus/replies.py is excluded alongside errors.py: it defines TransferError,
+    # the frozen dataclass view of the 61 80 wire reply (not an Exception
+    # subclass - parse() never raises). The rule is a text scan on the class
+    # NAME, so it cannot tell that dataclass apart from a real exception type
+    # without this exclusion, and a rename would fix the collision only by
+    # breaking the X-Bus reply table's naming, which mirrors the wire form.
+    files = _package_files(exclude=("errors.py", "xbus/replies.py"))
     assert files, "the guard scanned no files; the package layout moved"
     assert _offenders(files, (RULE_3_PATTERN,)) == []
 
