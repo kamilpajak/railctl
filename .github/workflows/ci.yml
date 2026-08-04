@@ -52,6 +52,14 @@ jobs:
           HYPOTHESIS_PROFILE: ci
         run: uv run pytest
 
+      - name: Coverage
+        # Configured in pyproject.toml since M2 (fail_under = 90, branch = true,
+        # serial_posix.py omitted) but only switched on here: at the end of M2 the
+        # package was __init__.py plus errors.py, and a 90% gate over that measures
+        # nothing. It stays out of addopts permanently, because mutation/*.toml run
+        # the suite once per mutant.
+        run: uv run pytest --cov --cov-report=term-missing
+
       - name: The M1 probe still imports
         # tools/ is deliberately outside the wheel. This is the only thing that
         # would notice if the pytest pythonpath entry that keeps it importable
