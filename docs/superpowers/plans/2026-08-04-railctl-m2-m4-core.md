@@ -6,7 +6,7 @@
 
 **Architecture:** Four layers, each knowing only about the one below it — `link` over `envelope` + `transport`, with `xbus` supplying pure encode/decode functions and `errors` supplying the one exception tree. This plan builds three of them (`xbus`, `envelope`/`transport`, `link`) and the scaffolding underneath; the `station` facade and the CLI are Plan 3. The layering is not a convention: four grep tests fail the build if a protocol byte, a port name, or a piece of CV arithmetic appears outside the module that owns it.
 
-**Tech Stack:** Python 3.11+ (developed on 3.14), `typer` as the only runtime dependency, stdlib `os` + `termios` for the serial port, hatchling for the build, pytest + hypothesis + ruff for development. macOS only.
+**Tech Stack:** Python 3.11+ (developed on 3.13), `typer` as the only runtime dependency, stdlib `os` + `termios` for the serial port, hatchling for the build, uv for dependency management, pytest + hypothesis + ruff for development. macOS only.
 
 ## Global Constraints
 
@@ -14,9 +14,17 @@ Every task's requirements implicitly include this section.
 
 **Language and packaging**
 
-- Python 3.11+ (`requires-python = ">=3.11"`). CI runs 3.11, 3.12, 3.13 and 3.14; development is on 3.14.
+- Python 3.11+ (`requires-python = ">=3.11"`). CI runs 3.11, 3.12, 3.13 and 3.14; development is on 3.13.
 - Runtime dependencies: **`typer` only**. Everything else is stdlib. No `pyserial`.
-- Dev dependencies: `pytest`, `pytest-cov`, `hypothesis`, `ruff`. `cosmic-ray` is already installed for the probe's mutation configs and stays.
+- Dependency management is **uv**, the same as the owner's other Python projects (e.g. AlphaLens):
+  dev tooling lives in PEP 735 `[dependency-groups]`, not `[project.optional-dependencies]`;
+  `uv.lock` is committed to git and is the single source of truth for resolved versions;
+  `.python-version` pins the local interpreter (`3.13`) that `uv sync` provisions and reuses. There
+  is no `pip` inside `.venv` - uv manages the environment directly, and every install command in
+  this plan goes through `uv sync` / `uv run`, never `python -m pip`.
+- Dev dependencies: `pytest`, `pytest-cov`, `hypothesis`, `ruff`, in the `dev` dependency group.
+  `cosmic-ray` is already installed for the probe's mutation configs and stays, in its own
+  `mutation` group (see Task 1 Step 6 for why it is not folded into `dev`).
 - Platform: macOS (Darwin) only. `termios` usage is not portable and is not required to be.
 - The version string lives in exactly one place: `src/railctl/__init__.py`, exposed through hatchling's `dynamic = ["version"]`.
 - Console script: `railctl = "railctl.cli.main:app"`.
@@ -156,8 +164,11 @@ way (PR #2).
 - Create: branch `feature/m2-scaffolding` (Step 0; no task in M2 commits to `main`)
 - Create: `src/railctl/__init__.py`
 - Create: `src/railctl/py.typed`
-- Create: `README.md`, `LICENSE`, `CHANGELOG.md` (Step 5 - the three repository-skeleton files from
-  design doc line 1420 that are not code)
+- Create: `README.md`, `LICENSE`, `CHANGELOG.md`, `.python-version` (Step 5 - the three
+  repository-skeleton files from design doc line 1420 that are not code, plus `.python-version`,
+  which the design doc does not mention because it predates the decision to manage dependencies
+  with uv)
+- Create: `uv.lock` (Step 8, written by `uv sync --group mutation`; committed in Step 14)
 - Create: `tests/__init__.py`, `tests/probe/__init__.py`, `tests/unit/__init__.py`,
   `tests/station/__init__.py`, `tests/cli/__init__.py`, `tests/hardware/__init__.py`
 - Create: `tests/hardware/test_marker.py`
@@ -357,14 +368,19 @@ no empty `cli/`, `xbus/`, `transport/`, `envelope/` or `station/` package: an em
 make `railctl.cli.main` look importable to a reader while still failing at run time, which is the
 same "looks fine, is not" shape this project is trying to eliminate.
 
-- [ ] **Step 5: Add the three non-code repository-skeleton files**
+- [ ] **Step 5: Add the four non-code repository-skeleton files**
 
 Design doc line 1420 lists five things next to `src/`: `.github/workflows/ci.yml`, `pyproject.toml`,
 `CHANGELOG.md`, `README.md` and `LICENSE (MIT)`. The workflow is Task 3 and `pyproject.toml` is the
 next step; the remaining three are created here. None of them exists in the repository today
 (`ls` shows only `docs/`, `mutation/`, `tests/`, `tools/` and `pyproject.toml`), and `README.md` has
-to exist **before** step 8 runs `pip install -e`, because step 6 adds `readme = "README.md"` to
+to exist **before** step 8 runs `uv sync`, because step 6 adds `readme = "README.md"` to
 `[project]` and hatchling fails the build if the file it names is missing.
+
+A fourth file, `.python-version`, is added here too. The design doc does not mention it - it
+predates the decision to manage dependencies with uv - but it is the same kind of file as the other
+three: non-code, one line, read by tooling rather than imported. It pins the interpreter `uv sync`
+provisions and reuses, the same way AlphaLens pins its own.
 
 `LICENSE` - the MIT text, verbatim, copyright holder Kamil Pajak, year 2026:
 
@@ -403,7 +419,7 @@ Drive a YaMoRC YD7010 and read or write ZIMO decoder CVs over XpressNet.
 ## Install
 
 ```sh
-pip install -e ".[dev]"
+uv sync
 ```
 
 ## Status
@@ -428,15 +444,26 @@ All notable changes to this project are documented in this file. The format foll
 ## [Unreleased]
 ```
 
-Confirm all three landed:
+`.python-version` - one line, no trailing content beyond the newline. This is the interpreter
+version measured on the machine that ran Plan 1 (`.venv`'s `pyvenv.cfg` records `version_info =
+3.13.13`, created by uv 0.11.6), not the `requires-python` floor - `requires-python` stays
+`>=3.11` so the package still supports 3.11-3.14, and CI still runs all four:
+
+```
+3.13
+```
+
+Confirm all four landed:
 
 ```bash
-ls -1 README.md LICENSE CHANGELOG.md
+ls -1 .python-version README.md LICENSE CHANGELOG.md
 ```
 
-Expected, three lines and no error (`ls` sorts its arguments):
+Expected, four lines and no error (`ls` sorts its arguments, and a dotfile sorts before capital
+letters in the C locale):
 
 ```
+.python-version
 CHANGELOG.md
 LICENSE
 README.md
@@ -455,12 +482,16 @@ readme = "README.md"
 requires-python = ">=3.11"
 dependencies = ["typer>=0.12"]
 
-[project.optional-dependencies]
+[dependency-groups]
 # typer is the only runtime dependency; the serial port is stdlib os + termios.
 dev = ["pytest>=8", "pytest-cov>=5", "hypothesis>=6.100,<7", "ruff>=0.5"]
 # cosmic-ray is deliberately NOT in `dev`. It drags in aiohttp and gitpython,
 # it is only ever run by hand against mutation/*.toml, and CI must not have to
 # resolve it on four Python versions to tell us whether the codec is correct.
+# `[dependency-groups]` (PEP 735) rather than `[project.optional-dependencies]`:
+# these are development-only groups, never installable by someone who `pip
+# install`s the published distribution, which is exactly what a group is for
+# and an extra is not.
 mutation = ["cosmic-ray>=8.4.0"]
 
 [project.scripts]
@@ -539,7 +570,7 @@ setting.
 deliberately absent from `addopts`, and no M2 step and no M2 CI job runs coverage. At the end of M2
 `src/railctl` is `__init__.py` plus `errors.py`; a 90% gate over that measures nothing and would
 fail the milestone it exists to protect. The gate arrives with **M3**, as an explicit CI step
-(`python -m pytest --cov --cov-report=term-missing`) once `xbus/` gives it something to measure.
+(`uv run pytest --cov --cov-report=term-missing`) once `xbus/` gives it something to measure.
 It stays out of `addopts` permanently, because `mutation/*.toml` run the suite once per mutant and
 would otherwise pay the coverage tax on every one of the 462 `checks.py` mutants.
 
@@ -566,27 +597,60 @@ source tree. The seventh fails because the venv still has the old `railctl-probe
 installed. That is the whole point of the test: it separates "the source tree is right" from "what
 is installed is right".
 
-- [ ] **Step 8: Reinstall the distribution**
+- [ ] **Step 8: Reinstall the distribution with uv**
 
-Three commands, of which the second deletes a directory. `railctl_probe.egg-info/` is build metadata
-generated by the old setuptools editable install. It is matched by `*.egg-info/` in `.gitignore`, so
-it is not tracked, contains no source, and is regenerated on demand by any build backend that wants
-it. Deleting it removes stale `top_level.txt` / `SOURCES.txt` records naming a distribution that no
-longer exists.
+There is no `pip` inside `.venv` - it was created by uv 0.11.6 and uv never installs one, so every
+`python -m pip …` command in an earlier draft of this step is unrunnable as written.
+`railctl_probe.egg-info/` is build metadata generated by the old setuptools editable install; it is
+matched by `*.egg-info/` in `.gitignore`, so it is not tracked, contains no source, and does not
+need deleting by hand - uv prunes what no longer belongs.
+
+One command:
 
 ```bash
-.venv/bin/python -m pip uninstall -y railctl-probe
-rm -rf railctl_probe.egg-info
-.venv/bin/python -m pip install -e ".[dev]"
+uv sync --group mutation
 ```
 
-Expected tail of the third command: `Successfully installed railctl-0.1.0 ... typer-...`.
-`pip uninstall` also removes `.venv/lib/python3.13/site-packages/__editable__.railctl_probe-0.0.0.pth`
-and its finder module; hatchling writes its own editable hook in their place.
+This resolves the dependency tree from `pyproject.toml`, writes `uv.lock` (created if absent,
+updated if the resolution changed), installs `railctl` editable from `src/` the way
+`.[dev]` used to, installs the `dev` group, and additionally installs the `mutation` group so
+`cosmic-ray` survives - `uv sync` on its own only installs the default groups, and `mutation` is not
+one of them (Task 1 Step 6's `[dependency-groups]` comment explains why it is kept out of `dev`).
+uv also **prunes** packages in `.venv` that no longer belong to the resolved environment, which is
+what removes the stale `railctl-probe` editable install - there is no separate uninstall step.
 
-`cosmic-ray` is untouched by this: it is in the `mutation` extra, and pip never uninstalls packages
-that are merely absent from the extra being installed. If it ever needs reinstalling, use
-`.venv/bin/python -m pip install -e ".[dev,mutation]"`.
+Expected output shape (uv's, not pip's - do not look for pip's `Successfully installed` line):
+
+```
+Resolved N packages in …ms
+Prepared N packages in …s
+Installed N packages in …ms
+ + cosmic-ray==8.4.0
+ + railctl==0.1.0 (from file:///Users/jacoren/Developer/Personal/railctl)
+ + typer==0.12.… (from file://…)
+ …
+ - railctl-probe==0.0.0 (from file:///Users/jacoren/Developer/Personal/railctl)
+```
+
+The exact package count and version pins depend on what `uv sync` resolves on the day this step
+runs, so do not match this block wording-for-wording - confirm success with the verification
+commands in Step 9 instead, which check the installed distribution and its version directly rather
+than parsing this output.
+
+Confirm the stale editable install left nothing behind:
+
+```bash
+ls .venv/lib/python3.13/site-packages/ | grep -i railctl_probe
+```
+
+Expected: no output (`grep` exits 1, so this command legitimately "fails" - that is the pass
+condition). If either `__editable__.railctl_probe-*.pth` or a matching
+`__editable___railctl_probe_*_finder.py` is still listed, uv did not prune it; run
+`uv pip uninstall --python .venv/bin/python railctl-probe` and re-check.
+
+`uv.lock` is now a tracked file. Step 14 commits it alongside `.python-version` and everything else
+this task creates - a lockfile that is not committed does not lock anything for the next person who
+clones the repository.
 
 - [ ] **Step 9: Verify both packages import**
 
@@ -747,8 +811,18 @@ git rev-parse --abbrev-ref HEAD
 
 Expected: `feature/m2-scaffolding`
 
+`git add -A` picks up every path this task created or changed, including the two uv files that
+have no earlier mention in the design doc: `uv.lock` (written by Step 8's `uv sync`) and
+`.python-version` (written by Step 5). Confirm both are staged before committing:
+
 ```bash
 git add -A
+git status --porcelain | grep -E "^A  (uv\.lock|\.python-version)$"
+```
+
+Expected: two lines, `A  .python-version` and `A  uv.lock`.
+
+```bash
 git commit -m "build(pkg): migrate to the railctl hatchling package and the tests/ package tree"
 ```
 
@@ -1540,14 +1614,16 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
-      - uses: actions/setup-python@v5
+      - uses: astral-sh/setup-uv@v9
         with:
+          enable-cache: true
           python-version: ${{ matrix.python-version }}
 
-      - name: Install the package and dev extras
-        run: |
-          python -m pip install --upgrade pip
-          python -m pip install -e ".[dev]"
+      - name: Install the package and dev dependencies
+        # --frozen refuses to re-resolve: if uv.lock is stale relative to
+        # pyproject.toml, this step fails instead of silently installing a
+        # resolution nobody committed and nobody can reproduce locally.
+        run: uv sync --frozen
 
       - name: Assert no serial port is attached
         # The whole non-hardware suite must pass on a machine that has never seen
@@ -1557,10 +1633,10 @@ jobs:
           ! ls /dev/ttyUSB* /dev/ttyACM* 2>/dev/null
 
       - name: Ruff check
-        run: python -m ruff check .
+        run: uv run ruff check .
 
       - name: Ruff format
-        run: python -m ruff format --check .
+        run: uv run ruff format --check .
 
       - name: Tests
         # The `ci` hypothesis profile in tests/conftest.py raises max_examples from
@@ -1568,30 +1644,45 @@ jobs:
         # property tests run somewhere slower than a developer's patience.
         env:
           HYPOTHESIS_PROFILE: ci
-        run: python -m pytest
+        run: uv run pytest
 
       - name: The M1 probe still imports
         # tools/ is deliberately outside the wheel. This is the only thing that
         # would notice if the pytest pythonpath entry that keeps it importable
         # were removed.
-        run: python -c "import tools.probe; print(tools.probe.__file__)"
+        run: uv run python -c "import tools.probe; print(tools.probe.__file__)"
 ```
 
+`astral-sh/setup-uv@v9` (the current major, checked against the action's tags on 2026-08-04)
+replaces `actions/setup-python@v5`: it installs uv itself, and uv then
+provisions the interpreter named by `python-version` (mirroring `matrix.python-version`) the same
+way `.python-version` does locally, so there is no separate Python setup step. `enable-cache: true`
+caches the uv download cache between runs, keyed on `uv.lock`.
+
+`uv sync --frozen` is used here rather than a bare `uv sync`, and that choice is deliberate: a bare
+`uv sync` re-resolves and rewrites `uv.lock` if `pyproject.toml` changed since it was last
+generated, which would let CI silently pass against a dependency set nobody reviewed. `--frozen`
+makes that a hard failure instead - CI is telling the developer "regenerate the lockfile locally
+and commit it," not doing that regeneration on their behalf. This is why `uv sync --frozen` is
+preferred over the unqualified form everywhere in this workflow.
+
 No coverage step: see the conflict-2 resolution in Task 1. M3 adds
-`python -m pytest --cov --cov-report=term-missing` here once `xbus/` exists.
+`uv run pytest --cov --cov-report=term-missing` here once `xbus/` exists.
 
 `on: pull_request` is why M2 arrives as a pull request rather than as three commits pushed to
 `main`: a workflow whose PR trigger has never run once is a workflow nobody has tested.
 
 - [ ] **Step 9: Confirm the CI commands pass locally before pushing**
 
-Run each workflow command against the local venv, in workflow order:
+Run each workflow command exactly as the workflow now runs it, in workflow order - through `uv
+run`, not through `.venv/bin/python` directly, so this dress rehearsal exercises the same frozen
+lockfile CI resolves against:
 
 ```bash
-.venv/bin/python -m ruff check . \
-  && .venv/bin/python -m ruff format --check . \
-  && HYPOTHESIS_PROFILE=ci .venv/bin/python -m pytest \
-  && .venv/bin/python -c "import tools.probe; print(tools.probe.__file__)"
+uv run ruff check . \
+  && uv run ruff format --check . \
+  && HYPOTHESIS_PROFILE=ci uv run pytest \
+  && uv run python -c "import tools.probe; print(tools.probe.__file__)"
 ```
 
 Expected: `All checks passed!`, `42 files already formatted`, `342 passed, 1 deselected in 13s`,
@@ -6363,13 +6454,19 @@ step and before `The M1 probe still imports`:
         # package was __init__.py plus errors.py, and a 90% gate over that measures
         # nothing. It stays out of addopts permanently, because mutation/*.toml run
         # the suite once per mutant.
-        run: python -m pytest --cov --cov-report=term-missing
+        run: uv run pytest --cov --cov-report=term-missing
 ```
 
-Confirm it passes locally before pushing:
+`uv run`, not `python -m pytest`: every other command in this workflow goes through `uv run` since
+Task 3, and the job never puts a bare `python` on the path — `astral-sh/setup-uv` provisions the
+interpreter for uv, not for the shell. A bare `python -m pytest` here would fail the job on a
+missing interpreter, or, worse, find a system Python and measure coverage against a different
+environment than the one the tests just ran in.
+
+Confirm it passes locally before pushing, through the same entry point CI uses:
 
 ```bash
-.venv/bin/python -m pytest --cov --cov-report=term-missing
+uv run pytest --cov --cov-report=term-missing
 ```
 
 Expected: the coverage table, then `Required test coverage of 90% reached.` and `0 failed`. If it
