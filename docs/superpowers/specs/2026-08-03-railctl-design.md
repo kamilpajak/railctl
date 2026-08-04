@@ -326,7 +326,7 @@ def encode(header: int, *data: int) -> bytes: ...    # header, data..., XOR
 def decode(raw: bytes) -> tuple[int, bytes]: ...     # (header, data) without the XOR byte
 ```
 
-`encode()` derives the expected data-byte count from the header's low nibble and raises `XBusEncodeError` on a mismatch, so an opcode whose argument list disagrees with its declared length cannot ship. `decode()` uses the `xor(whole) == 0` identity. Golden vectors come from the measured hardware: `encode(0x21, 0x21) == b"\x21\x21\x00"`, `decode(b"\x63\x21\x40\x12\x10") == (0x63, b"\x40\x12")`.
+`encode()` derives the expected data-byte count from the header's low nibble and raises `XBusEncodeError` on a mismatch, so an opcode whose argument list disagrees with its declared length cannot ship. `decode()` uses the `xor(whole) == 0` identity. Golden vectors come from the measured hardware: `encode(0x21, 0x21) == b"\x21\x21\x00"`, `decode(b"\x63\x21\x40\x12\x10") == (0x63, b"\x21\x40\x12")`.
 
 ### Dialect (`xbus/dialect.py`)
 
@@ -401,7 +401,9 @@ def direct_cv_byte(cv: int) -> int: ...                   # cv, 1..255
 def ext_cv_fields(cv: int) -> tuple[int, int]: ...        # (page 0..3, C byte)
 def z21_cv_fields(cv: int) -> tuple[int, int]: ...        # (MSB, LSB)
 def join_cv_field(msb: int, lsb: int) -> int: ...         # for 64 14 replies
-def decode_echo(encoding: CvEncoding, raw: int, *, page_index: int = 0) -> int: ...
+def decode_echo(encoding: CvEncoding, raw: int, *,   # page_index required for SERVICE_EXT,
+                page_index: int | None = None,       # zero_based required for POM: neither
+                zero_based: bool | None = None) -> int: ...   # may be guessed, both raise
 def echo_candidates(encoding: CvEncoding, cv: int, *,
                     zero_based: bool | None = None) -> frozenset[int]: ...
 def resolve_service_cv(reply_ident: int, c: int) -> int: ...   # 63 14..17 -> CV number

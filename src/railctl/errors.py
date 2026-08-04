@@ -80,6 +80,18 @@ class XBusChecksumError(XBusDecodeError):
     """The trailing XOR byte does not match the telegram body."""
 
 
+class XBusIncompleteError(XBusDecodeError):
+    """The buffer holds fewer bytes than the shortest possible telegram.
+
+    Separate from its parent because the caller's response is different: an
+    incomplete buffer means keep reading, a length or checksum fault means
+    resync or retry. Both would otherwise be one XBusDecodeError separable only
+    by message text, and a link that waits for bytes that will never come ends
+    as "no reply" - how this project has recorded working capabilities as
+    absent.
+    """
+
+
 class LinkProtocolError(ProtocolError):
     """The station rejected the same telegram twice."""
 
