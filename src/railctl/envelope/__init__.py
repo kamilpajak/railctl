@@ -43,6 +43,12 @@ class EnvelopeStats:
     bytes_dropped: int = 0
     bad_xor: int = 0
     stray_replies: int = 0
+    # Every discard through _discard() bumps this, including a MAX_BUFFER
+    # overflow trim on a stream that never frames correctly (the YD.Control
+    # telemetry interface streams ASCII for ever). It is NOT a count of
+    # framing successfully recovering N times - do not read it that way.
+    # bytes_dropped is the figure that answers "how much did we throw away";
+    # read it next to this one, not instead of it.
     resyncs: int = 0
 
 
