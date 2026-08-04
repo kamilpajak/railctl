@@ -48,7 +48,7 @@ def _unresolved() -> dict[str, object | None]:
         "pom_read": None,
         "pom_result_channel": "none",
         "pom_echo_zero_based": None,
-        "value": None,
+        "pom_value": None,
     }
 
 
@@ -106,7 +106,7 @@ def check_pom_read(link: Link, address: int, cv: int = 8, *, poll: bool) -> Chec
                     "pom_read": True,
                     "pom_result_channel": channel,
                     "pom_echo_zero_based": echo_zero_based,
-                    "value": reply.value,
+                    "pom_value": reply.value,
                 },
                 f"POM read of CV{cv} returned {reply.value} via {channel}",
                 dump,
@@ -119,7 +119,7 @@ def check_pom_read(link: Link, address: int, cv: int = 8, *, poll: bool) -> Chec
                 "pom_read": False,
                 "pom_result_channel": "none",
                 "pom_echo_zero_based": None,
-                "value": None,
+                "pom_value": None,
             },
             "station answered 61 82 (instruction not supported): POM read is not implemented",
             dump,
@@ -131,7 +131,7 @@ def check_pom_read(link: Link, address: int, cv: int = 8, *, poll: bool) -> Chec
                 "pom_read": None,
                 "pom_result_channel": "none",
                 "pom_echo_zero_based": None,
-                "value": None,
+                "pom_value": None,
             },
             "decoder did not acknowledge: check RailCom"
             " (CV29 bit 3 = 1, CV28 bits 0 and 1 set) and retry",

@@ -72,3 +72,34 @@ def test_split_frames_drops_a_frame_with_a_bad_checksum():
 def test_frame_solicited_reflects_the_prefix():
     assert Frame(LI_COMMAND, b"\x61\x01").solicited is True
     assert Frame(LI_BROADCAST, b"\x61\x01").solicited is False
+
+
+def test_a_stray_prefix_before_a_real_frame_does_not_swallow_it():
+    # This returned ZERO frames before the fix. The header was read from the
+    # stray prefix's offset, the length it implied overran the buffer, and the
+    # loop broke to wait for bytes that never came - so a reply was recorded as
+    # silence, which in this project is the difference between "unsupported"
+    # and "not established".
+    good = build(b"\x63\x14\x08\x91")
+    frames, rest = split_frames(LI_COMMAND + good)
+    assert [f.telegram for f in frames] == [b"\x63\x14\x08\x91"]
+    assert rest == b""
+
+
+def test_a_genuinely_incomplete_frame_is_still_kept_for_the_next_read():
+    # The salvage path must not cost us partial frames: with no valid frame
+    # further along, the parser waits rather than discarding.
+    good = build(b"\x63\x14\x08\x91")
+    frames, rest = split_frames(good[:4])
+    assert frames == []
+    assert rest == good[:4]
+    frames, rest = split_frames(rest + good[4:])
+    assert [f.telegram for f in frames] == [b"\x63\x14\x08\x91"]
+
+
+def test_a_frame_survives_arbitrary_leading_noise():
+    good = build(b"\x63\x14\x08\x91")
+    for junk in (b"", b"\x00", b"\xff", LI_COMMAND, LI_BROADCAST, LI_COMMAND * 2,
+                 b"\xff\xfe\x63", b"[CS0] M: TC 0mA\r\n"):
+        frames, _ = split_frames(junk + good)
+        assert [f.telegram for f in frames] == [b"\x63\x14\x08\x91"], junk.hex()

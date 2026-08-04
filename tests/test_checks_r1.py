@@ -14,7 +14,7 @@ def test_result_arriving_as_a_broadcast_sets_channel_broadcast():
     result = check_pom_read(link, address=3, cv=8, poll=False)
     assert result.value["pom_read"] is True
     assert result.value["pom_result_channel"] == "broadcast"
-    assert result.value["value"] == 0x91
+    assert result.value["pom_value"] == 0x91
 
 
 def test_echo_of_the_zero_based_cv_sets_the_echo_flag():
@@ -82,7 +82,7 @@ def test_a_z21_form_cv_result_is_recognised_and_not_mistaken_for_silence():
     link = FakeLink({POM_CV8_AT_3: [build(b"\x64\x14\x00\x07\x91")]})
     result = check_pom_read(link, address=3, cv=8, poll=False)
     assert result.value["pom_read"] is True
-    assert result.value["value"] == 0x91
+    assert result.value["pom_value"] == 0x91
     assert result.value["pom_echo_zero_based"] is True
 
 
