@@ -2,7 +2,8 @@
 
 - Command station: YaMoRC YD7010, XpressNet **4.0**, command station id **0x12** (Z21 family)
 - Port: `/dev/cu.usbmodem7010A00011943` (LI-USB `FF FE` framing required)
-- Decoder: ZIMO MS450P22, address 3, on the **main track**
+- Decoder: ZIMO MS450P22, address 3. **On the main track** for the R1 / POM section; moved
+  to the **programming track** for the R2 / R4 service-mode section below.
 - Run: 2026-08-04
 
 ## Settled
@@ -92,18 +93,26 @@ vendor anticipates this failure.
 
 ## R2, R4 — service mode on the programming track: SETTLED
 
-**Service-mode CV reading works, through the Z21 opcode `23 11` and only that one.**
+**Service-mode CV reading works. Every opcode family tried works** — but they differ in
+how the result is delivered.
 
-| Opcode | Result |
+| Opcode | Result delivery |
 | --- | --- |
-| `23 11` — Z21 service read, 16-bit CV | **works, every time** |
-| `22 15` — Lenz legacy direct read | silent |
-| `22 18` — Lenz extended, band CV1–255 | silent |
-| `22 19` — Lenz extended, band CV256–511 | silent |
+| `23 11` — Z21 service read, 16-bit CV | **unsolicited**, arrives on its own |
+| `22 15` — Lenz legacy direct read | **only after `21 10`** is sent |
+| `22 18` — Lenz extended, band CV1–255 | **only after `21 10`** |
+| `22 19` — Lenz extended, band CV256–511 | **only after `21 10`** |
 
-Reproduced over three alternating rounds on the same CV: `22 15 01` returned only the
-interface ACK each time, `23 11 00 00` returned `63 14 01 03` each time. This is
-consistent with the station reporting command station id `0x12`, the Z21 family.
+Verified with the poll, three rounds each, all correct against known constants:
+`22 15 01` → CV1 = 3, `22 15 08` → CV8 = 145, `22 18 01` → CV1 = 3, `22 18 08` → CV8 = 145,
+`22 19 09` → CV265 = 0, `22 19 0A` → CV266 = 64.
+
+> **Correction.** An earlier version of this document stated that the Lenz opcodes were
+> silent and that the station implemented only the Z21 family. That was wrong. The probe's
+> `_read_value` never sent the `21 10` service-result request, so it never collected results
+> the station was holding for it. The capability was declared absent because of a defect in
+> the instrument measuring it — the precise failure this probe exists to prevent. Fixed;
+> `_read_value` now polls.
 
 ### CVs read from the ZIMO MS450P22
 
@@ -115,9 +124,16 @@ consistent with the station reporting command station id `0x12`, the Z21 family.
 | 265 | `23 11 01 08` | `63 15 09 00` | **0** | sound project |
 | 266 | `23 11 01 09` | `63 15 0A 40` | **64** | master volume |
 
-**CVs above 255 are reachable** — but through the 16-bit address of `23 11`, answered on
-the `63 15` band, not through the Lenz extended opcodes the R2 check was written around.
-CV265 and CV266 both read correctly.
+**CVs above 255 are reachable** — by both routes. `22 19` reaches them through the Lenz
+band scheme, and `23 11` through its 16-bit address; both are answered on the `63 15`
+reply band. CV265 and CV266 read correctly either way.
+
+With `_read_value` fixed, the probe's own checks now report:
+
+```
+service_ext_cv        True   high_band True   (CV265 read back on band 0x19)
+z21_cv_opcodes        True                     (Z21 and direct reads of CV29 both 14)
+```
 
 The request is **zero-based** (`23 11 00 07` reads CV8) and the reply echo is
 **one-based** (`63 14 08`). Band replies carry the offset from the band base: `63 15 09`
@@ -130,9 +146,8 @@ secondary. The measurements invert that: POM returns nothing, service mode throu
 `23 11` returns everything asked of it, including the high CVs the ZIMO backup needs.
 **The primary CV path should be service mode on the programming track using `23 11`.**
 
-The R2 check must be rewritten: as written it probes `22 18` and `22 19`, which this
-station does not answer, so it reports "unknown" for a capability the station has by
-another route.
+The R2 check did not need rewriting onto a different opcode family after all — it needed
+its instrument fixed. It asks the right question and now answers it.
 
 ### Operational note
 
