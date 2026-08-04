@@ -8,3 +8,9 @@ __pycache__/
 .ruff_cache/
 .venv/
 *.egg-info/
+
+# Test hardening scratch: hypothesis' failing-example database and the
+# cosmic-ray session databases. Both are per-machine caches, not results -
+# the results that matter are written up in docs/test-hardening.md.
+.hypothesis/
+*.sqlite
