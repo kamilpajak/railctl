@@ -70,3 +70,10 @@ ENVELOPES = [LiUsbEnvelope]
 def envelope_factory(request):
     """The envelope CLASS under test. Call it to get a fresh instance."""
     return request.param
+
+
+# Every scripted suite runs twice: whole-frame, then one byte at a time. The
+# byte-at-a-time run is the worst case a USB CDC port actually produces.
+@pytest.fixture(params=[None, 1], ids=["whole-frame", "byte-at-a-time"])
+def chunk_size(request):
+    return request.param
