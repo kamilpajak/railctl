@@ -41,6 +41,15 @@ settings.register_profile(
 )
 
 # CI: worth more examples than a developer wants to sit through.
-settings.register_profile("ci", max_examples=500, deadline=None, verbosity=Verbosity.normal)
+# derandomize: a newly discovered example must not fail an unrelated CI run, and
+# a mutation score computed from random draws is a sample rather than a
+# measurement (docs/test-hardening.md).
+settings.register_profile(
+    "ci",
+    max_examples=500,
+    deadline=None,
+    derandomize=True,
+    verbosity=Verbosity.normal,
+)
 
 settings.load_profile(os.environ.get("HYPOTHESIS_PROFILE", "default"))
