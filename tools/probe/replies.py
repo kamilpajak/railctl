@@ -48,8 +48,10 @@ class Status:
 class CvValue:
     """A service-mode or POM CV read result.
 
-    `raw_cv` is the byte exactly as it arrived. `cv` is the absolute CV number
-    when the reply header determines it without ambiguity, and None otherwise:
+    `raw_cv` is the CV address exactly as it arrived: one byte in the Lenz
+    forms, and the 16-bit value in the Z21 form (0x64 0x14), where the two
+    address bytes are joined. `cv` is the absolute CV number when the reply
+    header determines it without ambiguity, and None otherwise:
 
     - 0x15/0x16/0x17 are unambiguous. Lenz 23151 sections 3.1.2.7 to 3.1.2.9
       map C = 0..255 onto CV256..511, CV512..767 and CV768..1023.
@@ -163,6 +165,18 @@ def parse(telegram: bytes) -> Reply:
         )
     if header == 0x62 and db0 == 0x22 and len(telegram) >= 3:
         return Status(raw=telegram[2])
+    if header == 0x64 and db0 == 0x14 and len(telegram) >= 5:
+        # Z21 LAN_X_CV_RESULT (Z21 LAN Protocol section 6.5). Different header
+        # and a 16-bit CV address, unlike the 8-bit Lenz 63 14 form. The YD7010
+        # reports command station id 0x12, the Z21 family, so its XpressNet port
+        # may well answer in this form; leaving it unparsed made a successful
+        # POM read look exactly like silence.
+        return CvValue(
+            raw_cv=(telegram[2] << 8) | telegram[3],
+            value=telegram[4],
+            ident=db0,
+            cv=None,
+        )
     if header == 0x63 and db0 == 0x10 and len(telegram) >= 4:
         return RegisterValue(register=telegram[2], value=telegram[3])
     if header == 0x63 and (db0 == 0x14 or db0 in _EXT_BAND_BASE) and len(telegram) >= 4:

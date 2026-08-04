@@ -236,3 +236,20 @@ def test_z21_opcodes_unknown_when_z21_succeeds_but_direct_silent():
     result = check_z21_opcodes(link)
     assert result.value is None
     assert "no value" in result.detail
+
+
+def test_a_z21_form_high_band_reply_is_reported_without_a_confirmed_echo():
+    # The Z21 64 14 form carries the CV address under a convention the probe has
+    # not established, so the band is reported as working while the detail says
+    # the echo could not be cross-checked.
+    link = FakeLink(
+        {
+            EXT_CV1: [b"\xff\xfe\x63\x14\x00\x03\x74"],
+            DIRECT_CV1: [b"\xff\xfe\x63\x14\x00\x03\x74"],
+            EXT_CV265: [build(b"\x64\x14\x01\x08\x2d")],
+        }
+    )
+    result = check_service_ext_cv(link)
+    assert result.value["service_ext_cv_high_band"] is True
+    assert result.value["service_ext_cv_high_value"] == 0x2D
+    assert "not cross-checked" in result.detail
