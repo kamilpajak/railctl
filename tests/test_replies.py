@@ -2,10 +2,13 @@ from tools.probe.replies import (
     ACK,
     BUSY,
     NO_ACK,
+    PROGRAMMING_MODE,
     READY,
     SHORT_CIRCUIT,
     STATION_BUSY,
+    TRACK_SHORT_CIRCUIT,
     TRANSFER_ERROR,
+    TRANSIENT,
     UNSUPPORTED,
     CvValue,
     LocoInfo,
@@ -146,3 +149,19 @@ def test_too_short_loco_info_telegram_becomes_unknown():
     # Only 4 bytes, needs at least 5
     result = parse(b"\xE4\x03\x20\x1F")
     assert result == Unknown(telegram=b"\xE4\x03\x20\x1F")
+
+
+def test_parses_the_programming_mode_broadcast():
+    # Z21 spec 2.9. Observed on the YD7010 as the first reply to a service-mode
+    # read, where it previously parsed as Unknown.
+    assert parse(b"\x61\x02") is PROGRAMMING_MODE
+
+
+def test_parses_the_track_short_circuit_broadcast():
+    # Z21 spec 2.10. Distinct from the PROGRAMMING short circuit at 61 12.
+    assert parse(b"\x61\x08") is TRACK_SHORT_CIRCUIT
+
+
+def test_a_track_short_circuit_is_transient_not_acceptance():
+    assert TRACK_SHORT_CIRCUIT in TRANSIENT
+    assert PROGRAMMING_MODE not in TRANSIENT

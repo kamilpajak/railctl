@@ -132,6 +132,8 @@ BUSY = Marker("busy")
 UNSUPPORTED = Marker("unsupported")
 TRANSFER_ERROR = Marker("transfer_error")
 STATION_BUSY = Marker("station_busy")
+PROGRAMMING_MODE = Marker("programming_mode")
+TRACK_SHORT_CIRCUIT = Marker("track_short_circuit")
 
 # Every reply that shares header 0x61. The two at 0x80 and 0x81 are easy to
 # forget because they are not programming replies, but leaving them unparsed
@@ -139,6 +141,12 @@ STATION_BUSY = Marker("station_busy")
 # station saying "I could not process that" would be recorded as one saying
 # "I support that". See TRANSIENT below.
 _HEADER_61_REPLIES = {
+    # 0x02 and 0x08 are Z21 broadcasts (Z21 spec 2.9 and 2.10). 0x02 was
+    # observed on the YD7010 on 2026-08-04 as the first reply to a service-mode
+    # read, and went unparsed. 0x08 is a TRACK short circuit, distinct from the
+    # PROGRAMMING short circuit at 0x12.
+    0x02: PROGRAMMING_MODE,
+    0x08: TRACK_SHORT_CIRCUIT,
     0x11: READY,
     0x12: SHORT_CIRCUIT,
     0x13: NO_ACK,
@@ -151,7 +159,7 @@ _HEADER_61_REPLIES = {
 # The station told us it could not act right now. None of these say anything
 # about whether an opcode is implemented, so every capability check must treat
 # them as unresolved rather than as an answer either way.
-TRANSIENT = (SHORT_CIRCUIT, BUSY, STATION_BUSY, TRANSFER_ERROR)
+TRANSIENT = (SHORT_CIRCUIT, TRACK_SHORT_CIRCUIT, BUSY, STATION_BUSY, TRANSFER_ERROR)
 
 
 @dataclass(frozen=True)
