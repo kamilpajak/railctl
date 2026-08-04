@@ -9059,6 +9059,8 @@ git commit -m "feat(link): add the one-command link with retries, timeouts and s
 - Create: `src/railctl/transport/serial_posix.py`
 - Modify: `src/railctl/transport/__init__.py` - append below the `Transport` protocol block (end of file)
 - Create: `tests/unit/test_open_link.py`
+- Create: `tests/unit/test_serial_posix.py` (Step 3a - added when the review found `termios.error`
+  escaping untyped and `read()` unable to tell EOF from an idle port)
 - Create: `tests/hardware/test_m4_acceptance.py`
 - Not touched, and named here so nobody adds them back: `pyproject.toml` is **not** edited (Task 1 already registered the `hardware` marker and put `-m 'not hardware'` in `addopts`; a second `addopts` or `markers` key is a TOML parse error), and `tests/hardware/__init__.py` is **not** created (Task 1 created it). Step 7 verifies both instead of writing them a second time.
 
@@ -9105,12 +9107,18 @@ from __future__ import annotations
 
 import pytest
 
+import railctl.transport as transport_module
+from railctl.envelope import Kind
+from railctl.envelope.liusb import LiUsbEnvelope
 from railctl.errors import AmbiguousPort, PortNotFound, TransportError, UnsupportedFeatureError
-from railctl.transport import find_xpressnet_port, transport_for
+from railctl.transport import find_xpressnet_port, list_candidate_ports, open_link, transport_for
+from railctl.transport.fake import FakeClock, FakeTransport
 from railctl.transport.serial_posix import BAUDRATE, CDC_INDEX_HINT, SerialTransport
 
 PORT_43 = "/dev/cu.usbmodem7010A00011943"
 PORT_OTHER = "/dev/cu.usbmodemAAAA3"
+VERSION_REQUEST = b"\x21\x21\x00"
+VERSION_REPLY = b"\x63\x21\x40\x12\x10"
 
 # str(exc) is the message alone and exc.hint is the hint, because the CLI prints
 # them on separate lines (spec line 159). Anything asserted about advice is read
@@ -9177,6 +9185,65 @@ def test_an_unknown_target_names_the_forms_that_work():
 
 def test_the_baudrate_is_the_one_lenz_23151_specifies():
     assert BAUDRATE == 57600
+
+
+def test_list_candidate_ports_globs_the_xpressnet_pattern_and_sorts(monkeypatch):
+    """PORT_GLOB picks the CDC interface railctl talks to. Get the pattern wrong
+    - for example "*1", the silent LocoNet interface - and this is the only test
+    that would notice. sorted() is what decides which port AmbiguousPort names
+    first in its hint, so an unsorted glob.glob() result must come back sorted.
+    """
+    seen_patterns = []
+    unsorted = [PORT_OTHER, PORT_43]
+
+    def fake_glob(pattern):
+        seen_patterns.append(pattern)
+        return unsorted
+
+    monkeypatch.setattr(transport_module.glob, "glob", fake_glob)
+
+    result = list_candidate_ports()
+
+    assert seen_patterns == ["/dev/cu.usbmodem*3"]
+    assert result == sorted(unsorted)
+
+
+def test_z21_host_with_no_port_is_unsupported_not_malformed():
+    """z21:HOST with no explicit port is understood and refused, never a parse
+    error - Z21_DEFAULT_PORT must be filled in for the message.
+    """
+    with pytest.raises(UnsupportedFeatureError) as caught:
+        transport_for("z21:192.168.0.111")
+    assert "192.168.0.111:21105" in str(caught.value)
+
+
+def test_z21_host_with_trailing_colon_and_no_port_is_malformed():
+    with pytest.raises(TransportError):
+        transport_for("z21:192.168.0.111:")
+
+
+def test_transport_for_auto_uses_the_discovered_port(monkeypatch):
+    monkeypatch.setattr(transport_module, "list_candidate_ports", lambda: [PORT_43])
+
+    transport = transport_for("auto")
+
+    assert transport.identity == PORT_43
+
+
+def test_open_link_completes_the_handshake_through_a_fake_transport(monkeypatch):
+    envelope = LiUsbEnvelope()
+    fake = FakeTransport(clock=FakeClock())
+    fake.expect(
+        envelope.frame(Kind.SOLICITED, VERSION_REQUEST),
+        reply=envelope.frame(Kind.SOLICITED, VERSION_REPLY),
+    )
+    monkeypatch.setattr(transport_module, "transport_for", lambda target: fake)
+
+    link = open_link("auto")
+    try:
+        assert link.version_telegram == VERSION_REPLY
+    finally:
+        link.close()
 ```
 
 - [ ] **Step 2: Run the tests to verify they fail**
@@ -9352,20 +9419,85 @@ class SerialTransport:
 > says so at the definition, so the next reader does not assume changing one
 > changes the other.
 >
-> **Risk the owner must weigh before the hardware acceptance run**: turning an
-> end-of-file `read()` into `TransportError` is safe on every POSIX read
-> semantics this project has exercised - a pty with the master closed, and by
-> extension a real USB CDC port that has been unplugged or reset by the OS.
-> The one scenario that would make this the wrong call is a real USB CDC port
-> on Darwin that can report readable and then return `b""` while the device is
-> still alive and about to send more data - POSIX read() never does that for a
-> character device in this driver class, but the CDC-ACM driver is a black box
-> from user space, and this project has not run this exact path against the
-> physical YD7010 yet. Task 13's hardware acceptance suite is what settles it:
-> if `test_open_link_auto_completes_the_handshake` or a real session ever
-> raises this `TransportError` while the station is provably still connected,
-> this change is wrong and needs to fall back to treating a single `b""` as
-> idle, escalating only after a run of them.
+> **Risk the owner must weigh, corrected after measurement**: the note here
+> previously claimed POSIX `read()` never returns zero bytes for a character
+> device in this driver class. That is backwards, and it does not hold on this
+> machine: with `VMIN=0` and `VTIME=0`, calling `os.read()` on an alive, idle
+> tty returns `b""` - it does **not** raise `BlockingIOError`. What actually
+> keeps the new `TransportError` from firing on a live, idle port is the
+> `select()` guard placed above the read, not anything about `read()` itself:
+> `select()` reports an alive idle tty as **not** readable, and only reports it
+> readable once bytes are waiting or the peer has hung up.
+>
+> That guard is load-bearing. Anyone who later simplifies it away - for
+> example, calling `os.read()` unconditionally and trusting the
+> `except BlockingIOError` branch below to cover the idle case - turns every
+> idle poll into a `TransportError`, because an idle tty does not raise
+> `BlockingIOError`; it returns `b""`, indistinguishable at that point from a
+> hung-up one. This is also why `except BlockingIOError: return b""` inside
+> `read()` is dead code for a tty either way, idle or hung-up: a real tty
+> returns `b""` rather than raising in both cases. It is kept only as a cheap
+> guard for a non-tty fd, so nobody deletes the wrong one of the two branches
+> believing it unreachable everywhere. `tests/unit/test_serial_posix.py`
+> (Step 3a) pins both the hang-up raise and the non-serial-device path on a
+> real pty, without needing the physical YD7010.
+
+- [ ] **Step 3a: Write the `serial_posix.py` unit tests the review findings needed**
+
+Lettered rather than renumbered so every later step in this task keeps the number it is already
+cited by elsewhere (Step 6, Step 7, Step 12, Step 13) - only this one step slots in.
+
+```python
+# tests/unit/test_serial_posix.py
+from __future__ import annotations
+
+import os
+
+import pytest
+
+from railctl.errors import PortConfigError, TransportError
+from railctl.transport.serial_posix import SerialConfig, SerialTransport
+
+
+def test_open_on_a_non_serial_device_raises_port_config_error():
+    """termios.error must not escape open() untyped. /dev/null exists, is not a
+    FileNotFoundError and not a permission error, but termios.tcgetattr() on it
+    raises termios.error - which is not a RailctlError and would otherwise print
+    a bare traceback instead of a message plus hint.
+    """
+    transport = SerialTransport(SerialConfig("/dev/null"))
+
+    with pytest.raises(PortConfigError, match="is not a serial device"):
+        transport.open()
+
+    assert transport.is_open is False
+
+
+def test_read_after_the_peer_hangs_up_raises_instead_of_looking_idle():
+    """A cable pulled between the write and the reply must not read as silence.
+
+    On a pty, closing the master makes the slave end of file: select() reports
+    readable and os.read() returns b"". Returning b"" here is indistinguishable
+    from an idle port, so a LinkTimeout ("silence") would fire instead of the
+    real fault, and it would only surface on the next write.
+    """
+    master_fd, slave_fd = os.openpty()
+    slave_path = os.ttyname(slave_fd)
+    os.close(slave_fd)
+
+    transport = SerialTransport(SerialConfig(slave_path))
+    transport.open()
+    try:
+        os.close(master_fd)
+        with pytest.raises(TransportError, match="closed while reading"):
+            transport.read(64, 1.0)
+    finally:
+        transport.close()
+```
+
+> Added when the review found two things this file's tests did not pin:
+> `termios.error` escaping `open()` untyped, and `read()` unable to tell a
+> hung-up port from an idle one.
 
 - [ ] **Step 4: Implement discovery and `open_link`**
 
@@ -9463,7 +9595,12 @@ def open_link(target: str = "auto", *, on_event: Callable[[Frame], None] | None 
 - [ ] **Step 5: Run the unit tests to verify they pass**
 
 Run: `.venv/bin/python -m pytest tests/unit/test_open_link.py -q`
-Expected: PASS, 9 passed
+Expected: PASS, 14 passed - five tests were added when the review findings were closed
+(`test_list_candidate_ports_globs_the_xpressnet_pattern_and_sorts`,
+`test_z21_host_with_no_port_is_unsupported_not_malformed`,
+`test_z21_host_with_trailing_colon_and_no_port_is_malformed`,
+`test_transport_for_auto_uses_the_discovered_port`,
+`test_open_link_completes_the_handshake_through_a_fake_transport`), moving the count from 9 to 14.
 
 - [ ] **Step 6: Check `serial_posix.py` has not grown logic**
 
@@ -9682,7 +9819,7 @@ Plan 3 starts on top of it.
 
 ```bash
 .venv/bin/python -m ruff format . && .venv/bin/python -m ruff check .
-git add src/railctl/transport tests/unit/test_open_link.py tests/hardware/test_m4_acceptance.py
+git add src/railctl/transport tests/unit/test_open_link.py tests/unit/test_serial_posix.py tests/hardware/test_m4_acceptance.py
 git commit -m "feat(transport): add the POSIX serial transport, port discovery and open_link"
 ```
 
