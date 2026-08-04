@@ -41,7 +41,19 @@ station which does not support Operations Mode Programming answers `61 82`, and 
 23151 section 1.4 specifies that this reply is always coupled to the command that
 caused it. The station is not saying "not supported" — it is saying nothing.
 
-Remaining candidate causes, none yet excluded:
+### The decoder is ruled out
+
+Read back in service mode on 2026-08-04:
+
+- **CV29 = 14** — bit 3 set, RailCom enabled.
+- **CV28 = 3** — bit 0 channel 1, **bit 1 channel 2**. Channel 2 is the one a POM read
+  needs. The ZIMO MS manual states "CV #29, Bit 3 = 1 AND CV #28 = 3 (or = 67, if large
+  scale decoder)", so 3 is the correct value for this PluX22 decoder.
+
+The decoder is therefore configured exactly as POM reading requires, and it was proven
+live on the main track. The cause is on the command station side.
+
+Remaining candidate causes:
 
 1. **RailCom cut-out generation disabled** in the YD7010 (Track Out → DCC Properties →
    Track → "Generate the RailCom cut-out"). Without the cut-out no decoder can reply.
@@ -53,8 +65,19 @@ Remaining candidate causes, none yet excluded:
    `Broadcast "Railcom-Info"` among the unsolicited broadcasts and never defines its
    format — one mention in 64 pages. The raw captures show no unparsed frames, so this
    is currently unsupported by evidence, but it cannot be ruled out over other transports.
-4. **Decoder RailCom off.** Factory default for the MS450P22 is CV29 = 14 (bit 3 set)
-   and CV28 = 67, so this is unlikely unless the CVs were changed.
+4. ~~Decoder RailCom off~~ — **excluded by measurement**, see above.
+
+**Most likely explanation:** the YD7010 generates the RailCom cut-out but has no global
+RailCom detector, so nothing in the command station can receive the decoder's channel 2
+reply. The manual describes RailCom reception through external modules (YD6016LN-RC,
+YD7432, YD7652, DR5088RC, DR5052, DR5013) and states that RailCom information is shown
+only when such a module is fitted. Its predecessor, the Digikeijs DR5000, is explicitly
+documented to require a DR5088RC for POM reading. If that holds, POM CV read cannot work
+on this setup without adding a RailCom feedback module, and no software change will
+alter that.
+
+This remains an inference: YaMoRC does not publish a hardware block diagram, and nothing
+found so far states outright that the YD7010 lacks a global detector.
 
 ### Next step for R1
 
