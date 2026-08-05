@@ -716,11 +716,40 @@ class CvProgrammer:
         Service mode does not select a page for `page` at all yet - see
         `service_read`'s own docstring for the current status.
         """
-        resolved_mode = resolve_mode(mode, self._station.capabilities, operation="read")
-        if resolved_mode is ProgMode.POM:
-            self._require_page(cv, page)
-            return self.pom_read(cv, address=address, page=page)
-        return self.service_read(cv, page=page)
+        try:
+            resolved_mode = resolve_mode(mode, self._station.capabilities, operation="read")
+            if resolved_mode is ProgMode.POM:
+                self._require_page(cv, page)
+                return self.pom_read(cv, address=address, page=page)
+            return self.service_read(cv, page=page)
+        except RailctlError:
+            self.invalidate_pages()
+            raise
+
+    def cv_write(
+        self,
+        cv: int,
+        value: int,
+        *,
+        address: int | None = None,
+        mode: ProgMode = ProgMode.AUTO,
+        page: CvPage | None = None,
+        verify: bool = True,
+    ) -> CvResult:
+        try:
+            resolved_mode = resolve_mode(mode, self._station.capabilities, operation="write")
+            if resolved_mode is ProgMode.POM:
+                if address is None:
+                    raise ValueError(
+                        "POM CV write needs a locomotive address: pass --address or set a default"
+                    )
+                self.ensure_page(address, resolved_mode, cv, page)
+                return self.pom_write(cv, value, address=address, verify=verify)
+            self.ensure_page(None, resolved_mode, cv, page)
+            return self.service_write(cv, value, verify=verify)
+        except RailctlError:
+            self.invalidate_pages()
+            raise
 
     def _learn_result_channel(
         self, context: Literal["pom", "service"], channel: ResultChannelSeen
