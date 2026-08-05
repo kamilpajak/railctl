@@ -23,6 +23,7 @@ from railctl.errors import (
     RailctlError,
     UnsupportedCommandError,
 )
+from railctl.station.capabilities import Capabilities
 from railctl.station.programming import CvMatcher
 from railctl.station.timing import TIMING
 from railctl.station.types import (
@@ -587,8 +588,53 @@ def run_probe(
     return DoctorReport(checks=tuple(checks), capabilities=station.capabilities)
 
 
-def verdict_lines(report: DoctorReport) -> list[str]:  # placeholder, task-7e implements it
-    return ["", "", "", ""]
+def _primary_cv_path(caps: Capabilities) -> str:
+    if caps.pom_read is True:
+        channel = caps.pom_result_channel or "unknown"
+        return f"POM (results arrive via {channel})"
+    if caps.pom_read is False:
+        return "POM unavailable (61 82); see Fallback"
+    return "unknown (re-run the doctor to establish this)"
+
+
+def _fallback(caps: Capabilities) -> str:
+    if caps.service_direct_cv is True:
+        return "service mode, direct opcodes, CV1-255 only"
+    if caps.z21_cv_opcodes is True:
+        return "service mode, Z21 opcodes, CV1-1024"
+    if caps.service_ext_cv is True:
+        return "service mode, extended opcodes"
+    if caps.service_direct_cv is None and caps.z21_cv_opcodes is None and caps.service_ext_cv is None:
+        return "unknown (re-run the doctor)"
+    return "unavailable - service-mode opcodes unconfirmed"
+
+
+def _cv_above_255(caps: Capabilities) -> str:
+    if caps.z21_cv_opcodes is True:
+        return "POM (write) + Z21 opcodes (read), CV1-1024"
+    if caps.service_ext_cv is True:
+        return "POM (write) + extended opcodes (read)"
+    if caps.z21_cv_opcodes is False and caps.service_ext_cv is False:
+        return "POM only (extended opcodes rejected: 61 82)"
+    return "unknown (re-run the doctor with an address to establish this)"
+
+
+def _loco_addresses(caps: Capabilities) -> str:
+    if caps.loco_address_threshold == 100:
+        return "1-99 short, 100+ long (XpressNet form confirmed)"
+    if caps.loco_address_threshold == 128:
+        return "1-127 short, 128+ long (Z21 form confirmed)"
+    return "100..127 unknown (re-run with --address in that range)"
+
+
+def verdict_lines(report: DoctorReport) -> list[str]:
+    caps = report.capabilities
+    return [
+        f"Primary CV path: {_primary_cv_path(caps)}",
+        f"Fallback:        {_fallback(caps)}",
+        f"CV > 255:        {_cv_above_255(caps)}",
+        f"Loco addresses:  {_loco_addresses(caps)}",
+    ]
 
 
 def exit_code_for_report(report: DoctorReport) -> int:

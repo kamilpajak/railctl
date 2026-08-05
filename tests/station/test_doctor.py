@@ -22,6 +22,7 @@ from typing import TYPE_CHECKING
 import pytest
 
 from railctl.station import doctor as doctor_module
+from railctl.station.capabilities import Capabilities
 from railctl.station.doctor import (
     CHECK_IDS,
     CHECK_TITLES,
@@ -30,11 +31,16 @@ from railctl.station.doctor import (
     _check_d0,
     exit_code_for_report,
     run_probe,
+    verdict_lines,
 )
+from railctl.station.types import Check, DoctorReport
 from railctl.transport.fake import FakeTransport
 from railctl.xbus.codec import encode
 from railctl.xbus.commands import (
+    DB_DIRECT_WRITE,
     DB_Z21_WRITE,
+    POM_WRITE_BIT_BASE,
+    POM_WRITE_BYTE_BASE,
     REQ_4_DATA,
     FunctionAction,
     FunctionGroup,
@@ -51,6 +57,7 @@ from railctl.xbus.commands import (
     cmd_track_power_on,
     cmd_z21_cv_read,
 )
+from railctl.xbus.cv import EXT_WRITE_OPCODES
 from railctl.xbus.dialect import XPRESSNET, Z21
 
 if TYPE_CHECKING:
@@ -889,3 +896,87 @@ def test_d11_and_d12_are_skipped_with_no_address(doctor_bench):
     report = run_probe(doctor_bench.station, now_utc=lambda: "2026-08-05T00:00:00Z")
     assert report.check("D11").status == "skip"
     assert report.check("D12").status == "skip"
+
+
+def test_the_doctor_never_writes_a_decoder_cv(doctor_bench):
+    """The mechanical version of the design's central promise. Every read
+    scenario answers successfully so every check actually runs, then every
+    telegram this run sent is checked against every CV-write encoding:
+    E6 30 .. EC|MM / E8|MM (POM byte/bit write), 23 16 (direct write),
+    23 1C..1F (extended write), 24 12 (Z21 write)."""
+    doctor_bench.transport.on_write.queue_once(
+        cmd_service_result_request(), cv_reply(0x14, 7, PROBE_CV_VALUE)
+    )  # D4 (POM), zero-based echo
+    doctor_bench.transport.on_write.queue_once(
+        cmd_service_result_request(), cv_reply(0x14, PROBE_CV, PROBE_CV_VALUE)
+    )  # D5 (service direct)
+    doctor_bench.transport.on_write.queue_once(
+        cmd_service_result_request(), cv_reply(0x14, 1, 5)
+    )  # D6 (Z21)
+    doctor_bench.transport.on_write.queue_once(
+        cmd_service_result_request(), cv_reply(0x14, PROBE_CV, PROBE_CV_VALUE)
+    )  # D7 low
+    doctor_bench.transport.on_write.queue_once(
+        cmd_service_result_request(), cv_reply(0x15, 1, 7)
+    )  # D7 high
+    doctor_bench.transport.on_write.set(
+        cmd_loco_info(105, threshold=XPRESSNET.long_address_threshold), encode(0x01, 0x09)
+    )
+    doctor_bench.transport.on_write.set(
+        cmd_loco_info(105, threshold=Z21.long_address_threshold), loco_info_reply()
+    )
+    run_probe(doctor_bench.station, address=105, now_utc=lambda: "2026-08-05T00:00:00Z")
+
+    # doctor_bench.sent, not .transport.written: the latter is framed, so
+    # telegram[0]/telegram[1] would read the envelope's own prefix bytes on
+    # every request rather than the X-Bus header and DB0 this check needs -
+    # every `assert not (...)` below would hold vacuously no matter what
+    # doctor.py sent, which is not a test, it is a tautology with a docstring.
+    for telegram in doctor_bench.sent:
+        header, db0 = telegram[0], telegram[1]
+        assert not (header == 0xE6 and db0 == 0x30 and telegram[4] & 0xFC == POM_WRITE_BYTE_BASE)
+        assert not (header == 0xE6 and db0 == 0x30 and telegram[4] & 0xFC == POM_WRITE_BIT_BASE)
+        assert not (header == 0x23 and db0 == DB_DIRECT_WRITE)
+        assert not (header == 0x23 and db0 in EXT_WRITE_OPCODES)
+        assert not (header == 0x24 and db0 == DB_Z21_WRITE)
+
+
+def test_every_check_id_appears_exactly_once_in_order(doctor_bench):
+    report = run_probe(
+        doctor_bench.station, address=105, now_utc=lambda: "2026-08-05T00:00:00Z"
+    )
+    assert tuple(check.id for check in report.checks) == CHECK_IDS
+
+
+def test_every_check_id_appears_exactly_once_when_gated_paths_are_taken(doctor_bench):
+    """Same pin, walking the OTHER branch of every gate this task added:
+    unpowered track (D4/D10 read 'unknown' rather than the '--power-on'-given
+    path) and --no-programming-track (skips D5-D8). CHECK_IDS must still be
+    complete."""
+    doctor_bench.transport.on_write.set(cmd_station_status(), STATUS_REPLY_UNPOWERED)
+    report = run_probe(
+        doctor_bench.station, use_programming_track=False, now_utc=lambda: "2026-08-05T00:00:00Z"
+    )
+    assert tuple(check.id for check in report.checks) == CHECK_IDS
+
+
+def test_verdict_lines_are_exactly_four():
+    caps = Capabilities.unknown("test")
+    report = DoctorReport(checks=(), capabilities=caps)
+    assert len(verdict_lines(report)) == 4
+
+
+def test_verdict_lines_on_an_all_unknown_capability_set_say_unknown_never_bare_no():
+    """Pinned: every line must say 'unknown', and none may contain the bare
+    word 'no' - a naive substring check would flag 'unknown' itself (it
+    contains 'no' as consecutive letters), so this asserts a WORD boundary."""
+    import re
+
+    caps = Capabilities.unknown("test")
+    report = DoctorReport(checks=(), capabilities=caps)
+    lines = verdict_lines(report)
+    assert len(lines) == 4
+    for line in lines:
+        assert line.strip() != ""
+        assert "unknown" in line.lower()
+        assert re.search(r"\bno\b", line.lower()) is None
