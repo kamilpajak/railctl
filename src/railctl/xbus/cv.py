@@ -60,6 +60,7 @@ __all__ = [
     "join_cv_field",
     "pom_cv_fields",
     "resolve_service_cv",
+    "result_ident_for",
     "z21_cv_fields",
 ]
 
@@ -344,6 +345,30 @@ def echo_candidates(
         _check_range(cv, MAX_CV_Z21, "Z21")
         return frozenset({_band_fields(cv)[1]})
     return frozenset({ext_cv_fields(cv)[1]})
+
+
+def result_ident_for(cv: int, encoding: CvEncoding) -> int:
+    """The `63 14..17` ident the station uses when it answers about `cv`.
+
+    `SERVICE_RESULT_IDENT_BASE + ext_cv_fields(cv)[0]`. Measured: CV8 -> 0x14,
+    CV265 -> 0x15 (docs/probe-results.md). The band a CV answers on is a
+    property of the CV's own page, not of which opcode requested it - the
+    station answers CV8 on `63 14` whether it was asked for through POM, the
+    legacy direct opcode, or the extended opcodes - so `encoding` plays no part
+    in the arithmetic. It IS used to apply the bound the caller's own encoding
+    actually supports before doing that arithmetic: `SERVICE_DIRECT` tops out
+    at CV255, and routing a CV300 request through here without that check would
+    accept it via `ext_cv_fields`'s wider bound (which reaches 1023), silently
+    promising a band the direct opcode family can never produce.
+
+    Exists so that `station/` never has to add `SERVICE_RESULT_IDENT_BASE` to a
+    band index itself - the layering test forbids CV arithmetic there, and this
+    function is the whole reason `CvMatcher` can check the ident band without
+    it.
+    """
+    if encoding is CvEncoding.SERVICE_DIRECT:
+        direct_cv_byte(cv)  # validates 1..255 with the CV256 message; result unused
+    return SERVICE_RESULT_IDENT_BASE + ext_cv_fields(cv)[0]
 
 
 def resolve_service_cv(reply_ident: int, c: int) -> int:
