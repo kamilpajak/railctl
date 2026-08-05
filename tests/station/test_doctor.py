@@ -36,6 +36,10 @@ from railctl.xbus.codec import encode
 from railctl.xbus.commands import (
     DB_Z21_WRITE,
     REQ_4_DATA,
+    FunctionAction,
+    FunctionGroup,
+    cmd_function_group,
+    cmd_function_single,
     cmd_loco_info,
     cmd_pom_read_byte,
     cmd_service_direct_read,
@@ -755,3 +759,37 @@ def test_d10_only_the_z21_form_answers_records_threshold_128(doctor_bench):
     )
     report = run_probe(doctor_bench.station, address=105, now_utc=lambda: "2026-08-05T00:00:00Z")
     assert report.capabilities.loco_address_threshold == 128
+
+
+def test_d11_sends_all_zero_bits_on_groups_4_and_5(doctor_bench):
+    report = run_probe(doctor_bench.station, address=50, now_utc=lambda: "2026-08-05T00:00:00Z")
+    threshold = doctor_bench.station.threshold
+    # doctor_bench.sent, not .transport.written: the latter is framed, so
+    # neither cmd_function_group() call would ever appear inside it verbatim.
+    written = doctor_bench.sent
+    assert cmd_function_group(50, FunctionGroup.G4, 0, threshold=threshold) in written
+    assert cmd_function_group(50, FunctionGroup.G5, 0, threshold=threshold) in written
+    assert report.capabilities.function_groups_4_5 is True
+
+
+def test_d11_unsupported_records_false(doctor_bench):
+    doctor_bench.transport.on_write.set(
+        cmd_function_group(50, FunctionGroup.G4, 0, threshold=doctor_bench.station.threshold),
+        UNSUPPORTED_REPLY,
+    )
+    report = run_probe(doctor_bench.station, address=50, now_utc=lambda: "2026-08-05T00:00:00Z")
+    assert report.capabilities.function_groups_4_5 is False
+
+
+def test_d12_sends_the_f0_off_single_function_telegram(doctor_bench):
+    report = run_probe(doctor_bench.station, address=50, now_utc=lambda: "2026-08-05T00:00:00Z")
+    threshold = doctor_bench.station.threshold
+    expected = cmd_function_single(50, 0, FunctionAction.OFF, threshold=threshold)
+    assert expected in doctor_bench.sent
+    assert report.capabilities.single_function_cmd is True
+
+
+def test_d11_and_d12_are_skipped_with_no_address(doctor_bench):
+    report = run_probe(doctor_bench.station, now_utc=lambda: "2026-08-05T00:00:00Z")
+    assert report.check("D11").status == "skip"
+    assert report.check("D12").status == "skip"
