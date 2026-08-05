@@ -4,6 +4,7 @@ from __future__ import annotations
 import pytest
 
 from railctl.errors import (
+    CvOutOfRangeError,
     CvVerifyError,
     DecoderNotRespondingError,
     IndexPageRequiredError,
@@ -15,7 +16,14 @@ from railctl.station.capabilities import Capabilities
 from railctl.station.timing import TIMING
 from railctl.station.types import ADDRESS_CVS, CV29_LONG_ADDRESS_BIT, CvResult, ProgMode
 from railctl.xbus.codec import encode
-from railctl.xbus.commands import cmd_pom_read_byte, cmd_pom_write_byte, cmd_station_status
+from railctl.xbus.commands import (
+    cmd_pom_read_byte,
+    cmd_pom_write_byte,
+    cmd_service_direct_write,
+    cmd_service_ext_write,
+    cmd_station_status,
+    cmd_z21_cv_write,
+)
 from railctl.xbus.dialect import CvEncoding
 
 ADDRESS = 3
@@ -516,3 +524,57 @@ def test_pom_write_raises_unsupported_command_error_on_61_82(bench):
     bench.expect(cmd_pom_write_byte(ADDRESS, 5, 10, threshold=THRESHOLD), reply=UNSUPPORTED)
     with pytest.raises(UnsupportedCommandError):
         programmer.pom_write(5, 10, address=ADDRESS, verify=False)
+
+
+# -- service_write_telegram: the write ladder mirrors the read ladder --------
+
+
+def test_service_write_telegram_prefers_z21_when_available(bench_factory):
+    bench = bench_factory(
+        capabilities=make_capabilities(z21_cv_opcodes=True, service_direct_cv=True)
+    )
+    telegram, encoding, page = bench.station.programmer.service_write_telegram(8, 145)
+    assert telegram == cmd_z21_cv_write(8, 145)
+    assert encoding is CvEncoding.Z21_16BIT
+    assert page == 0
+
+
+def test_service_write_telegram_falls_back_to_direct_for_low_cvs(bench_factory):
+    bench = bench_factory(capabilities=make_capabilities(service_direct_cv=True))
+    telegram, encoding, page = bench.station.programmer.service_write_telegram(8, 145)
+    assert telegram == cmd_service_direct_write(8, 145)
+    assert encoding is CvEncoding.SERVICE_DIRECT
+    assert page == 0
+
+
+def test_service_write_telegram_falls_back_to_extended_for_high_cvs(bench_factory):
+    bench = bench_factory(
+        capabilities=make_capabilities(
+            z21_cv_opcodes=False, service_direct_cv=False, service_ext_cv=True
+        )
+    )
+    telegram, encoding, page = bench.station.programmer.service_write_telegram(265, 7)
+    assert telegram == cmd_service_ext_write(265, 7)
+    assert encoding is CvEncoding.SERVICE_EXT
+    assert page == 1
+
+
+def test_service_write_telegram_raises_cv_out_of_range_when_nothing_is_available(bench_factory):
+    bench = bench_factory(
+        capabilities=make_capabilities(
+            z21_cv_opcodes=False, service_direct_cv=False, service_ext_cv=False
+        )
+    )
+    with pytest.raises(CvOutOfRangeError) as caught:
+        bench.station.programmer.service_write_telegram(8, 1)
+    assert caught.value.cv == 8
+
+
+def test_service_write_telegram_never_uses_an_unprobed_capability(bench_factory):
+    bench = bench_factory(
+        capabilities=make_capabilities(
+            z21_cv_opcodes=None, service_direct_cv=None, service_ext_cv=True
+        )
+    )
+    _telegram, encoding, _page = bench.station.programmer.service_write_telegram(8, 1)
+    assert encoding is CvEncoding.SERVICE_EXT
