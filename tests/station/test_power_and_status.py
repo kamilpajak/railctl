@@ -7,6 +7,7 @@ an ack followed by data), and broadcasts are buffered while a command is outstan
 from __future__ import annotations
 
 import logging
+import threading
 
 import pytest
 
@@ -17,6 +18,7 @@ import pytest
 from railctl.envelope import Kind
 from railctl.envelope.liusb import LiUsbEnvelope
 from railctl.errors import (
+    LinkTimeout,
     ProtocolError,
     RailctlError,
     TrackPowerError,
@@ -71,6 +73,7 @@ UNKNOWN_FORM_REPLY = b"\x71\x00\x71"
 # different labels hung on the same one.
 BAD_CHECKSUM_REPLY = b"\x71\x00\x00"
 EMERGENCY_STOP_BROADCAST_BYTES = b"\x81\x00\x81"
+SERVICE_MODE_ENTRY_BROADCAST_BYTES = b"\x61\x02\x63"  # 61 02, another device entered service mode
 
 
 # -- power and status --------------------------------------------------------
@@ -190,6 +193,18 @@ def test_a_bad_on_event_callback_cannot_break_the_operation(bench, caplog):
     with caplog.at_level(logging.WARNING, logger="railctl.station"):
         bench.station.emergency_stop(105)  # must not raise
     assert "bad callback" in caplog.text
+
+
+def test_emergency_stop_still_warns_on_the_divergence_band_when_the_station_stays_silent(bench):
+    """address 105 is in DIVERGENCE_BAND with threshold unmeasured - exactly the case where
+    address.band_unverified is the single most useful hint about why the exchange got no
+    answer: the wire form for band 100..127 is unverified until D10 runs. The command is
+    scripted with reply=b"" (silence, never implied), so exchange() raises LinkTimeout - and
+    the warning must still have been emitted, not skipped because the exchange failed."""
+    bench.expect(CMD_EMERGENCY_STOP_LOCO_105, reply=b"")
+    with pytest.raises(LinkTimeout):
+        bench.station.emergency_stop(105)
+    assert bench.events == [("address.band_unverified", {"address": 105, "threshold": 100})]
 
 
 # -- exchange() mapping table -------------------------------------------------
@@ -382,12 +397,33 @@ def test_threshold_uses_capabilities_when_measured(bench_factory):
 
 
 def test_events_do_not_hold_the_lock_across_a_yield(bench):
+    """threading.RLock is reentrant PER THREAD, and a generator body runs in whichever thread
+    calls next() - so a same-thread interleaved call (e.g. bench.station.status() from the test
+    body) would succeed via reentrancy even if events() held the lock across the yield, and
+    would never pin the discipline this test is named for. Only a different thread can observe
+    whether the lock is actually free at the yield point: it blocks forever on a real
+    threading.Lock-style contested acquire, but returns immediately once events() has released
+    the lock and is suspended at `yield`."""
     bench.push(EMERGENCY_STOP_BROADCAST_BYTES)
     bench.push(POWER_ON_REPLY)
     iterator = bench.station.events(interval=0.0)
 
     first = next(iterator)
     assert first.name == "loco.emergency_stop"
+
+    acquired_from_other_thread: list[bool] = []
+
+    def try_acquire() -> None:
+        got = bench.station._lock.acquire(timeout=0.2)
+        acquired_from_other_thread.append(got)
+        if got:
+            bench.station._lock.release()
+
+    other = threading.Thread(target=try_acquire)
+    other.start()
+    other.join(timeout=1.0)
+    assert not other.is_alive(), "another thread's acquire is still blocked after 1s"
+    assert acquired_from_other_thread == [True]
 
     bench.expect(CMD_STATION_STATUS, STATUS_POWERED)
     # This call would deadlock on the same RLock if events() held it across the yield above.
@@ -396,3 +432,43 @@ def test_events_do_not_hold_the_lock_across_a_yield(bench):
     second = next(iterator)
     assert second.name == "power.on"
     assert second.payload["telegram"] == "61 01 60"
+
+
+def test_events_decodes_a_power_off_broadcast(bench):
+    bench.push(POWER_OFF_REPLY)
+    iterator = bench.station.events(interval=0.0)
+    event = next(iterator)
+    assert event.name == "power.off"
+    assert event.detail == "track power turned off"
+    assert event.payload["telegram"] == "61 00 61"
+
+
+def test_events_decodes_a_service_mode_entry_broadcast(bench):
+    bench.push(SERVICE_MODE_ENTRY_BROADCAST_BYTES)
+    iterator = bench.station.events(interval=0.0)
+    event = next(iterator)
+    assert event.name == "service.entered"
+    assert event.detail == "another device entered service mode"
+    assert event.payload["telegram"] == "61 02 63"
+
+
+def test_events_keeps_an_undecoded_broadcast_visible_as_unknown_rather_than_dropping_it(bench):
+    """reply.unknown is the branch that keeps an undecoded broadcast visible rather than
+    silently swallowed - its name/detail/payload are what M6's `monitor` will render."""
+    bench.push(UNKNOWN_FORM_REPLY)
+    iterator = bench.station.events(interval=0.0)
+    event = next(iterator)
+    assert event.name == "reply.unknown"
+    assert event.detail == "undecoded broadcast: 71 00 71"
+    assert event.payload["telegram"] == "71 00 71"
+
+
+def test_power_on_settles_cleanly_when_the_re_read_agrees(bench):
+    """A disagreeing command reply gets exactly one status() re-read after power_settle; when
+    that re-read agrees with what was commanded, power_on() returns without raising and sends
+    exactly two telegrams - the command itself and the one re-read, never a retry loop."""
+    bench.expect(CMD_TRACK_POWER_ON, POWER_OFF_REPLY)
+    bench.expect(CMD_STATION_STATUS, STATUS_POWERED)
+    bench.station.power_on()
+    assert bench.sent == [CMD_TRACK_POWER_ON, CMD_STATION_STATUS]
+    assert bench.transport.script_pending == []

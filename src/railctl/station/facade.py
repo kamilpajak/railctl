@@ -338,8 +338,10 @@ class Station:
                 self.exchange(cmd_emergency_stop_all(), timeout=self.timing.li_ack_normal)
                 return
             telegram = cmd_emergency_stop_loco(address, threshold=self.threshold)
-            self.exchange(telegram, timeout=self.timing.li_ack_normal)
-            self._warn_if_unverified_band(address)
+            try:
+                self.exchange(telegram, timeout=self.timing.li_ack_normal)
+            finally:
+                self._warn_if_unverified_band(address)
 
     def _warn_if_unverified_band(self, address: int) -> None:
         """Addresses 100..127 are where XpressNet and Z21 disagree about the wire form. Until
