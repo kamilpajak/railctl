@@ -691,3 +691,18 @@ def test_d5_through_d8_report_unknown_when_track_is_off_without_power_on(doctor_
     )
     assert cmd_track_power_on() not in doctor_bench.sent
     assert cmd_track_power_off() not in doctor_bench.sent
+
+
+def test_d9_with_no_established_read_path_reports_family_unknown_never_ms(doctor_bench):
+    """Pinned: an unread CV250 must render as 'unknown', never as 'ms' - the
+    same guard decoder_family() itself enforces (Task 1), exercised here
+    through the doctor's own aggregation over IDENTITY_CVS."""
+    doctor_bench.transport.on_write.set(cmd_service_direct_read(PROBE_CV), UNSUPPORTED_REPLY)
+    doctor_bench.transport.on_write.set(cmd_z21_cv_read(1), UNSUPPORTED_REPLY)
+    doctor_bench.transport.on_write.set(cmd_service_ext_read(PROBE_CV), UNSUPPORTED_REPLY)
+    doctor_bench.transport.on_write.set(cmd_service_ext_read(257), UNSUPPORTED_REPLY)
+    report = run_probe(doctor_bench.station, now_utc=lambda: "2026-08-05T00:00:00Z")
+    d9 = report.check("D9")
+    assert "unknown" in d9.detail
+    assert "ms" not in d9.detail.lower().replace("unknown", "")
+    assert d9.status == "skip"
