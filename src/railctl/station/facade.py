@@ -41,7 +41,15 @@ from railctl.link import Link
 from railctl.station.capabilities import LEARNABLE_FIELDS, UNKNOWN_IDENTITY, Capabilities
 from railctl.station.programming import CvProgrammer
 from railctl.station.timing import TIMING, Timing
-from railctl.station.types import CvPage, CvReadOutcome, CvResult, CvSpec, ProgMode, StationEvent
+from railctl.station.types import (
+    CvPage,
+    CvReadOutcome,
+    CvResult,
+    CvSpec,
+    DoctorReport,
+    ProgMode,
+    StationEvent,
+)
 from railctl.transport import open_link
 from railctl.xbus import replies
 from railctl.xbus.address import LOCO_ADDR_MAX, LOCO_ADDR_MIN
@@ -486,6 +494,28 @@ class Station:
             name="reply.unknown",
             detail=f"undecoded broadcast: {telegram_hex}",
             payload={"telegram": telegram_hex},
+        )
+
+    def probe(
+        self,
+        *,
+        address: int | None = None,
+        allow_power_on: bool = False,
+        use_programming_track: bool = True,
+    ) -> DoctorReport:
+        # Imported here, not at module level: doctor.py imports Station only
+        # under TYPE_CHECKING, but facade.py importing doctor.py at module
+        # level would need doctor.py to import facade.py for a real (not
+        # type-only) Station reference somewhere else first - keeping this
+        # one import lazy avoids finding out the hard way which of the two
+        # modules a future refactor makes load first.
+        from railctl.station.doctor import run_probe
+
+        return run_probe(
+            self,
+            address=address,
+            allow_power_on=allow_power_on,
+            use_programming_track=use_programming_track,
         )
 
     # -- drive, loco_info and functions --------------------------------------
