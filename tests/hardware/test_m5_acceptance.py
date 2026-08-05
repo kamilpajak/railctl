@@ -31,23 +31,36 @@ def test_power_drive_stop_power_off_restores_the_track_power_it_found():
 
     WHAT THIS TEST CANNOT PROVE, and no version of it ever will: that the
     locomotive moved. It passed on 2026-08-05 with the locomotive sitting on
-    the PROGRAMMING track, where it did not turn a wheel - the motor only
-    buzzed, because that output is current limited (750 mA per the YD7010
-    manual) and will not turn a sound decoder's motor. Note what that buzz
-    proves: the drive telegram DID reach the decoder there. The two runs
-    differed in whether the locomotive moved, and `loco_info` answered
-    `speed=30` in both, because it reads the command station's own refresh
-    buffer - the station reports back what we put there and the decoder has no
-    say in the answer. Nothing on this hardware closes the loop: POM read
-    returns nothing (docs/probe-results.md R1), and the telemetry stream's
-    `TC` reads 0 mA for a decoder that is demonstrably powered and responding.
+    the PROGRAMMING track, where it did not turn a wheel; the motor made an
+    audible hum instead. That the decoder was energised and made a sound while
+    the drive command was in flight is observation. WHY it hummed rather than
+    turned is not: the 750 mA ceiling on that output is real (YD7010 manual,
+    "The programming track can supply a maximum of 750mA", and it is
+    configurable), but no source connects a prog-track current limit to a hum,
+    and the only documented overcurrent behaviour is the opposite - the output
+    switches off. A stalled motor under PWM below Vstart, or the sound decoder's
+    own speaker, would look the same from here. Do not repeat the current-limit
+    story as if it were established.
+
+    What the two runs settle is the part that matters: `loco_info` answered
+    `speed=30` whether the wheels turned or not. XpressNet says only that the
+    reply "provides the current speed and direction information for the
+    decoder", and the station is answering from what it holds - it cannot be
+    answering from the decoder, because a plain DCC decoder has no back channel
+    at all. RailCom is a separate standard (NMRA S-9.3.2) and speed is an
+    optional datagram there. Nothing on this hardware closes that loop: POM read
+    returns nothing (docs/probe-results.md R1), and the telemetry stream's `TC`
+    reads 0 mA for a decoder that is demonstrably powered and responding.
 
     So a green run means the command path reaches the station and the station
     answers as the protocol says it should. Movement is verified by a human
     watching the wheels, and by nothing else. That happened on 2026-08-05:
-    the wheels turned at step 30 and stopped abruptly on the emergency stop -
-    abruptly being the tell that this is the emergency path and not a braked
-    `drive(0)`, which would decelerate on the decoder's CV4 ramp.
+    the wheels turned at step 30 and stopped abruptly on the emergency stop.
+    Abruptly is the tell that this was the emergency path: NMRA S-9.2 requires a
+    decoder receiving emergency stop to "immediately stop delivering power to
+    the motor", while a `drive(0)` decelerates on a configured ramp - CV4 in
+    general, though on ZIMO the emergency-stop ramp has its own CV111, default 0
+    for immediate, so the contrast is configurable rather than guaranteed.
     """
     station = Station.open()
     try:

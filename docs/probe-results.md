@@ -23,6 +23,17 @@ this locomotive runs 128 steps.
 
 ## R1 — POM CV read: NOT established
 
+> **Added 2026-08-05, from the specification rather than the bench, and it outranks every
+> hypothesis below.** The XpressNet specification marks POM CV **read** as a *(future feature)*
+> and specifies only byte-mode and bit-mode POM **writes**. So a station that acknowledges the
+> request and then says nothing is not necessarily broken or incomplete — it is answering a
+> request the protocol never finished defining. This explains the measured asymmetry (write works,
+> read is silent) more simply than the RailCom-detector inference further down, and it was missed
+> for two days because the investigation started at the hardware instead of at the document.
+>
+> The verdict does not change: `pom_read` stays **unknown**, never `false`. A capability the
+> protocol does not define is not a capability the station refused.
+
 The station **acknowledges** the request and returns **no result at all**.
 
 ```
