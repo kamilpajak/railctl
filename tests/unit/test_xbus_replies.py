@@ -71,9 +71,13 @@ def test_an_unlisted_station_id_reports_its_family_as_unknown_not_as_a_guess():
 
 
 def test_the_measured_status_reply_on_an_unpowered_track():
-    """62 22 07 47 was measured on 2026-08-04. Bit 0 emergency off, bit 1
-    emergency stop, bit 2 automatic start mode. XpressNet defines no
-    short-circuit bit, and the earlier "short circuit" reading was dropped."""
+    """62 22 07 47 was measured on 2026-08-04, and again on 2026-08-05 after
+    `80 80` followed by `21 80`. Bit 0 emergency stop, bit 1 emergency off,
+    bit 2 automatic start mode - see the measured order in
+    `test_the_three_power_states_measured_on_the_yd7010`. This byte has both
+    bits set, so it reads the same under either order and could never have
+    caught the swap on its own. XpressNet defines no short-circuit bit, and the
+    earlier "short circuit" reading was dropped."""
     reply = parse(tg("62 22 07 47"))
     assert isinstance(reply, StationStatus)
     assert reply.raw == 0x07
@@ -86,13 +90,44 @@ def test_the_measured_status_reply_on_an_unpowered_track():
     assert reply.track_power is False
 
 
+def test_the_three_power_states_measured_on_the_yd7010():
+    """Measured 2026-08-05 against the front-panel Track Out LED, whose three
+    states the YD7010 manual defines: green steady = voltage on, green flashing
+    = emergency stop "(track voltage ON)", red steady = voltage off.
+
+        21 81 -> 62 22 04    voltage on            green steady
+        80 80 -> 62 22 05    emergency stop        green FLASHING - voltage ON
+        21 80 -> 62 22 06    emergency off         red - voltage OFF
+
+    `80 80` is what makes this decisive rather than a two-point fit, and the
+    Lenz spec is what makes `80 80` decisive: section 2.2.4 says "The DCC track
+    power remains switched on". It set bit 0. So on this station bit 0 is
+    EMERGENCY STOP and bit 1 is EMERGENCY OFF - the reverse of Lenz 2.1.7, and
+    what the German 23151 manual describes. See docs/probe-results.md R2.
+    """
+    powered = parse(tg("62 22 04 44"))
+    assert powered.track_power is True
+    assert powered.emergency_off is False
+    assert powered.emergency_stop is False
+
+    stopped = parse(tg("62 22 05 45"))
+    assert stopped.emergency_stop is True
+    assert stopped.emergency_off is False
+    assert stopped.track_power is True, "80 80 leaves the track powered (Lenz 2.2.4)"
+
+    unpowered = parse(tg("62 22 06 46"))
+    assert unpowered.emergency_off is True
+    assert unpowered.emergency_stop is False
+    assert unpowered.track_power is False
+
+
 def test_every_status_bit_owns_exactly_one_flag():
     """Flipping one bit must move one flag. Two flags sharing a mask would make a
     station in one state indistinguishable from a station in another. All 256
     raw bytes, not a sample."""
     flags = {
-        "emergency_off": 0x01,
-        "emergency_stop": 0x02,
+        "emergency_stop": 0x01,
+        "emergency_off": 0x02,
         "auto_start_mode": 0x04,
         "service_mode": 0x08,
         "powering_up": 0x40,
@@ -109,7 +144,10 @@ def test_every_status_bit_owns_exactly_one_flag():
 
 def test_track_power_is_the_inverse_of_emergency_off():
     assert StationStatus.from_raw(0x00).track_power is True
-    assert StationStatus.from_raw(0x01).track_power is False
+    assert StationStatus.from_raw(0x02).track_power is False
+    # 0x01 is emergency stop: the locomotives are stopped and the track is still
+    # live (Lenz 2.2.4). Reading this byte as "no power" is the bug this pins.
+    assert StationStatus.from_raw(0x01).track_power is True
 
 
 def test_the_lenz_cv_result_carries_the_raw_field_and_names_no_cv():

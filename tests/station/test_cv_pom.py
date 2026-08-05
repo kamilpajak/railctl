@@ -30,7 +30,7 @@ from railctl.xbus.replies import CvValue, NoAck, Ready
 
 STATUS_REQUEST = cmd_station_status()
 STATUS_POWER_ON = encode(0x62, 0x22, 0x00)
-STATUS_POWER_OFF = encode(0x62, 0x22, 0x01)
+STATUS_POWER_OFF = encode(0x62, 0x22, 0x06)  # measured after 21 80; bit 1 is emergency off
 POLL = cmd_service_result_request()
 ACK = encode(0x01, 0x04)
 UNSUPPORTED = encode(0x61, 0x82)

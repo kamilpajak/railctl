@@ -45,7 +45,7 @@ THRESHOLD = 100
 ACK = encode(0x01, 0x04)
 STATUS_REQUEST = cmd_station_status()
 STATUS_POWER_ON = encode(0x62, 0x22, 0x00)
-STATUS_POWER_OFF = encode(0x62, 0x22, 0x01)
+STATUS_POWER_OFF = encode(0x62, 0x22, 0x06)  # measured after 21 80; bit 1 is emergency off
 UNSUPPORTED = encode(0x61, 0x82)
 
 
