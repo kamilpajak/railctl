@@ -33,12 +33,15 @@ from railctl.station.doctor import (
 from railctl.transport.fake import FakeTransport
 from railctl.xbus.codec import encode
 from railctl.xbus.commands import (
+    DB_Z21_WRITE,
+    REQ_4_DATA,
     cmd_pom_read_byte,
     cmd_service_direct_read,
     cmd_service_result_request,
     cmd_station_status,
     cmd_station_version,
     cmd_track_power_on,
+    cmd_z21_cv_read,
 )
 
 if TYPE_CHECKING:
@@ -432,3 +435,33 @@ def test_d5_unsupported_records_service_direct_cv_false(doctor_bench):
     report = run_probe(doctor_bench.station, now_utc=lambda: "2026-08-05T00:00:00Z")
     assert report.capabilities.service_direct_cv is False
     assert report.check("D5").status == "ok"
+
+
+def test_d6_probes_only_the_z21_read_opcode_never_the_write_one(doctor_bench):
+    """Pinned: 23 11 only. 23 11 has no meaning in classic XpressNet, so a
+    station that lacks it answers 61 82 and nothing happens; probing 24 12
+    (the write opcode) could modify a CV instead."""
+    doctor_bench.transport.on_write.queue_once(cmd_service_result_request(), cv_reply(0x14, 1, 5))
+    run_probe(doctor_bench.station, now_utc=lambda: "2026-08-05T00:00:00Z")
+    # doctor_bench.sent holds bare telegrams, so req[0] is the real X-Bus
+    # header byte; .transport.written is framed and req[0] would be the
+    # envelope's own first byte on every request, making this assertion
+    # vacuously true no matter what doctor.py sends.
+    written = doctor_bench.sent
+    assert cmd_z21_cv_read(1) in written
+    assert not any(req[0] == REQ_4_DATA and req[1] == DB_Z21_WRITE for req in written)
+
+
+def test_d6_success_records_z21_cv_opcodes_true(doctor_bench):
+    # queue_once_for, not queue_once: D5 polls the identical 21 10 telegram
+    # before D6 does, and CV1's reply bytes would satisfy D5's own matcher
+    # too (both are low-band reads) - queue_once would let D5 drain it first.
+    doctor_bench.transport.on_write.queue_once_for(cmd_z21_cv_read(1), cv_reply(0x14, 1, 5))
+    report = run_probe(doctor_bench.station, now_utc=lambda: "2026-08-05T00:00:00Z")
+    assert report.capabilities.z21_cv_opcodes is True
+
+
+def test_d6_unsupported_records_z21_cv_opcodes_false(doctor_bench):
+    doctor_bench.transport.on_write.set(cmd_z21_cv_read(1), UNSUPPORTED_REPLY)
+    report = run_probe(doctor_bench.station, now_utc=lambda: "2026-08-05T00:00:00Z")
+    assert report.capabilities.z21_cv_opcodes is False
