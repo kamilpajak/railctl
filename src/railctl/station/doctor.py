@@ -21,10 +21,22 @@ from railctl.errors import (
     DecoderNotRespondingError,
     PomReadUnsupportedError,
     RailctlError,
+    UnsupportedCommandError,
 )
+from railctl.station.programming import CvMatcher
 from railctl.station.timing import TIMING
 from railctl.station.types import Check, DoctorReport
-from railctl.xbus.replies import StationStatus, StationVersion
+from railctl.xbus.commands import cmd_service_direct_read
+from railctl.xbus.cv import CvEncoding
+from railctl.xbus.replies import (
+    UNSUPPORTED,
+    CvValue,
+    NoAck,
+    Reply,
+    StationStatus,
+    StationVersion,
+    Unsupported,
+)
 
 if TYPE_CHECKING:
     from railctl.station.facade import Station
@@ -180,6 +192,72 @@ def _check_d4(station: Station, *, address: int) -> tuple[Check, bool]:
     return Check("D4", CHECK_TITLES["D4"], "ok", detail), False
 
 
+def _exchange(station: Station, telegram: bytes, *, timeout: float) -> Reply:
+    """station.exchange, with the one refusal that is a real answer turned back into a value.
+
+    61 82 is the ONLY reply entitled to write a capability False, and Station.exchange raises it.
+    A check that let that raise reach its own `except RailctlError` would record "fail" and leave
+    the capability at None - the one reply that CAN say "no" turned into "unknown", which is the
+    exact M1 failure this project exists to prevent, running backwards.
+    """
+    try:
+        return station.exchange(telegram, timeout=timeout)
+    except UnsupportedCommandError:
+        return UNSUPPORTED
+
+
+def _service_probe(
+    station: Station, telegram: bytes, cv: int, encoding: CvEncoding
+) -> CvValue | Unsupported | NoAck | None:
+    """One service-mode read, already inside a service-mode session the caller
+    entered. Returns the value, a definitive Unsupported/NoAck, or None for
+    'nothing conclusive' - never raises for a plain timeout, because the
+    caller (D5-D8) needs to keep going to the next check either way."""
+    reply = _exchange(station, telegram, timeout=TIMING.li_ack_programming)
+    if isinstance(reply, Unsupported):
+        return reply
+    matcher = CvMatcher(encoding, cv)
+    try:
+        outcome = station.programmer.await_result(
+            matcher,
+            timeout=TIMING.service_result,
+            first_delay=TIMING.service_first_poll_delay,
+            interval=TIMING.service_poll_interval,
+            exchange_timeout=TIMING.li_ack_programming,
+            allow_poll=True,
+            ready_means_done=False,
+            context="service",
+        )
+    except UnsupportedCommandError:
+        # A 61 82 to the 21 10 result poll is the same refusal as a 61 82 to
+        # the read itself - the station can reject either half of the
+        # exchange, and both mean the same thing here.
+        return UNSUPPORTED
+    if isinstance(outcome, (CvValue, NoAck)):
+        return outcome
+    return None  # a stray reply or TimedOut: inconclusive, not a capability verdict
+
+
+def _check_d5(station: Station) -> Check:
+    try:
+        outcome = _service_probe(
+            station, cmd_service_direct_read(PROBE_CV), PROBE_CV, CvEncoding.SERVICE_DIRECT
+        )
+    except RailctlError as exc:
+        return Check("D5", CHECK_TITLES["D5"], "fail", str(exc))
+    if isinstance(outcome, Unsupported):
+        station.record(service_direct_cv=False)
+        return Check("D5", CHECK_TITLES["D5"], "ok", "service direct read unsupported (61 82)")
+    if isinstance(outcome, CvValue):
+        station.record(service_direct_cv=True)
+        detail = f"service direct read confirmed (CV{PROBE_CV}={outcome.value})"
+        return Check("D5", CHECK_TITLES["D5"], "ok", detail)
+    if isinstance(outcome, NoAck):
+        detail = "decoder answered 61 13 on the programming track"
+        return Check("D5", CHECK_TITLES["D5"], "unknown", detail)
+    return Check("D5", CHECK_TITLES["D5"], "unknown", "no result within the service-mode budget")
+
+
 def run_probe(
     station: Station,
     *,
@@ -211,7 +289,20 @@ def run_probe(
         )
     checks.append(d4_check)
 
-    for check_id in CHECK_IDS[5:]:
+    if use_programming_track:
+        power_before = station.status().track_power
+        try:
+            checks.append(_check_d5(station))
+            for check_id in ("D6", "D7", "D8"):
+                checks.append(Check(check_id, CHECK_TITLES[check_id], "skip", _PLACEHOLDER_DETAIL))
+        finally:
+            station.programmer.exit_service_mode(restore_power=power_before)
+    else:
+        skip_detail = "programming track disabled (--no-programming-track)"
+        for check_id in ("D5", "D6", "D7", "D8"):
+            checks.append(Check(check_id, CHECK_TITLES[check_id], "skip", skip_detail))
+
+    for check_id in CHECK_IDS[9:]:
         checks.append(Check(check_id, CHECK_TITLES[check_id], "skip", _PLACEHOLDER_DETAIL))
     clock = now_utc or _iso_utc_now
     station.record(probed_at=clock())
