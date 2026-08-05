@@ -25,7 +25,9 @@ from railctl.xbus.commands import (
     cmd_pom_write_byte,
     cmd_service_direct_write,
     cmd_service_ext_write,
+    cmd_service_result_request,
     cmd_station_status,
+    cmd_track_power_on,
     cmd_z21_cv_write,
 )
 from railctl.xbus.dialect import CvEncoding
@@ -384,10 +386,11 @@ def test_pom_write_refuses_before_sending_when_pom_read_is_known_false(bench):
 def test_pom_write_probes_pom_read_first_when_unknown_and_refuses_if_that_fails(bench, monkeypatch):
     programmer = bench.station.programmer
     calls: list[tuple[int, int]] = []
+    original_error = DecoderNotRespondingError("nothing came back", cv=5)
 
     def fake_pom_read(cv, *, address, page=None):
         calls.append((cv, address))
-        raise DecoderNotRespondingError("nothing came back", cv=cv)
+        raise original_error
 
     monkeypatch.setattr(programmer, "pom_read", fake_pom_read)
     with pytest.raises(PomReadUnsupportedError) as caught:
@@ -397,6 +400,55 @@ def test_pom_write_probes_pom_read_first_when_unknown_and_refuses_if_that_fails(
         "cannot verify POM writes on this station; re-run with `--no-verify` "
         "or use `--mode service`"
     )
+    # Pins the narrowed `except (...) as exc: ... from exc` (the review
+    # finding this test extends): the wrapping `PomReadUnsupportedError` must
+    # chain the real failure, not `from None`, so an operator (or a script
+    # reading the traceback) can still see what the probing read actually
+    # raised.
+    assert caught.value.__cause__ is original_error
+
+
+def test_pom_write_lets_a_track_power_error_from_the_probing_read_propagate_unchanged(
+    bench, monkeypatch
+):
+    """The review finding this pins: the probing read's `except` clause used
+    to be `except RailctlError`, wide enough to swallow a `TrackPowerError`
+    from an unpowered main track (a broken instrument, not a station
+    capability) and misreport it as "this station cannot verify POM writes" -
+    exactly the failure mode this project exists to catch, just one layer
+    deeper. Narrowed to the three shapes that genuinely mean "the probing
+    read did not work" - `DecoderNotRespondingError`, `DecoderNoAckError`,
+    `PomReadUnsupportedError`. `TrackPowerError` is not one of them and must
+    reach the caller as itself. Reverting the narrowing back to
+    `except RailctlError` makes this fail: `pom_write` would raise
+    `PomReadUnsupportedError` instead.
+    """
+    programmer = bench.station.programmer
+
+    def fake_pom_read(cv, *, address, page=None):
+        raise TrackPowerError("POM needs the main track powered; run `railctl power on`")
+
+    monkeypatch.setattr(programmer, "pom_read", fake_pom_read)
+    with pytest.raises(TrackPowerError):
+        programmer.pom_write(5, 10, address=ADDRESS, verify=True)
+
+
+def test_pom_write_lets_an_index_page_required_error_from_the_probing_read_propagate_unchanged(
+    bench, monkeypatch
+):
+    """Same reasoning as the `TrackPowerError` case above, for the other real
+    fault the probing read can hit: an indexed CV whose page could not be
+    selected is a bug report of its own, not evidence against POM
+    verification.
+    """
+    programmer = bench.station.programmer
+
+    def fake_pom_read(cv, *, address, page=None):
+        raise IndexPageRequiredError(f"CV{cv} needs a page", cv=cv)
+
+    monkeypatch.setattr(programmer, "pom_read", fake_pom_read)
+    with pytest.raises(IndexPageRequiredError):
+        programmer.pom_write(265, 10, address=ADDRESS, verify=True)
 
 
 def test_pom_write_to_cv29_that_flips_bit_5_is_treated_as_blind(bench, monkeypatch):
@@ -737,13 +789,67 @@ def test_service_write_raises_station_busy_error_when_the_wait_loop_reports_busy
         programmer.service_write(8, 145, verify=True)
 
 
-def test_service_write_raises_decoder_not_responding_on_an_unrecognised_outcome(
+def test_service_write_treats_a_matching_cv_value_echo_as_confirmed_but_not_verified(
     bench_factory, monkeypatch
 ):
-    """The final catch-all, kept exhaustive on purpose: success is `Ready`
-    and nothing else, so anything `await_result` could hand back that is
-    not one of the named failure shapes still has to end in a raised
-    exception, never a silent `verified=True`.
+    """The review finding this pins: the exhaustive ladder used to reject the
+    one reply this hardware actually sends after a service-mode write - a
+    `63 14` direct-CV result (a `CvValue`) carrying the written value, not
+    `61 11` `Ready` (docs/probe-results.md, "Service-mode WRITE works":
+    `write 24 12 00 02 24 -> 63 14 03 24`). A matching echo now completes the
+    write instead of raising `DecoderNotRespondingError`, but it is the
+    station's own result store, not an independent read-back
+    (docs/probe-results.md: "it does not by itself prove the decoder
+    accepted and retained it"), so `verified` stays `False` even though
+    `verify=True` was requested.
+    """
+    from railctl.xbus.replies import CvValue
+
+    bench = bench_factory(capabilities=make_capabilities(z21_cv_opcodes=True))
+    programmer = bench.station.programmer
+    bench.expect(cmd_station_status(), reply=STATUS_POWERED)
+    bench.expect(cmd_z21_cv_write(8, 145), reply=ACK)
+    monkeypatch.setattr(
+        programmer,
+        "await_result",
+        lambda *a, **k: CvValue(raw_cv=8, value=145, ident=0x14, z21_form=True),
+    )
+    monkeypatch.setattr(programmer, "exit_service_mode", lambda *, restore_power: None)
+    result = programmer.service_write(8, 145, verify=True)
+    assert result.verified is False
+    assert result.value == 145
+    name, payload = bench.events[-1]
+    assert name == "cv.write_unverified"
+    assert set(payload) == {"cv", "value", "reason"}
+    assert "echo" in payload["reason"]
+
+
+def test_service_write_raises_cv_verify_error_when_the_echoed_cv_value_does_not_match(
+    bench_factory, monkeypatch
+):
+    from railctl.xbus.replies import CvValue
+
+    bench = bench_factory(capabilities=make_capabilities(z21_cv_opcodes=True))
+    programmer = bench.station.programmer
+    bench.expect(cmd_station_status(), reply=STATUS_POWERED)
+    bench.expect(cmd_z21_cv_write(8, 145), reply=ACK)
+    monkeypatch.setattr(
+        programmer,
+        "await_result",
+        lambda *a, **k: CvValue(raw_cv=8, value=99, ident=0x14, z21_form=True),
+    )
+    monkeypatch.setattr(programmer, "exit_service_mode", lambda *, restore_power: None)
+    with pytest.raises(CvVerifyError) as caught:
+        programmer.service_write(8, 145, verify=True)
+    assert caught.value.cv == 8
+
+
+def test_service_write_raises_decoder_not_responding_when_paged_cv_value_collides_with_a_register(
+    bench_factory, monkeypatch
+):
+    """Mirrors `_finish_service_read`'s own register-collision handling
+    (registers 1-8 are indistinguishable from CV1-8), decided deliberately
+    for the write ladder rather than left to the generic catch-all.
     """
     from railctl.xbus.replies import PagedCvValue
 
@@ -752,11 +858,115 @@ def test_service_write_raises_decoder_not_responding_on_an_unrecognised_outcome(
     bench.expect(cmd_station_status(), reply=STATUS_POWERED)
     bench.expect(cmd_z21_cv_write(8, 145), reply=ACK)
     monkeypatch.setattr(
-        programmer, "await_result", lambda *a, **k: PagedCvValue(raw_register=1, value=1)
+        programmer, "await_result", lambda *a, **k: PagedCvValue(raw_register=8, value=145)
     )
+    monkeypatch.setattr(programmer, "exit_service_mode", lambda *, restore_power: None)
+    with pytest.raises(DecoderNotRespondingError, match="register mode"):
+        programmer.service_write(8, 145, verify=True)
+    assert bench.station.capabilities.service_direct_cv is False
+
+
+def test_service_write_raises_decoder_not_responding_when_paged_cv_value_does_not_match_the_cv(
+    bench_factory, monkeypatch
+):
+    from railctl.xbus.replies import PagedCvValue
+
+    bench = bench_factory(capabilities=make_capabilities(service_direct_cv=True))
+    programmer = bench.station.programmer
+    bench.expect(cmd_station_status(), reply=STATUS_POWERED)
+    bench.expect(cmd_service_direct_write(9, 200), reply=ACK)
+    monkeypatch.setattr(
+        programmer, "await_result", lambda *a, **k: PagedCvValue(raw_register=250, value=200)
+    )
+    monkeypatch.setattr(programmer, "exit_service_mode", lambda *, restore_power: None)
+    with pytest.raises(DecoderNotRespondingError, match="does not correspond"):
+        programmer.service_write(9, 200, verify=True)
+
+
+def test_service_write_treats_a_matching_paged_cv_value_echo_as_confirmed_but_not_verified(
+    bench_factory, monkeypatch
+):
+    from railctl.xbus.replies import PagedCvValue
+
+    bench = bench_factory(capabilities=make_capabilities(service_direct_cv=True))
+    programmer = bench.station.programmer
+    bench.expect(cmd_station_status(), reply=STATUS_POWERED)
+    bench.expect(cmd_service_direct_write(9, 200), reply=ACK)
+    monkeypatch.setattr(
+        programmer, "await_result", lambda *a, **k: PagedCvValue(raw_register=9, value=200)
+    )
+    monkeypatch.setattr(programmer, "exit_service_mode", lambda *, restore_power: None)
+    result = programmer.service_write(9, 200, verify=True)
+    assert result.verified is False
+    assert result.value == 200
+
+
+def test_service_write_raises_cv_verify_error_when_the_paged_echoed_value_does_not_match(
+    bench_factory, monkeypatch
+):
+    from railctl.xbus.replies import PagedCvValue
+
+    bench = bench_factory(capabilities=make_capabilities(service_direct_cv=True))
+    programmer = bench.station.programmer
+    bench.expect(cmd_station_status(), reply=STATUS_POWERED)
+    bench.expect(cmd_service_direct_write(9, 200), reply=ACK)
+    monkeypatch.setattr(
+        programmer, "await_result", lambda *a, **k: PagedCvValue(raw_register=9, value=1)
+    )
+    monkeypatch.setattr(programmer, "exit_service_mode", lambda *, restore_power: None)
+    with pytest.raises(CvVerifyError) as caught:
+        programmer.service_write(9, 200, verify=True)
+    assert caught.value.cv == 9
+
+
+def test_service_write_raises_decoder_not_responding_on_an_unrecognised_outcome(
+    bench_factory, monkeypatch
+):
+    """The final catch-all, kept exhaustive on purpose: success is `Ready`,
+    or a matching `CvValue`/`PagedCvValue` echo, and nothing else - so
+    anything `await_result` could hand back that is none of those still has
+    to end in a raised exception, never a silent `verified=True`. `Other` is
+    what `parse()` returns for a well-formed reply this module does not
+    recognise at all - the one shape genuinely left over once `CvValue` and
+    `PagedCvValue` each got their own branch.
+    """
+    from railctl.xbus.replies import Other
+
+    bench = bench_factory(capabilities=make_capabilities(z21_cv_opcodes=True))
+    programmer = bench.station.programmer
+    bench.expect(cmd_station_status(), reply=STATUS_POWERED)
+    bench.expect(cmd_z21_cv_write(8, 145), reply=ACK)
+    monkeypatch.setattr(programmer, "await_result", lambda *a, **k: Other(b"\x00"))
     monkeypatch.setattr(programmer, "exit_service_mode", lambda *, restore_power: None)
     with pytest.raises(DecoderNotRespondingError, match="unexpected reply"):
         programmer.service_write(8, 145, verify=True)
+
+
+def test_service_write_confirms_a_real_63_14_reply_from_the_unstubbed_wait_loop(bench_factory):
+    """The review finding this pins: no test drove `service_write` through
+    the real, unstubbed `await_result`, so nothing caught that the exhaustive
+    ladder rejected the one reply this hardware actually sends after a
+    service-mode write. This scripts the exact bytes measured on the bench
+    (docs/probe-results.md, "Service-mode WRITE works": `write 24 12 00 02 24
+    -> 63 14 03 24`, CV3 to 36) and lets the wait loop poll for real -
+    nothing here is stubbed except the wire replies.
+    """
+    bench = bench_factory(capabilities=make_capabilities(service_direct_cv=True))
+    programmer = bench.station.programmer
+    bench.expect(cmd_station_status(), reply=STATUS_POWERED)
+    bench.expect(cmd_service_direct_write(3, 36), reply=ACK)
+    bench.expect(cmd_service_result_request(), reply=encode(0x63, 0x14, 3, 36))
+    bench.expect(cmd_track_power_on(), reply=ACK)
+    bench.expect(STATUS_REQUEST, reply=STATUS_POWER_ON)
+
+    result = programmer.service_write(3, 36, verify=True)
+
+    assert result.value == 36
+    assert result.encoding is CvEncoding.SERVICE_DIRECT
+    assert result.verified is False
+    name, payload = bench.events[-1]
+    assert name == "cv.write_unverified"
+    assert payload["cv"] == 3
 
 
 # -- cv_write: mode dispatch ------------------------------------------------------

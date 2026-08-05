@@ -300,7 +300,7 @@ class CvProgrammer:
 
     def _write_and_confirm(
         self, cv: int, value: int, *, address: int | None, mode: ProgMode
-    ) -> CvEncoding:
+    ) -> tuple[CvEncoding, bool]:
         """Puts one CV write on the wire and confirms the station accepted it.
 
         POM: the interface ack IS the confirmation - there is no other channel
@@ -310,8 +310,18 @@ class CvProgrammer:
         after a WRITE `61 11` means the write finished, not "no result
         waiting" (spec line 780).
 
-        Returns the encoding actually used, so a caller building a `CvResult`
-        does not have to re-derive it.
+        Returns `(encoding, echo_confirmed_only)`. `encoding` is the encoding
+        actually used, so a caller building a `CvResult` does not have to
+        re-derive it. `echo_confirmed_only` is `True` only when the SERVICE
+        branch's confirmation came from a matching `CvValue`/`PagedCvValue`
+        echo rather than the definitive `Ready` (`61 11`) completion signal -
+        callers use it to keep `verified` honest: the echo shows what the
+        station's own result store holds, not that the decoder retained the
+        value (docs/probe-results.md, "Service-mode WRITE works": "`63 14`...
+        shows the command station produced that value; it does not by itself
+        prove the decoder accepted and retained it"). Always `False` on the
+        POM branch - POM's own confirmation is entirely `pom_write`'s
+        business (a separate `cv_read`), never this method's.
         """
         if mode is ProgMode.POM:
             if address is None:
@@ -320,9 +330,10 @@ class CvProgrammer:
             reply = self._station.exchange(telegram, timeout=self._station.timing.li_ack_normal)
             self._raise_for_write_reply(reply, cv)
             self._station.pause(self._station.timing.pom_write_settle)
-            return CvEncoding.POM_ZERO_BASED
+            return CvEncoding.POM_ZERO_BASED, False
         telegram, encoding, page_index = self.service_write_telegram(cv, value)
         power_before = self._track_power()
+        echo_confirmed_only = False
         try:
             reply = self._station.exchange(
                 telegram, timeout=self._station.timing.li_ack_programming
@@ -343,12 +354,19 @@ class CvProgrammer:
                 ready_means_done=True,
                 context="service",
             )
-            # Exhaustive on purpose, the way `_finish_service_read` is: success
-            # is `Ready` and nothing else. A silent `TimedOut` or an
-            # unrecognised outcome falling through here used to return
-            # `encoding` regardless - a service-mode write the station never
-            # answered came back `verified=True`, the exact "silence read as
-            # a hardware verdict" failure this project exists to catch.
+            # Exhaustive on purpose, the way `_finish_service_read` is - but
+            # `CvValue`/`PagedCvValue` are SUCCESS here, not the terminal
+            # failure an earlier version of this ladder treated them as: this
+            # hardware answers a service-mode write with exactly the `63 14`
+            # direct-CV result the write itself requested
+            # (docs/probe-results.md, "Service-mode WRITE works": `write 24
+            # 12 00 02 24 -> 63 14 03 24`), never with `61 11`. Raising
+            # DecoderNotRespondingError for that reply turned the one write
+            # path this station has actually been measured to use into a hard
+            # failure - a real answer discarded as no answer. A matching echo
+            # still is not proof the decoder RETAINED the value, so it sets
+            # `echo_confirmed_only` rather than being trusted the way `Ready`
+            # is.
             no_ack_hint = (
                 "decoder did not acknowledge; sound decoders often fail "
                 "on a 750 mA programming track - use POM instead"
@@ -377,13 +395,43 @@ class CvProgrammer:
                     f"within {self._station.timing.service_result} s",
                     cv=cv,
                 )
-            if not isinstance(outcome, Ready):
+            if isinstance(outcome, CvValue):
+                if outcome.value != value:
+                    raise CvVerifyError(
+                        f"CV{cv} service-mode write echoed {outcome.value}, not {value}",
+                        cv=cv,
+                    )
+                echo_confirmed_only = True
+            elif isinstance(outcome, PagedCvValue):
+                self._station.learn(service_direct_cv=False)
+                if cv <= _REGISTER_COLLISION_MAX:
+                    raise DecoderNotRespondingError(
+                        f"the station fell back to register mode for CV{cv}; register "
+                        f"numbers 1-8 are indistinguishable from these CV numbers, so "
+                        f"the write cannot be confirmed",
+                        cv=cv,
+                    )
+                if cv > MAX_CV_DIRECT or outcome.raw_register not in echo_candidates(
+                    CvEncoding.SERVICE_DIRECT, cv
+                ):
+                    raise DecoderNotRespondingError(
+                        f"CV{cv}: the paged-mode fallback reply ({outcome.raw_register}, "
+                        f"{outcome.value}) does not correspond to this CV",
+                        cv=cv,
+                    )
+                if outcome.value != value:
+                    raise CvVerifyError(
+                        f"CV{cv} service-mode write echoed {outcome.value}, not {value}",
+                        cv=cv,
+                    )
+                echo_confirmed_only = True
+            elif not isinstance(outcome, Ready):
                 raise DecoderNotRespondingError(
                     f"unexpected reply writing CV{cv} in service mode: {outcome!r}", cv=cv
                 )
         finally:
             self.exit_service_mode(restore_power=power_before)
-        return encoding
+        return encoding, echo_confirmed_only
 
     def raw_cv_write(self, cv: int, value: int, *, address: int | None, mode: ProgMode) -> None:
         """CV31 and CV32 route through here, never through `ensure_page`.
@@ -1168,7 +1216,9 @@ class CvProgrammer:
                 if (old_value ^ value) & (1 << CV29_LONG_ADDRESS_BIT):
                     blind = True
         try:
-            encoding = self._write_and_confirm(cv, value, address=address, mode=ProgMode.POM)
+            encoding, _echo_confirmed_only = self._write_and_confirm(
+                cv, value, address=address, mode=ProgMode.POM
+            )
         except RailctlError:
             self._station.invalidate_caches()
             raise
@@ -1224,12 +1274,17 @@ class CvProgrammer:
     def service_write(
         self, cv: int, value: int, *, verify: bool, page: CvPage | None = None
     ) -> CvResult:
-        """Unlike `pom_write`, `verified=True` here does not come from a
-        separate follow-up read: `_write_and_confirm`'s SERVICE branch already
-        gets a decoder-level acknowledgement (`61 11`/`61 13`) for every CV,
-        including CV1/8/17/18, so `BLIND_WRITE_CVS` - which exists to skip an
-        unreliable POM re-read after a write that could change the answering
-        address - has nothing to skip here. Blind means only `verify=False`.
+        """`verified=True` here can come only from a decoder-level `Ready`
+        (`61 11`) acknowledgement, present for every CV including
+        CV1/8/17/18, so `BLIND_WRITE_CVS` - which exists to skip an unreliable
+        POM re-read after a write that could change the answering address -
+        has nothing to skip here. A matching `CvValue`/`PagedCvValue` echo is
+        a different, weaker signal: it shows what the station's own result
+        store holds, not that the decoder retained the value
+        (docs/probe-results.md), so it never earns `verified=True` even when
+        `verify=True` was requested - `_write_and_confirm`'s
+        `echo_confirmed_only` return is what tells the two confirmation
+        channels apart.
 
         `page` is accepted, not used: unlike `pom_write`, this method never
         calls `cv_read` to verify, so there is no internal read whose own
@@ -1238,9 +1293,10 @@ class CvProgrammer:
         already selected it before either method is reached.
         """
         started = self._station.now()
-        blind = not verify
         try:
-            encoding = self._write_and_confirm(cv, value, address=None, mode=ProgMode.SERVICE)
+            encoding, echo_confirmed_only = self._write_and_confirm(
+                cv, value, address=None, mode=ProgMode.SERVICE
+            )
         except RailctlError:
             self._station.invalidate_caches()
             raise
@@ -1249,10 +1305,19 @@ class CvProgrammer:
             # track is not necessarily the one on the main track (spec line
             # 782) - there is no address to narrow to, so the whole cache goes.
             self._station.invalidate_caches()
-        if blind:
+        verified = verify and not echo_confirmed_only
+        if not verified:
+            if verify:
+                reason = (
+                    f"CV{cv} service-mode write was confirmed only by the "
+                    f"station's own result echo (63 14/63 10), not an "
+                    f"independent read-back"
+                )
+            else:
+                reason = self._blind_reason(cv, verify)
             self._station.emit(
                 "cv.write_unverified",
-                {"cv": cv, "value": value, "reason": self._blind_reason(cv, verify)},
+                {"cv": cv, "value": value, "reason": reason},
             )
             return CvResult(
                 cv=cv,
