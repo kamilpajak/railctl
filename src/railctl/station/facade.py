@@ -22,7 +22,7 @@ import dataclasses
 import logging
 import threading
 import time
-from collections.abc import Callable, Iterator
+from collections.abc import Callable, Iterator, Sequence
 from pathlib import Path
 from typing import Final
 
@@ -41,7 +41,7 @@ from railctl.link import Link
 from railctl.station.capabilities import LEARNABLE_FIELDS, UNKNOWN_IDENTITY, Capabilities
 from railctl.station.programming import CvProgrammer
 from railctl.station.timing import TIMING, Timing
-from railctl.station.types import CvPage, CvResult, ProgMode, StationEvent
+from railctl.station.types import CvPage, CvReadOutcome, CvResult, CvSpec, ProgMode, StationEvent
 from railctl.transport import open_link
 from railctl.xbus import replies
 from railctl.xbus.address import LOCO_ADDR_MAX, LOCO_ADDR_MIN
@@ -306,6 +306,48 @@ class Station:
     ) -> CvResult:
         with self._lock:
             return self.programmer.cv_read(cv, address=address, mode=mode, page=page)
+
+    def cv_write(
+        self,
+        cv: int,
+        value: int,
+        *,
+        address: int | None = None,
+        mode: ProgMode = ProgMode.AUTO,
+        page: CvPage | None = None,
+        verify: bool = True,
+    ) -> CvResult:
+        with self._lock:
+            resolved_address = address if address is not None else self.default_address
+            return self.programmer.cv_write(
+                cv, value, address=resolved_address, mode=mode, page=page, verify=verify
+            )
+
+    def cv_read_many(
+        self,
+        specs: Sequence[CvSpec],
+        *,
+        address: int | None = None,
+        mode: ProgMode = ProgMode.AUTO,
+        on_progress: Callable[[tuple[int, int, CvReadOutcome]], None] | None = None,
+    ) -> list[CvReadOutcome]:
+        with self._lock:
+            resolved_address = address if address is not None else self.default_address
+            return self.programmer.cv_read_many(
+                specs, address=resolved_address, mode=mode, on_progress=on_progress
+            )
+
+    def select_page(
+        self,
+        page: CvPage,
+        *,
+        address: int | None = None,
+        mode: ProgMode = ProgMode.AUTO,
+        force: bool = False,
+    ) -> None:
+        with self._lock:
+            resolved_address = address if address is not None else self.default_address
+            self.programmer.select_page(page, address=resolved_address, mode=mode, force=force)
 
     # -- session ---------------------------------------------------------
     def close(self) -> None:
