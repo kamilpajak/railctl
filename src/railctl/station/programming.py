@@ -518,29 +518,27 @@ class CvProgrammer:
         command station retries the decoder handshake internally. One
         failing read here is exactly one telegram plus its polls.
 
-        Takes `page` for signature symmetry with `pom_read`/`cv_read`. An
-        indexed CV never NEEDS a page selected in service mode: `SERVICE_EXT`
-        and `Z21_16BIT` both carry CV257..1024 addressing directly in the
-        opcode itself (`xbus.cv.ext_cv_fields`, the 16-bit field), unlike POM,
-        whose CV31/CV32 index page selects which decoder-side CV257..512
-        window a one-byte-addressed opcode reaches - a wire-format property
-        of POM's own opcode, not of what the decoder can hold. Gating on
-        `IndexPageRequiredError` here would block a CV265 read this station
-        can already answer directly - `test_a_read_in_an_exercised_band_emits_no_note`
-        and
+        Takes `page` for signature symmetry with `pom_read`/`cv_read`, but
+        unlike those two this method never calls `_require_page`: a CV265
+        read with `page=None` still succeeds here -
+        `test_a_read_in_an_exercised_band_emits_no_note` and
         `test_paged_cv_value_above_max_cv_direct_raises_decoder_not_responding_not_cv_out_of_range`
-        (Task 5) both call this method for CV265 with no page and expect it
-        to succeed.
+        (Task 5) both rely on exactly that.
 
-        A page IS still meaningful in service mode when the operator wants
-        one particular ZIMO index page selected before reading, and this
-        method does not yet select it: `select_page` over SERVICE routes
-        through `_write_and_confirm`'s SERVICE branch, whose
-        `service_write_telegram`/`_track_power` are added by Task 6b, not
-        this one. Rather than silently drop a `page` this method cannot
-        honour yet, a non-`None` page emits `page.not_selected` so a caller
-        relying on paging in service mode finds out immediately, instead of
-        reading whatever page the decoder already had selected.
+        CV31/CV32 select a decoder-side index window (CV257..512) that
+        applies in BOTH POM and service mode - it is a ZIMO decoder feature,
+        not a wire-format limit of either opcode. POM addresses CV1..1024
+        directly on the wire too (`xbus.cv.MAX_CV_POM`, `pom_cv_fields`), so
+        "POM's opcode only reaches one byte" is not why CV31/CV32 exists,
+        and a page is exactly as meaningful over service mode as over POM.
+
+        The reason this method cannot honour a given `page` yet is narrower:
+        `select_page` over SERVICE routes through `_write_and_confirm`'s
+        SERVICE branch, whose `service_write_telegram`/`_track_power` are
+        added by Task 6b, not this one. Rather than silently drop a `page`
+        this method cannot act on, a non-`None` page emits `page.not_selected`
+        so a caller relying on paging in service mode finds out immediately,
+        instead of reading whatever page the decoder already had selected.
         """
         if page is not None:
             self._station.emit("page.not_selected", {"cv": cv, "page": page, "mode": "service"})

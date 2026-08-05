@@ -153,6 +153,7 @@ EVENT_NAMES: Final[tuple[str, ...]] = (
     "cv.write_unverified",
     "cv.unexercised_band",  # emitted by the CV-programming layer
     "page.unverified",
+    "page.not_selected",
     "loco.in_use_by_other",
     "address.band_unverified",
     "function.group_seeded",  # emitted by the drive/function layer
