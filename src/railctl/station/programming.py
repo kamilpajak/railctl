@@ -66,11 +66,24 @@ __all__ = [
     "UNEXERCISED_BANDS",
     "CvMatcher",
     "CvProgrammer",
+    "PageKey",
     "ResultChannelSeen",
     "TimedOut",
     "WaitOutcome",
     "resolve_mode",
 ]
+
+
+@dataclass(frozen=True, slots=True)
+class PageKey:
+    """The page cache's key: one selected CV31/CV32 page is scoped to one
+    locomotive address (POM) or to the track as a whole (service mode, where
+    `address` is always `None`) - and to the mode itself, since the same
+    address can hold a different page selection under POM than under
+    service."""
+
+    address: int | None
+    mode: ProgMode
 
 
 @dataclass(frozen=True, slots=True)
@@ -211,13 +224,40 @@ class CvProgrammer:
 
     def __init__(self, station: Station) -> None:
         self._station = station
-        self._pages: dict[object, object] = {}
+        self._pages: dict[PageKey, tuple[CvPage, float]] = {}
+        self._verified_pages: set[PageKey] = set()
+
+    def reads_available(self, mode: ProgMode) -> bool:
+        """Whether ANY read path is confirmed working for `mode`.
+
+        Never `None`: an unprobed capability does not entitle a read attempt,
+        the same rule Task 6b's write ladder uses. For POM this is
+        deliberately narrower than "not False" - on THIS hardware `pom_read`
+        is measured False (POM read returns nothing at all), so page
+        selection over POM can never be verified here, and `select_page`
+        must emit `page.unverified` rather than pretend to check.
+        """
+        caps = self._station.capabilities
+        if mode is ProgMode.POM:
+            return caps.pom_read is True
+        return (
+            caps.z21_cv_opcodes is True
+            or caps.service_direct_cv is True
+            or caps.service_ext_cv is True
+        )
 
     def invalidate_pages(self) -> None:
-        """Registered with `station.register_cache` in `Station.__init__`. A
-        no-op stub until Task 6 populates `_ensure_page`'s cache - there is
-        nothing to clear yet, but the hook has to exist now."""
+        """Registered with `station.register_cache` in `Station.__init__` -
+        that registration does not change here, only what this method clears.
+
+        Takes no argument on purpose: the page cache is keyed by `(address, mode)`,
+        but `power_off()`, `close()` and `exit_service_mode()` (which all call
+        `station.invalidate_caches()`) mean "the track state is no longer
+        trustworthy for ANYONE" - narrowing this clear to one address would buy
+        nothing but a bug the day two locomotives share a session.
+        """
         self._pages.clear()
+        self._verified_pages.clear()
 
     def service_read_telegram(self, cv: int) -> tuple[bytes, CvEncoding, int]:
         """Choose the wire encoding for a service-mode CV read.
