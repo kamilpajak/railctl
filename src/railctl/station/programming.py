@@ -27,7 +27,15 @@ from railctl.errors import (
     UnsupportedCommandError,
 )
 from railctl.station.capabilities import Capabilities
-from railctl.station.types import INDEXED_CV_RANGE, CvPage, CvResult, ProgMode
+from railctl.station.types import (
+    ADDRESS_CVS,
+    BLIND_WRITE_CVS,
+    CV29_LONG_ADDRESS_BIT,
+    INDEXED_CV_RANGE,
+    CvPage,
+    CvResult,
+    ProgMode,
+)
 from railctl.xbus.commands import (
     cmd_pom_read_byte,
     cmd_pom_write_byte,
@@ -1004,4 +1012,93 @@ class CvProgrammer:
             f"attempts (interface ack only; docs/probe-results.md, R1)",
             cv=cv,
             details=failure_details,
+        )
+
+    @staticmethod
+    def _blind_reason(cv: int, verify: bool) -> str:
+        if not verify:
+            return "verify=False: no read-back was attempted"
+        if cv in BLIND_WRITE_CVS:
+            return f"CV{cv} has no reliable read-back on this station"
+        return (
+            "CV29 bit 5 changes the answering address; a read-back would ask the wrong locomotive"
+        )
+
+    def pom_write(self, cv: int, value: int, *, address: int, verify: bool) -> CvResult:
+        started = self._station.now()
+        blind = not verify or cv in BLIND_WRITE_CVS
+        old_value: int | None = None
+        if verify and not blind:
+            capabilities = self._station.capabilities
+            if capabilities.pom_read is False:
+                raise PomReadUnsupportedError(
+                    f"CV{cv} POM write cannot be verified",
+                    hint=(
+                        "cannot verify POM writes on this station; re-run with "
+                        "`--no-verify` or use `--mode service`"
+                    ),
+                    cv=cv,
+                )
+            # CV29 needs the pre-write value even when pom_read is already
+            # known True, to detect a bit-5 (long/short address) flip; every
+            # other CV only needs this read when pom_read is unestablished.
+            if capabilities.pom_read is None or cv == 29:
+                try:
+                    old_value = self.pom_read(cv, address=address).value
+                except RailctlError:
+                    if self._station.capabilities.pom_read is True:
+                        # A known-working capability failing once is a real
+                        # fault (e.g. DecoderNotRespondingError), not grounds
+                        # to claim POM verification is unsupported.
+                        raise
+                    raise PomReadUnsupportedError(
+                        f"CV{cv} POM write cannot be verified",
+                        hint=(
+                            "cannot verify POM writes on this station; re-run "
+                            "with `--no-verify` or use `--mode service`"
+                        ),
+                        cv=cv,
+                    ) from None
+            if cv == 29 and old_value is not None:
+                if (old_value ^ value) & (1 << CV29_LONG_ADDRESS_BIT):
+                    blind = True
+        try:
+            encoding = self._write_and_confirm(cv, value, address=address, mode=ProgMode.POM)
+        except RailctlError:
+            self._station.invalidate_caches()
+            raise
+        if cv == 8 or cv in ADDRESS_CVS:
+            self._station.invalidate_caches()
+        if blind:
+            self._station.emit(
+                "cv.write_unverified",
+                {"cv": cv, "value": value, "reason": self._blind_reason(cv, verify)},
+            )
+            return CvResult(
+                cv=cv,
+                value=value,
+                mode=ProgMode.POM,
+                encoding=encoding,
+                operation="write",
+                verified=False,
+                elapsed=self._station.now() - started,
+            )
+        read = self.cv_read(cv, address=address, mode=ProgMode.POM)
+        if read.value != value:
+            self._station.pause(self._station.timing.pom_write_settle)
+            read = self.cv_read(cv, address=address, mode=ProgMode.POM)
+            if read.value != value:
+                raise CvVerifyError(
+                    f"CV{cv} write verification failed twice: expected {value}, "
+                    f"read back {read.value}",
+                    cv=cv,
+                )
+        return CvResult(
+            cv=cv,
+            value=value,
+            mode=ProgMode.POM,
+            encoding=encoding,
+            operation="write",
+            verified=True,
+            elapsed=self._station.now() - started,
         )

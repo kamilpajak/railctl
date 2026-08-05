@@ -5,12 +5,15 @@ import pytest
 
 from railctl.errors import (
     CvVerifyError,
+    DecoderNotRespondingError,
     IndexPageRequiredError,
+    PomReadUnsupportedError,
     TrackPowerError,
     UnsupportedCommandError,
 )
 from railctl.station.capabilities import Capabilities
-from railctl.station.types import CvResult, ProgMode
+from railctl.station.timing import TIMING
+from railctl.station.types import ADDRESS_CVS, CV29_LONG_ADDRESS_BIT, CvResult, ProgMode
 from railctl.xbus.codec import encode
 from railctl.xbus.commands import cmd_pom_read_byte, cmd_pom_write_byte, cmd_station_status
 from railctl.xbus.dialect import CvEncoding
@@ -22,6 +25,7 @@ ACK = encode(0x01, 0x04)
 STATUS_REQUEST = cmd_station_status()
 STATUS_POWER_ON = encode(0x62, 0x22, 0x00)
 STATUS_POWER_OFF = encode(0x62, 0x22, 0x01)
+UNSUPPORTED = encode(0x61, 0x82)
 
 
 def make_capabilities(**overrides: object) -> Capabilities:
@@ -348,3 +352,167 @@ def test_cv_read_never_selects_a_page_when_the_track_is_unpowered(bench):
 
     assert bench.sent == [STATUS_REQUEST]
     assert programmer._pages == {}
+
+
+# -- pom_write: guards and verification --------------------------------------
+
+
+def test_pom_write_refuses_before_sending_when_pom_read_is_known_false(bench):
+    bench.station.learn(pom_read=False)
+    before = list(bench.sent)
+    with pytest.raises(PomReadUnsupportedError) as caught:
+        bench.station.programmer.pom_write(5, 10, address=ADDRESS, verify=True)
+    assert bench.sent == before
+    assert caught.value.hint == (
+        "cannot verify POM writes on this station; re-run with `--no-verify` "
+        "or use `--mode service`"
+    )
+
+
+def test_pom_write_probes_pom_read_first_when_unknown_and_refuses_if_that_fails(bench, monkeypatch):
+    programmer = bench.station.programmer
+    calls: list[tuple[int, int]] = []
+
+    def fake_pom_read(cv, *, address, page=None):
+        calls.append((cv, address))
+        raise DecoderNotRespondingError("nothing came back", cv=cv)
+
+    monkeypatch.setattr(programmer, "pom_read", fake_pom_read)
+    with pytest.raises(PomReadUnsupportedError) as caught:
+        programmer.pom_write(5, 10, address=ADDRESS, verify=True)
+    assert calls == [(5, ADDRESS)]
+    assert caught.value.hint == (
+        "cannot verify POM writes on this station; re-run with `--no-verify` "
+        "or use `--mode service`"
+    )
+
+
+def test_pom_write_to_cv29_that_flips_bit_5_is_treated_as_blind(bench, monkeypatch):
+    programmer = bench.station.programmer
+    bench.station.learn(pom_read=True)
+    old_value = 0b00000010
+    new_value = old_value | (1 << CV29_LONG_ADDRESS_BIT)
+    monkeypatch.setattr(
+        programmer,
+        "pom_read",
+        lambda cv, *, address, page=None: make_cv_result(cv=cv, value=old_value),
+    )
+    bench.expect(cmd_pom_write_byte(ADDRESS, 29, new_value, threshold=THRESHOLD), reply=ACK)
+    result = programmer.pom_write(29, new_value, address=ADDRESS, verify=True)
+    assert result.verified is False
+    name, payload = bench.events[-1]
+    assert name == "cv.write_unverified"
+    assert set(payload) == {"cv", "value", "reason"}
+
+
+def test_pom_write_to_cv29_that_does_not_flip_bit_5_is_verified_normally(bench, monkeypatch):
+    programmer = bench.station.programmer
+    bench.station.learn(pom_read=True)
+    old_value = 0b00100010  # bit 5 (0x20) set
+    new_value = 0b00101010  # bit 5 still set - only an unrelated bit changed
+    monkeypatch.setattr(
+        programmer,
+        "pom_read",
+        lambda cv, *, address, page=None: make_cv_result(cv=cv, value=old_value),
+    )
+    monkeypatch.setattr(
+        programmer,
+        "cv_read",
+        lambda cv, *, address, mode, page=None: make_cv_result(cv=cv, value=new_value, mode=mode),
+    )
+    bench.expect(cmd_pom_write_byte(ADDRESS, 29, new_value, threshold=THRESHOLD), reply=ACK)
+    result = programmer.pom_write(29, new_value, address=ADDRESS, verify=True)
+    assert result.verified is True
+
+
+def test_pom_write_reread_once_on_mismatch_then_succeeds(bench, monkeypatch):
+    programmer = bench.station.programmer
+    bench.station.learn(pom_read=True)
+    bench.expect(cmd_pom_write_byte(ADDRESS, 5, 10, threshold=THRESHOLD), reply=ACK)
+    reads = [make_cv_result(cv=5, value=99), make_cv_result(cv=5, value=10)]
+    seen_at: list[float] = []
+
+    def fake_cv_read(cv, *, address, mode, page=None):
+        seen_at.append(bench.station.now())
+        return reads.pop(0)
+
+    monkeypatch.setattr(programmer, "cv_read", fake_cv_read)
+    result = programmer.pom_write(5, 10, address=ADDRESS, verify=True)
+    assert result.verified is True
+    assert len(seen_at) == 2
+    assert seen_at[1] - seen_at[0] == pytest.approx(TIMING.pom_write_settle)
+
+
+def test_pom_write_raises_cv_verify_error_after_second_mismatch(bench, monkeypatch):
+    programmer = bench.station.programmer
+    bench.station.learn(pom_read=True)
+    bench.expect(cmd_pom_write_byte(ADDRESS, 5, 10, threshold=THRESHOLD), reply=ACK)
+    monkeypatch.setattr(
+        programmer,
+        "cv_read",
+        lambda cv, *, address, mode, page=None: make_cv_result(cv=cv, value=99),
+    )
+    with pytest.raises(CvVerifyError) as caught:
+        programmer.pom_write(5, 10, address=ADDRESS, verify=True)
+    assert caught.value.cv == 5
+
+
+def test_pom_write_verified_is_false_while_a_read_stays_none(bench):
+    """CV1 is in BLIND_WRITE_CVS: no verify read at all, so `verified` is `False`
+    even though nothing ever read `None` back. Goes red if `pom_write` stops
+    treating CV1 as blind - the scripted reply list has no second exchange for a
+    verify read, so `bench` raises `AssertionError: the script is exhausted`
+    instead of the assertion below even firing.
+    """
+    programmer = bench.station.programmer
+    bench.station.learn(pom_read=True)
+    bench.expect(cmd_pom_write_byte(ADDRESS, 1, 10, threshold=THRESHOLD), reply=ACK)
+    write_result = programmer.pom_write(1, 10, address=ADDRESS, verify=True)
+    assert write_result.verified is False
+
+
+def test_pom_write_with_verify_false_is_blind(bench):
+    programmer = bench.station.programmer
+    bench.expect(cmd_pom_write_byte(ADDRESS, 5, 10, threshold=THRESHOLD), reply=ACK)
+    result = programmer.pom_write(5, 10, address=ADDRESS, verify=False)
+    assert result.verified is False
+    assert bench.events[-1][0] == "cv.write_unverified"
+
+
+@pytest.mark.parametrize("cv", [*sorted(ADDRESS_CVS), 8])
+def test_pom_write_to_cv8_or_an_address_cv_invalidates_the_cache(cv, bench, monkeypatch):
+    programmer = bench.station.programmer
+    bench.station.learn(pom_read=True)
+    invalidated = watch_invalidations(bench.station)
+    monkeypatch.setattr(
+        programmer, "pom_read", lambda c, *, address, page=None: make_cv_result(cv=c, value=0)
+    )
+    monkeypatch.setattr(
+        programmer,
+        "cv_read",
+        lambda c, *, address, mode, page=None: make_cv_result(cv=c, value=0, mode=mode),
+    )
+    bench.expect(cmd_pom_write_byte(ADDRESS, cv, 0, threshold=THRESHOLD), reply=ACK)
+    programmer.pom_write(cv, 0, address=ADDRESS, verify=True)
+    assert len(invalidated) == 1
+
+
+def test_pom_write_to_an_unrelated_cv_does_not_invalidate_the_cache(bench, monkeypatch):
+    programmer = bench.station.programmer
+    bench.station.learn(pom_read=True)
+    invalidated = watch_invalidations(bench.station)
+    monkeypatch.setattr(
+        programmer,
+        "cv_read",
+        lambda cv, *, address, mode, page=None: make_cv_result(cv=cv, value=10, mode=mode),
+    )
+    bench.expect(cmd_pom_write_byte(ADDRESS, 5, 10, threshold=THRESHOLD), reply=ACK)
+    programmer.pom_write(5, 10, address=ADDRESS, verify=True)
+    assert invalidated == []
+
+
+def test_pom_write_raises_unsupported_command_error_on_61_82(bench):
+    programmer = bench.station.programmer
+    bench.expect(cmd_pom_write_byte(ADDRESS, 5, 10, threshold=THRESHOLD), reply=UNSUPPORTED)
+    with pytest.raises(UnsupportedCommandError):
+        programmer.pom_write(5, 10, address=ADDRESS, verify=False)
