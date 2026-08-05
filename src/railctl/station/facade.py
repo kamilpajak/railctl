@@ -452,25 +452,27 @@ class Station:
     def drive(self, address: int, speed: int, direction: Direction) -> None:
         """speed 0..126 (0 is a braked stop); the drive telegram gets no
         answer of its own, so the expected reply is the generic ack."""
-        if not 0 <= speed <= MAX_SPEED_STEP:
-            raise ValueError(f"speed {speed} out of range 0..{MAX_SPEED_STEP}")
-        self._validate_address(address)
-        telegram = commands.cmd_drive_128(address, speed, direction, threshold=self.threshold)
-        reply = self.exchange(telegram, timeout=self.timing.li_ack_normal)
-        self._expect_ack(reply)
+        with self._lock:
+            if not 0 <= speed <= MAX_SPEED_STEP:
+                raise ValueError(f"speed {speed} out of range 0..{MAX_SPEED_STEP}")
+            self._validate_address(address)
+            telegram = commands.cmd_drive_128(address, speed, direction, threshold=self.threshold)
+            reply = self.exchange(telegram, timeout=self.timing.li_ack_normal)
+            self._expect_ack(reply)
 
     def loco_info(self, address: int) -> LocoInfo:
         """Never raises for `in_use_by_other` - another device holding this
         locomotive blocks nothing here, it only gets reported."""
-        self._validate_address(address)
-        telegram = commands.cmd_loco_info(address, threshold=self.threshold)
-        reply = self.exchange(telegram, timeout=self.timing.li_ack_normal)
-        if not isinstance(reply, LocoInfo):
-            raise StationError(f"unexpected reply to loco info: {reply!r}")
-        info = dataclasses.replace(reply, address=address)
-        if info.in_use_by_other:
-            self.emit("loco.in_use_by_other", {"address": address})
-        return info
+        with self._lock:
+            self._validate_address(address)
+            telegram = commands.cmd_loco_info(address, threshold=self.threshold)
+            reply = self.exchange(telegram, timeout=self.timing.li_ack_normal)
+            if not isinstance(reply, LocoInfo):
+                raise StationError(f"unexpected reply to loco info: {reply!r}")
+            info = dataclasses.replace(reply, address=address)
+            if info.in_use_by_other:
+                self.emit("loco.in_use_by_other", {"address": address})
+            return info
 
     def _expect_ack(self, reply: object) -> None:
         """The `Unsupported` (61 82) case is NOT handled here on purpose:
@@ -502,26 +504,28 @@ class Station:
         is silence; what they share is that neither entitles this method to
         invent a value.
         """
-        if not refresh and address in self._function_shadow:
-            return dict(self._function_shadow[address])
-        info = self.loco_info(address)
-        state: dict[int, bool] = dict(enumerate(info.function_bits))
-        telegram = commands.cmd_function_state_13_28(address, threshold=self.threshold)
-        try:
-            reply = self.exchange(telegram, timeout=self.timing.li_ack_normal)
-        except (LinkTimeout, UnsupportedCommandError):
-            reply = None
-        if isinstance(reply, FunctionState13To28):
-            for function in GROUP_FUNCTIONS[FunctionGroup.G4]:
-                state[function] = bool(reply.f13_f20 & (1 << FUNCTION_BITS[function][1]))
-            for function in GROUP_FUNCTIONS[FunctionGroup.G5]:
-                state[function] = bool(reply.f21_f28 & (1 << FUNCTION_BITS[function][1]))
-        self._function_shadow[address] = dict(state)
-        return dict(state)
+        with self._lock:
+            if not refresh and address in self._function_shadow:
+                return dict(self._function_shadow[address])
+            info = self.loco_info(address)
+            state: dict[int, bool] = dict(enumerate(info.function_bits))
+            telegram = commands.cmd_function_state_13_28(address, threshold=self.threshold)
+            try:
+                reply = self.exchange(telegram, timeout=self.timing.li_ack_normal)
+            except (LinkTimeout, UnsupportedCommandError):
+                reply = None
+            if isinstance(reply, FunctionState13To28):
+                for function in GROUP_FUNCTIONS[FunctionGroup.G4]:
+                    state[function] = bool(reply.f13_f20 & (1 << FUNCTION_BITS[function][1]))
+                for function in GROUP_FUNCTIONS[FunctionGroup.G5]:
+                    state[function] = bool(reply.f21_f28 & (1 << FUNCTION_BITS[function][1]))
+            self._function_shadow[address] = dict(state)
+            return dict(state)
 
     def forget_loco(self, address: int) -> None:
         """Drop one address's function shadow - the next read starts fresh."""
-        self._function_shadow.pop(address, None)
+        with self._lock:
+            self._function_shadow.pop(address, None)
 
     def _require_function_capability(self, function: int, *, single_function_path: bool) -> None:
         group = FUNCTION_BITS[function][0]
@@ -539,10 +543,25 @@ class Station:
             )
 
     def _function_set_group_path(
-        self, address: int, function: int, on: bool, *, force_group: bool
+        self,
+        address: int,
+        function: int,
+        on: bool,
+        *,
+        force_group: bool,
+        state: dict[int, bool] | None = None,
     ) -> None:
+        """`state`, when given, is an already-fresh read (`refresh=True`)
+        the caller has in hand - `function_toggle` reads it to compute
+        `on` in the first place. Accepting it here instead of reading
+        again avoids repeating the loco_info + E3 09 pair for the same
+        exchange; a caller with no such read (`function_set`) leaves it
+        `None` and this method does its own `refresh=True` read as before.
+        The dict is copied so mutating it here never reaches back into a
+        caller's own variable.
+        """
         group = FUNCTION_BITS[function][0]
-        state = self.function_state(address, refresh=True)
+        state = dict(state) if state is not None else self.function_state(address, refresh=True)
         # `function` gets its real requested value here, before `missing` is
         # computed, so the function being written is never counted among the
         # ones this call has to seed - it is known, by the caller's own hand.
@@ -570,46 +589,66 @@ class Station:
     def function_set(
         self, address: int, function: int, on: bool, *, force_group: bool = False
     ) -> None:
-        if not 0 <= function <= MAX_FUNCTION:
-            raise ValueError(f"function {function} out of range 0..{MAX_FUNCTION}")
-        single = self.capabilities.single_function_cmd is True
-        self._require_function_capability(function, single_function_path=single)
-        if single:
-            # No shadow, no read-modify-write: this touches exactly one
-            # function, so a stale shadow can never switch off a function
-            # another throttle turned on.
-            action = FunctionAction.ON if on else FunctionAction.OFF
-            telegram = commands.cmd_function_single(
-                address, function, action, threshold=self.threshold
-            )
-            reply = self.exchange(telegram, timeout=self.timing.li_ack_normal)
-            self._expect_ack(reply)
-            return
-        self._function_set_group_path(address, function, on, force_group=force_group)
+        with self._lock:
+            if not 0 <= function <= MAX_FUNCTION:
+                raise ValueError(f"function {function} out of range 0..{MAX_FUNCTION}")
+            single = self.capabilities.single_function_cmd is True
+            self._require_function_capability(function, single_function_path=single)
+            if single:
+                # No shadow, no read-modify-write: this touches exactly one
+                # function, so a stale shadow can never switch off a function
+                # another throttle turned on. What it CAN do is leave a
+                # SHADOWED function stale - if `address` already had an
+                # entry from an earlier group read, that entry now
+                # disagrees with the station about `function` - so a
+                # successful write drops the shadow entirely rather than
+                # patching one key: dropping produces "unknown, re-read"
+                # on the next function_state() call, never a value this
+                # method only half-knows to be true.
+                action = FunctionAction.ON if on else FunctionAction.OFF
+                telegram = commands.cmd_function_single(
+                    address, function, action, threshold=self.threshold
+                )
+                reply = self.exchange(telegram, timeout=self.timing.li_ack_normal)
+                self._expect_ack(reply)
+                self._function_shadow.pop(address, None)
+                return
+            self._function_set_group_path(address, function, on, force_group=force_group)
 
     def function_toggle(self, address: int, function: int, *, force_group: bool = False) -> bool:
         """Read the current value, send an explicit ON or OFF - never the
         TOGGLE wire action - and return the new value as a fact, not a
         guess. Raises StationError, sending nothing, when the state cannot
         be read at all."""
-        if not 0 <= function <= MAX_FUNCTION:
-            raise ValueError(f"function {function} out of range 0..{MAX_FUNCTION}")
-        single = self.capabilities.single_function_cmd is True
-        self._require_function_capability(function, single_function_path=single)
-        state = self.function_state(address, refresh=True)
-        if function not in state:
-            raise StationError(
-                f"F{function} state is unknown; a toggle cannot guess it",
-                hint="--force-group",
+        with self._lock:
+            if not 0 <= function <= MAX_FUNCTION:
+                raise ValueError(f"function {function} out of range 0..{MAX_FUNCTION}")
+            single = self.capabilities.single_function_cmd is True
+            self._require_function_capability(function, single_function_path=single)
+            state = self.function_state(address, refresh=True)
+            if function not in state:
+                raise StationError(
+                    f"F{function} state is unknown; a toggle cannot guess it",
+                    hint="--force-group",
+                )
+            new_value = not state[function]
+            if single:
+                # Same reasoning as function_set's single-function branch:
+                # drop rather than patch, so a stale shadow can never
+                # answer with a value the write already changed.
+                action = FunctionAction.ON if new_value else FunctionAction.OFF
+                telegram = commands.cmd_function_single(
+                    address, function, action, threshold=self.threshold
+                )
+                reply = self.exchange(telegram, timeout=self.timing.li_ack_normal)
+                self._expect_ack(reply)
+                self._function_shadow.pop(address, None)
+                return new_value
+            # `state` above is already a fresh (refresh=True) read - pass
+            # it through instead of letting the group path repeat the same
+            # loco_info + E3 09 pair for the exchange this call already
+            # made.
+            self._function_set_group_path(
+                address, function, new_value, force_group=force_group, state=state
             )
-        new_value = not state[function]
-        if single:
-            action = FunctionAction.ON if new_value else FunctionAction.OFF
-            telegram = commands.cmd_function_single(
-                address, function, action, threshold=self.threshold
-            )
-            reply = self.exchange(telegram, timeout=self.timing.li_ack_normal)
-            self._expect_ack(reply)
             return new_value
-        self._function_set_group_path(address, function, new_value, force_group=force_group)
-        return new_value

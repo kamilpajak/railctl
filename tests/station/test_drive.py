@@ -221,6 +221,23 @@ def test_function_state_reads_f13_28_when_the_request_succeeds(bench):
     assert state == expected
 
 
+# -- function_set()/function_toggle(): range validation -------------------------
+
+
+@pytest.mark.parametrize("function", [-1, 29])
+def test_function_set_rejects_out_of_range_function_before_sending_anything(bench, function):
+    with pytest.raises(ValueError, match="function"):
+        bench.station.function_set(3, function, True)
+    assert bench.sent == []
+
+
+@pytest.mark.parametrize("function", [-1, 29])
+def test_function_toggle_rejects_out_of_range_function_before_sending_anything(bench, function):
+    with pytest.raises(ValueError, match="function"):
+        bench.station.function_toggle(3, function)
+    assert bench.sent == []
+
+
 # -- function_set(): tri-state dispatch ----------------------------------------
 
 
@@ -299,6 +316,36 @@ def test_function_set_with_force_group_seeds_false_and_emits_an_event(bench_fact
     assert set(payload["functions"]) == {13, 15, 16, 17, 18, 19, 20}
 
 
+def test_function_set_single_path_drops_the_shadow_so_a_stale_value_is_never_reported(
+    bench_factory,
+):
+    """A single-function write touches exactly one function and never
+    updates the shadow with a value of its own - but a shadow entry left
+    UNTOUCHED after the write is just as wrong as one holding a bad value:
+    the next refresh=False function_state() call would answer straight
+    from the stale cache and report F0's OLD state, even though the write
+    just changed it. Dropping the entry forces that next read back onto
+    the wire, so this pins the telegram count rather than the boolean -
+    a wrong VALUE from a wrongly-defaulted shadow and a wrong VALUE from an
+    untouched one look identical from outside, only the wire traffic tells
+    them apart."""
+    fixture = bench_factory(single_function_cmd=True)
+    fixture.expect(LOCO_INFO_REQUEST, LOCO_INFO_REPLY_IDLE)
+    fixture.expect(FUNCTION_STATE_REQUEST, UNSUPPORTED)
+    state = fixture.station.function_state(3)
+    assert state[0] is False
+    assert len(fixture.sent) == 2
+
+    fixture.expect(FUNCTION_SINGLE_F0_ON, ACK)
+    fixture.station.function_set(3, 0, True)
+    assert len(fixture.sent) == 3
+
+    fixture.expect(LOCO_INFO_REQUEST, LOCO_INFO_REPLY_IDLE)
+    fixture.expect(FUNCTION_STATE_REQUEST, UNSUPPORTED)
+    fixture.station.function_state(3)
+    assert len(fixture.sent) == 5
+
+
 # -- function_toggle() ---------------------------------------------------------
 
 
@@ -312,6 +359,39 @@ def test_function_toggle_reads_first_and_sends_an_explicit_action(bench_factory)
     fixture.expect(FUNCTION_SINGLE_F0_ON, ACK)
     assert fixture.station.function_toggle(3, 0) is True
     assert fixture.sent == [LOCO_INFO_REQUEST, FUNCTION_STATE_REQUEST, FUNCTION_SINGLE_F0_ON]
+
+
+def test_function_toggle_single_path_drops_the_shadow_so_a_stale_value_is_never_reported(
+    bench_factory,
+):
+    """Same failure mode as the function_set test above, reached through
+    function_toggle instead: `function_toggle(3, 0)` returns True, and a
+    following function_state(3) must not answer False from a shadow the
+    write never touched."""
+    fixture = bench_factory(single_function_cmd=True)
+    fixture.expect(LOCO_INFO_REQUEST, LOCO_INFO_REPLY_IDLE)
+    fixture.expect(FUNCTION_STATE_REQUEST, UNSUPPORTED)
+    fixture.expect(FUNCTION_SINGLE_F0_ON, ACK)
+    assert fixture.station.function_toggle(3, 0) is True
+    assert len(fixture.sent) == 3
+
+    fixture.expect(LOCO_INFO_REQUEST, LOCO_INFO_REPLY_IDLE)
+    fixture.expect(FUNCTION_STATE_REQUEST, UNSUPPORTED)
+    fixture.station.function_state(3)
+    assert len(fixture.sent) == 5
+
+
+def test_function_toggle_uses_the_group_path_and_reads_state_only_once(bench):
+    """The default fixture leaves single_function_cmd unset (None), so this
+    is the group path - previously unreached by any test in this file.
+    function_toggle already does one refresh=True read to compute the new
+    value; the group path must reuse it rather than repeating the same
+    loco_info + E3 09 pair a second time before the write."""
+    bench.expect(LOCO_INFO_REQUEST, LOCO_INFO_REPLY_IDLE)
+    bench.expect(FUNCTION_STATE_REQUEST, UNSUPPORTED)
+    bench.expect(FUNCTION_GROUP_G1_F2_ON, ACK)
+    assert bench.station.function_toggle(3, 2) is True
+    assert bench.sent == [LOCO_INFO_REQUEST, FUNCTION_STATE_REQUEST, FUNCTION_GROUP_G1_F2_ON]
 
 
 def test_function_toggle_raises_when_state_is_unknown_and_sends_nothing(bench_factory):
