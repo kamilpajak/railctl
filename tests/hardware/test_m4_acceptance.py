@@ -13,7 +13,7 @@ import pytest
 
 from railctl.envelope.liusb import LiUsbEnvelope
 from railctl.errors import PortNotXpressNet
-from railctl.link import Link
+from railctl.link import HANDSHAKE_TIMEOUT, Link
 from railctl.transport import find_xpressnet_port, open_link
 from railctl.transport.serial_posix import SerialConfig, SerialTransport
 
@@ -21,6 +21,12 @@ pytestmark = pytest.mark.hardware
 
 VERSION_HEADER = 0x63
 VERSION_MARKER = 0x21
+# 5 x HANDSHAKE_TIMEOUT = 10 s. The measured maximum gap is 4.83 s, but the
+# first run of this loop needed three attempts - two consecutive empty windows -
+# so 6 s was already grazing the edge. Ten seconds costs a few seconds on a
+# suite that only runs by hand, and buys a test that is evidence rather than a
+# coin toss.
+TELEMETRY_ATTEMPTS = 5
 
 
 def test_auto_detection_finds_the_xpressnet_port():
@@ -54,6 +60,21 @@ def test_the_telemetry_port_shows_bytes_dropped_climbing_with_no_frames():
     counters must say WHY - a climbing bytes_dropped with frames_ok stuck at 0
     is "wrong CDC interface", not "dead port". That distinction is the whole
     reason the counters exist.
+
+    Why this opens the port more than once. The stream is periodic, not
+    continuous: measured on 2026-08-05 over 30 s, 24 arrivals totalling 554
+    bytes, mean gap 1.27 s and MAX GAP 4.83 s. `open()` gives up after
+    HANDSHAKE_TIMEOUT (2.0 s), so a single attempt can legitimately see zero
+    bytes on a perfectly healthy station - which is exactly what happened on
+    that date, after this test had been passing on luck since M4. The envelope's
+    counters are per session and survive `reset()` (only the buffer is per
+    connection), so consecutive attempts accumulate. The first run of this loop
+    needed three of them, so the count is five: two empty windows in a row have
+    been observed, and a margin that has already been grazed is not a margin.
+
+    The irony is worth keeping in the file: this test exists to prove the
+    counters can tell silence from noise, and it was itself reading a gap in
+    the noise as silence.
     """
     telemetry = find_xpressnet_port()[:-1] + "5"
     if not os.path.exists(telemetry):
@@ -61,10 +82,19 @@ def test_the_telemetry_port_shows_bytes_dropped_climbing_with_no_frames():
 
     envelope = LiUsbEnvelope()
     link = Link(SerialTransport(SerialConfig(telemetry)), envelope)
-    with pytest.raises(PortNotXpressNet) as caught:
-        link.open()
+    attempts = 0
+    while attempts < TELEMETRY_ATTEMPTS and envelope.stats.bytes_dropped == 0:
+        attempts += 1
+        with pytest.raises(PortNotXpressNet) as caught:
+            link.open()
     print(f"\n{caught.value}")
     stats = envelope.stats
-    print(f"frames_ok={stats.frames_ok} bytes_dropped={stats.bytes_dropped}")
+    print(f"attempts={attempts} frames_ok={stats.frames_ok} bytes_dropped={stats.bytes_dropped}")
+    # frames_ok is the load-bearing half and holds however long we listen: no
+    # amount of ASCII telemetry ever assembles into a valid XpressNet frame.
     assert stats.frames_ok == 0
-    assert stats.bytes_dropped > 0
+    assert stats.bytes_dropped > 0, (
+        f"the telemetry interface said nothing across {attempts} attempts "
+        f"({attempts * HANDSHAKE_TIMEOUT:.0f} s); the measured maximum gap is 4.83 s, so "
+        "either the station is genuinely silent or the stream's timing has changed"
+    )
