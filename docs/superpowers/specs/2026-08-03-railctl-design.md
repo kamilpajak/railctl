@@ -1273,29 +1273,22 @@ railctl [GLOBAL] COMMAND ...
 
 ```json
 {"version": 1, "links": {"serial:7010A0001194:3": {
-  "probed_at": "2026-08-03T19:02:00Z", "xpressnet_version": "4.0",
-  "command_station_id": 18, "pom_read": true, "pom_result_channel": "poll",
-  "pom_echo_zero_based": true, "loco_address_threshold": 100,
-  "service_direct_cv": true, "service_ext_cv": false, "z21_cv_opcodes": false,
-  "function_groups_4_5": null, "notes": "…"}}}
+  "probed_at": "2026-08-04T19:02:00Z", "xpressnet_version": "4.0",
+  "command_station_id": 18, "pom_read": null, "pom_result_channel": null,
+  "pom_echo_zero_based": null, "loco_address_threshold": null,
+  "service_direct_cv": true, "service_ext_cv": true, "z21_cv_opcodes": true,
+  "function_groups_4_5": true, "notes": "…"}}}
 ```
 
 Every capability is tri-state: `true`, `false` (probed, does not work), `null` (not probed or not testable). Keyed by `Link.identity` so two command stations do not share one answer.
 
-Timing defaults live in `railctl.station.timing` as the `Timing` dataclass `TIMING`; none of them is a CLI flag in v1.
+The example above carries the values this reference station actually produced (`docs/probe-results.md`), not invented ones. It was written before M1 ran and showed `pom_read: true` with the service and Z21 opcodes `false` — the reverse of the measurement in every one of those four fields. An example is read as a statement about the hardware whether or not it was meant as one, and this one would have taught a reader that POM read works here and that the opcodes reaching CV1024 do not. Note in particular that `pom_read` is `null` and not `false`: the station returned nothing, which is not the same as saying no.
 
-| field | default | field | default |
-|---|---|---|---|
-| `li_ack_normal` | 5.0 s | `pom_write_settle` | 0.2 s |
-| `li_ack_programming` | 90.0 s | `service_result` | 90.0 s |
-| `min_exchange` | 0.02 s | `service_first_poll_delay` | 0.5 s |
-| `power_settle` | 0.3 s | `service_poll_interval` | 0.5 s |
-| `pom_result` | 2.0 s | `service_ready_limit` | 20 polls |
-| `pom_poll_interval` | 0.25 s | `service_exit_settle` | 0.3 s |
-| `pom_read_attempts` | 3 | `page_cache_ttl` | 10 s |
-| `pom_retry_delay` | 0.2 s | | |
+Timing defaults live in `railctl.station.timing` as the `Timing` dataclass `TIMING`; none of them is a CLI flag in v1. **The values are defined once, in "Timing and events" above** — see that section for the table.
 
-`pom_result` and `pom_poll_interval` are estimates, not measurements; the first `doctor` run replaces them (milestone M1).
+They were printed here a second time, and the two copies disagreed on **ten of the fifteen fields**: `li_ack_programming` (95 s against 90), `min_exchange` (0.05 against 0.02), `power_settle` (0.5 against 0.3), `pom_poll_interval` (0.10 against 0.25), `pom_retry_delay` (0.25 against 0.2), `pom_write_settle` (0.5 against 0.2), `service_result` (95 s against 90), `service_first_poll_delay` (0.20 against 0.5), `service_ready_limit` (8 polls against 20) and `service_exit_settle` (0.10 against 0.3). A reader who found this copy first would have called the implementation wrong. The duplicate is removed rather than reconciled: two copies of one table drift again the moment either is edited.
+
+On what the numbers rest, now that M1 has run (`docs/probe-results.md`): the service-mode figures are measured — one service read takes about 1.7 s on this station, which is what `service_result`'s 95 s ceiling and the poll intervals are sized around. The `pom_*` figures are still estimates and will stay estimates here, because POM read on this hardware returns nothing at all to measure. They are not dead settings: POM write works, and a station with a RailCom detector would exercise the read path.
 
 ### L4. JSON envelope, NDJSON stream, errors
 
