@@ -18,7 +18,14 @@ from railctl.errors import (
 from railctl.station.capabilities import Capabilities
 from railctl.station.programming import PageKey, TimedOut
 from railctl.station.timing import TIMING
-from railctl.station.types import ADDRESS_CVS, CV29_LONG_ADDRESS_BIT, CvResult, ProgMode
+from railctl.station.types import (
+    ADDRESS_CVS,
+    CV29_LONG_ADDRESS_BIT,
+    CvReadOutcome,
+    CvResult,
+    CvSpec,
+    ProgMode,
+)
 from railctl.xbus.codec import encode
 from railctl.xbus.commands import (
     cmd_pom_read_byte,
@@ -1104,3 +1111,67 @@ def test_cv_read_invalidates_the_page_cache_on_any_failing_read(bench, monkeypat
     with pytest.raises(DecoderNotRespondingError):
         programmer.cv_read(8, address=ADDRESS, mode=ProgMode.POM)
     assert programmer._pages == {}
+
+
+# -- cv_read_many -----------------------------------------------------------------
+
+
+def test_cv_read_many_rejects_page_selector_cvs_in_the_payload(bench):
+    with pytest.raises(ValueError, match="cursor"):
+        bench.station.programmer.cv_read_many([CvSpec(cv=31)], address=ADDRESS, mode=ProgMode.POM)
+
+
+def test_cv_read_many_selects_each_page_once_and_reads_in_sorted_order(bench, monkeypatch):
+    programmer = bench.station.programmer
+    calls: list[tuple[object, ...]] = []
+    monkeypatch.setattr(
+        programmer,
+        "select_page",
+        lambda page, *, address, mode, force: calls.append(("select", page, force)),
+    )
+    monkeypatch.setattr(
+        programmer,
+        "cv_read",
+        lambda cv, *, address, mode, page=None: (
+            calls.append(("read", cv)),
+            make_cv_result(cv=cv, value=cv, mode=mode),
+        )[1],
+    )
+    specs = [
+        CvSpec(cv=269, page=(10, 2)),
+        CvSpec(cv=266, page=(10, 2)),
+        CvSpec(cv=8),
+        CvSpec(cv=265, page=(10, 2)),
+        CvSpec(cv=267, page=(10, 2)),
+        CvSpec(cv=268, page=(10, 2)),
+    ]
+    outcomes = programmer.cv_read_many(specs, address=ADDRESS, mode=ProgMode.POM)
+    assert [o.spec.cv for o in outcomes] == [8, 265, 266, 267, 268, 269]
+    assert calls == [
+        ("read", 8),
+        ("select", (10, 2), True),
+        ("read", 265),
+        ("read", 266),
+        ("read", 267),
+        ("read", 268),
+        ("read", 269),
+    ]
+
+
+def test_cv_read_many_calls_on_progress_once_per_spec_and_captures_failures(bench, monkeypatch):
+    programmer = bench.station.programmer
+
+    def fake_cv_read(cv, *, address, mode, page=None):
+        if cv == 6:
+            raise DecoderNotRespondingError("no ack", cv=cv)
+        return make_cv_result(cv=cv, value=cv, mode=mode)
+
+    monkeypatch.setattr(programmer, "cv_read", fake_cv_read)
+    progress: list[tuple[int, int, CvReadOutcome]] = []
+    specs = [CvSpec(cv=5), CvSpec(cv=6), CvSpec(cv=7)]
+    outcomes = programmer.cv_read_many(
+        specs, address=ADDRESS, mode=ProgMode.POM, on_progress=progress.append
+    )
+    assert [o.error is None for o in outcomes] == [True, False, True]
+    assert isinstance(outcomes[1].error, DecoderNotRespondingError)
+    assert [(index, total) for index, total, _outcome in progress] == [(0, 3), (1, 3), (2, 3)]

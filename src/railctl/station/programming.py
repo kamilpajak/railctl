@@ -9,6 +9,7 @@ numbers and reply idents without ever touching a wire byte itself.
 
 from __future__ import annotations
 
+from collections.abc import Callable, Sequence
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Final, Literal
 
@@ -33,8 +34,11 @@ from railctl.station.types import (
     BLIND_WRITE_CVS,
     CV29_LONG_ADDRESS_BIT,
     INDEXED_CV_RANGE,
+    PAGE_SELECTOR_CVS,
     CvPage,
+    CvReadOutcome,
     CvResult,
+    CvSpec,
     ProgMode,
 )
 from railctl.xbus.commands import (
@@ -823,6 +827,45 @@ class CvProgrammer:
         except RailctlError:
             self.invalidate_pages()
             raise
+
+    def cv_read_many(
+        self,
+        specs: Sequence[CvSpec],
+        *,
+        address: int | None = None,
+        mode: ProgMode = ProgMode.AUTO,
+        # Called with one 3-tuple argument, not three positional arguments -
+        # `on_progress=list.append` (see tests/station/test_cv_write.py,
+        # `test_cv_read_many_calls_on_progress_once_per_spec_and_captures_failures`)
+        # is the whole reason the shape is a tuple rather than
+        # `Callable[[int, int, CvReadOutcome], None]`.
+        on_progress: Callable[[tuple[int, int, CvReadOutcome]], None] | None = None,
+    ) -> list[CvReadOutcome]:
+        for spec in specs:
+            if spec.cv in PAGE_SELECTOR_CVS:
+                raise ValueError(
+                    f"CV{spec.cv} is a ZIMO page cursor (CV31/CV32), not a "
+                    f"setting; cv_read_many refuses to read it as part of a "
+                    f"payload"
+                )
+        ordered = sorted(specs, key=lambda spec: (spec.page or (0, 0), spec.cv))
+        total = len(ordered)
+        outcomes: list[CvReadOutcome] = []
+        current_page: CvPage | None = None
+        for index, spec in enumerate(ordered):
+            try:
+                if spec.page != current_page:
+                    if spec.page is not None:
+                        self.select_page(spec.page, address=address, mode=mode, force=True)
+                    current_page = spec.page
+                result = self.cv_read(spec.cv, address=address, mode=mode, page=spec.page)
+                outcome = CvReadOutcome(spec=spec, result=result, error=None)
+            except RailctlError as exc:
+                outcome = CvReadOutcome(spec=spec, result=None, error=exc)
+            outcomes.append(outcome)
+            if on_progress is not None:
+                on_progress((index, total, outcome))
+        return outcomes
 
     def _learn_result_channel(
         self, context: Literal["pom", "service"], channel: ResultChannelSeen
