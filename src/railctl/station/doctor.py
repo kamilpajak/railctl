@@ -352,7 +352,9 @@ def _check_d8(station: Station, *, d4_noack: bool, d5_passed: bool) -> Check:
     return Check("D8", CHECK_TITLES["D8"], "unknown", "CV29/CV28 not readable in service mode")
 
 
-def _best_effort_read(station: Station, cv: int) -> int | None:
+def _best_effort_read(
+    station: Station, cv: int, *, use_programming_track: bool
+) -> tuple[int | None, str | None]:
     """Read one CV through whichever path D4-D7 already proved works: POM
     first if `pom_read` is proven True and an address is resolvable, then a
     single high-level `service_read` call, which already walks
@@ -362,26 +364,58 @@ def _best_effort_read(station: Station, cv: int) -> int | None:
     2 under `station/` requires."""
     caps = station.capabilities
     address = station.default_address
+    reason: str | None = None
     if caps.pom_read is True and address is not None:
         try:
-            return station.programmer.pom_read(cv, address=address).value
-        except RailctlError:
-            pass
+            return station.programmer.pom_read(cv, address=address).value, None
+        except RailctlError as exc:
+            reason = type(exc).__name__
+    if not use_programming_track:
+        return None, reason
     try:
-        return station.programmer.service_read(cv).value
-    except RailctlError:
-        return None
+        return station.programmer.service_read(cv).value, None
+    except RailctlError as exc:
+        return None, type(exc).__name__
 
 
-def _check_d9(station: Station) -> Check:
-    values = {cv: _best_effort_read(station, cv) for cv in IDENTITY_CVS}
+def _check_d9(station: Station, *, use_programming_track: bool) -> Check:
+    """Status vocabulary, which this check got wrong until a hardware run showed it:
+
+    * `"skip"` - no read path was even ATTEMPTED. That happens when POM read is
+      not proven and the programming track is disabled, so there was nothing to
+      try. A deliberate opt-out, which is what `"skip"` means here.
+    * `"unknown"` - a path WAS tried and no CV came back. The check ran and
+      established nothing. It previously said `"skip"` for this, which claims we
+      chose not to look.
+    * `"ok"` - at least one identity CV was read.
+
+    `use_programming_track` is honoured here and not only around D5-D8, because
+    `_best_effort_read` falls through to `service_read`, which drives the
+    programming track. Passing the flag down rather than gating the whole check
+    keeps the POM path available: reading identity over POM on the main track is
+    legitimate when POM read is proven, and `--no-programming-track` says nothing
+    against it.
+    """
+    results = {
+        cv: _best_effort_read(station, cv, use_programming_track=use_programming_track)
+        for cv in IDENTITY_CVS
+    }
+    values = {cv: value for cv, (value, _) in results.items()}
     family = decoder_family(values[DECODER_TYPE_CV])
     read_count = sum(1 for value in values.values() if value is not None)
+    reasons = sorted({reason for _, reason in results.values() if reason is not None})
     rendered = ", ".join(
         f"CV{cv}={values[cv]}" if values[cv] is not None else f"CV{cv}=?" for cv in IDENTITY_CVS
     )
-    status = "ok" if read_count else "skip"
-    return Check("D9", CHECK_TITLES["D9"], status, f"decoder family: {family}; {rendered}")
+    detail = f"decoder family: {family}; {rendered}"
+    if read_count:
+        return Check("D9", CHECK_TITLES["D9"], "ok", detail)
+    if not reasons:
+        attempted = "no read path was attempted: POM read is not proven"
+        if not use_programming_track:
+            attempted += " and the programming track is disabled"
+        return Check("D9", CHECK_TITLES["D9"], "skip", f"{detail}; {attempted}")
+    return Check("D9", CHECK_TITLES["D9"], "unknown", f"{detail}; every read failed ({reasons})")
 
 
 AddressFormOutcome = Literal["accepted", "rejected", "ambiguous"]
@@ -579,7 +613,7 @@ def run_probe(
         for check_id in ("D5", "D6", "D7", "D8"):
             checks.append(Check(check_id, CHECK_TITLES[check_id], "skip", skip_detail))
 
-    checks.append(_check_d9(station))
+    checks.append(_check_d9(station, use_programming_track=use_programming_track))
     checks.append(_check_d10(station, address=address, track_powered=track_powered))
     checks.append(_check_d11(station, address=address))
     checks.append(_check_d12(station, address=address))

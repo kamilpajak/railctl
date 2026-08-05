@@ -718,7 +718,33 @@ def test_d9_with_no_established_read_path_reports_family_unknown_never_ms(doctor
     d9 = report.check("D9")
     assert "unknown" in d9.detail
     assert "ms" not in d9.detail.lower().replace("unknown", "")
+    # "unknown", not "skip": every read path was TRIED and every one failed.
+    # "skip" would claim the doctor chose not to look, and a hardware run showed
+    # this check reporting exactly that after actually running.
+    assert d9.status == "unknown"
+    assert "every read failed" in d9.detail
+
+
+def test_d9_skips_the_programming_track_when_it_is_disabled(doctor_bench):
+    """`--no-programming-track` must stop D9 too, not only D5-D8.
+
+    `_best_effort_read` falls through to `service_read`, which drives the
+    programming track, and D9 runs AFTER run_probe's `exit_service_mode`
+    restored the power state - so an unguarded D9 could re-enter service mode
+    behind the operator's back. With no POM read proven either, nothing is
+    attempted at all, which is the one case that really is a "skip".
+    """
+    report = run_probe(
+        doctor_bench.station,
+        use_programming_track=False,
+        now_utc=lambda: "2026-08-05T00:00:00Z",
+    )
+    d9 = report.check("D9")
     assert d9.status == "skip"
+    assert "no read path was attempted" in d9.detail
+    # The proof is the wire, not the status string: no service-mode telegram
+    # may have been sent on D9's behalf.
+    assert not any(request[:1] in (b"\x22", b"\x23") for request in doctor_bench.sent)
 
 
 def test_d10_is_unknown_when_the_track_is_unpowered_without_power_on(doctor_bench):
