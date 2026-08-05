@@ -18,6 +18,7 @@ reenter.
 
 from __future__ import annotations
 
+import dataclasses
 import logging
 import threading
 import time
@@ -27,41 +28,56 @@ from typing import Final
 
 from railctl.envelope import Frame, hex_bytes
 from railctl.errors import (
+    LinkTimeout,
     ProtocolError,
     RailctlError,
+    StationError,
     TrackPowerError,
     TransportError,
     UnsupportedCommandError,
+    UnsupportedFeatureError,
 )
 from railctl.link import Link
 from railctl.station.capabilities import LEARNABLE_FIELDS, UNKNOWN_IDENTITY, Capabilities
 from railctl.station.timing import TIMING, Timing
 from railctl.station.types import StationEvent
 from railctl.transport import open_link
-from railctl.xbus import replies
+from railctl.xbus import commands, replies
+from railctl.xbus.address import LOCO_ADDR_MAX, LOCO_ADDR_MIN
 from railctl.xbus.commands import (
+    FUNCTION_BITS,
+    GROUP_FUNCTIONS,
+    MAX_FUNCTION,
+    FunctionAction,
+    FunctionGroup,
     cmd_emergency_stop_all,
     cmd_emergency_stop_loco,
     cmd_station_status,
     cmd_station_version,
     cmd_track_power_off,
     cmd_track_power_on,
+    pack_function_bits,
 )
 from railctl.xbus.dialect import DIVERGENCE_BAND, XPRESSNET
 from railctl.xbus.replies import (
+    EXTENDED_LOCO_INFO_HEADERS,
     POWER_OFF,
     POWER_ON,
     REASON_CHECKSUM,
     REASON_LENGTH,
     UNSUPPORTED,
     EmergencyStopBroadcast,
+    FunctionState13To28,
+    GenericAck,
     InterfaceStatus,
+    LocoInfo,
     Other,
     Reply,
     ServiceModeEntry,
     StationStatus,
     StationVersion,
 )
+from railctl.xbus.speed import MAX_SPEED_STEP, Direction
 
 # 01 09 08 measured during D10 (docs/probe-results.md): the interface's answer when a request
 # was malformed on the way OUT, never a fact about the decoder or the station's support for an
@@ -100,6 +116,8 @@ class Station:
         self._version_cache: StationVersion | None = None
         self._dirty = False
         self._cache_clears: list[Callable[[], None]] = []
+        self._function_shadow: dict[int, dict[int, bool]] = {}
+        self.register_cache(self._function_shadow.clear)
 
     @classmethod
     def open(
@@ -237,6 +255,11 @@ class Station:
             if reply == UNSUPPORTED:
                 raise UnsupportedCommandError(
                     f"the station answered 61 82 to {hex_bytes(telegram)}: not supported"
+                )
+            if isinstance(reply, Other) and reply.telegram[0] in EXTENDED_LOCO_INFO_HEADERS:
+                raise UnsupportedFeatureError(
+                    f"{hex_bytes(telegram)} answered with an extended loco-info form "
+                    f"({reply.telegram[0]:02X}) this station has not been probed for"
                 )
             if isinstance(reply, Other):
                 if reply.reason in (REASON_CHECKSUM, REASON_LENGTH):
@@ -402,3 +425,191 @@ class Station:
             detail=f"undecoded broadcast: {telegram_hex}",
             payload={"telegram": telegram_hex},
         )
+
+    # -- drive, loco_info and functions --------------------------------------
+    def _validate_address(self, address: int) -> None:
+        """Validate `address` and, once per call, warn about the one band
+        where XpressNet and Z21 disagree.
+
+        This is NOT `resolve_address` - Task 2 already owns that name, and
+        it does something unrelated (substitute `default_address` for a
+        `None`). Every address this task's methods take is required, so
+        there is never a `None` to resolve here, only a value to check.
+
+        DIVERGENCE_BAND is a FIXED range - the two dialects always disagree
+        there - but the warning only fires while the threshold is still
+        unmeasured (`capabilities.loco_address_threshold is None`). Once a
+        doctor run has established it, the ambiguity this event exists to
+        flag is resolved, and repeating the warning would just be noise.
+        """
+        if not LOCO_ADDR_MIN <= address <= LOCO_ADDR_MAX:
+            raise ValueError(
+                f"loco address {address} out of range {LOCO_ADDR_MIN}..{LOCO_ADDR_MAX}"
+            )
+        if self.capabilities.loco_address_threshold is None and address in DIVERGENCE_BAND:
+            self.emit("address.band_unverified", {"address": address, "threshold": self.threshold})
+
+    def drive(self, address: int, speed: int, direction: Direction) -> None:
+        """speed 0..126 (0 is a braked stop); the drive telegram gets no
+        answer of its own, so the expected reply is the generic ack."""
+        if not 0 <= speed <= MAX_SPEED_STEP:
+            raise ValueError(f"speed {speed} out of range 0..{MAX_SPEED_STEP}")
+        self._validate_address(address)
+        telegram = commands.cmd_drive_128(address, speed, direction, threshold=self.threshold)
+        reply = self.exchange(telegram, timeout=self.timing.li_ack_normal)
+        self._expect_ack(reply)
+
+    def loco_info(self, address: int) -> LocoInfo:
+        """Never raises for `in_use_by_other` - another device holding this
+        locomotive blocks nothing here, it only gets reported."""
+        self._validate_address(address)
+        telegram = commands.cmd_loco_info(address, threshold=self.threshold)
+        reply = self.exchange(telegram, timeout=self.timing.li_ack_normal)
+        if not isinstance(reply, LocoInfo):
+            raise StationError(f"unexpected reply to loco info: {reply!r}")
+        info = dataclasses.replace(reply, address=address)
+        if info.in_use_by_other:
+            self.emit("loco.in_use_by_other", {"address": address})
+        return info
+
+    def _expect_ack(self, reply: object) -> None:
+        """The `Unsupported` (61 82) case is NOT handled here on purpose:
+        `exchange` already turned it into `UnsupportedCommandError` before
+        returning (Task 2's reply mapping), so by the time a reply reaches
+        this method it can never BE `Unsupported` - an `isinstance` branch
+        for it here is dead code that would show up as an uncovered branch
+        at the coverage gate. `test_drive_treats_a_refusal_as_unsupported_command`
+        still pins the refusal end to end; it just does so through
+        `exchange`, one layer below this method, which is where the refusal
+        is actually detected.
+        """
+        if isinstance(reply, GenericAck):
+            return
+        raise StationError(f"expected the generic ack, got {reply!r}")
+
+    def function_state(self, address: int, *, refresh: bool = False) -> dict[int, bool]:
+        """F0..F12 from loco_info(); F13..F28 from E3 09, best-effort.
+
+        A refused (61 82, which `exchange` has already turned into
+        `UnsupportedCommandError` by the time it reaches here) or silent
+        (`LinkTimeout`) E3 09 both leave keys 13..28 ABSENT from the result -
+        never False. Absence read as a negative fact is the exact failure
+        mode this project exists to stop, and it would happen here first:
+        the group write path below trusts this dict completely, so a
+        wrongly-defaulted False would blind-clear a function nobody ever
+        measured. The two exceptions are read the same way here - "we could
+        not read F13..F28" - even though one is a real answer and the other
+        is silence; what they share is that neither entitles this method to
+        invent a value.
+        """
+        if not refresh and address in self._function_shadow:
+            return dict(self._function_shadow[address])
+        info = self.loco_info(address)
+        state: dict[int, bool] = dict(enumerate(info.function_bits))
+        telegram = commands.cmd_function_state_13_28(address, threshold=self.threshold)
+        try:
+            reply = self.exchange(telegram, timeout=self.timing.li_ack_normal)
+        except (LinkTimeout, UnsupportedCommandError):
+            reply = None
+        if isinstance(reply, FunctionState13To28):
+            for function in GROUP_FUNCTIONS[FunctionGroup.G4]:
+                state[function] = bool(reply.f13_f20 & (1 << FUNCTION_BITS[function][1]))
+            for function in GROUP_FUNCTIONS[FunctionGroup.G5]:
+                state[function] = bool(reply.f21_f28 & (1 << FUNCTION_BITS[function][1]))
+        self._function_shadow[address] = dict(state)
+        return dict(state)
+
+    def forget_loco(self, address: int) -> None:
+        """Drop one address's function shadow - the next read starts fresh."""
+        self._function_shadow.pop(address, None)
+
+    def _require_function_capability(self, function: int, *, single_function_path: bool) -> None:
+        group = FUNCTION_BITS[function][0]
+        if group not in (FunctionGroup.G4, FunctionGroup.G5):
+            return
+        if single_function_path:
+            # single_function_cmd is already True to have reached this path,
+            # and E4 F8 needs nothing more for F13..F28 - unlike the group
+            # path, it never touches the other seven functions in the group.
+            return
+        if self.capabilities.function_groups_4_5 is not True:
+            raise UnsupportedFeatureError(
+                f"F{function} (group {group.name}) needs function_groups_4_5, "
+                "which this station has not confirmed"
+            )
+
+    def _function_set_group_path(
+        self, address: int, function: int, on: bool, *, force_group: bool
+    ) -> None:
+        group = FUNCTION_BITS[function][0]
+        state = self.function_state(address, refresh=True)
+        # `function` gets its real requested value here, before `missing` is
+        # computed, so the function being written is never counted among the
+        # ones this call has to seed - it is known, by the caller's own hand.
+        state[function] = on
+        missing = [f for f in GROUP_FUNCTIONS[group] if f not in state]
+        if missing and not force_group:
+            raise StationError(
+                f"F{function} shares group {group.name} with F{missing}, whose state "
+                "has not been read; a blind write would clobber them",
+                hint="--force-group",
+            )
+        if missing:
+            for f in missing:
+                state[f] = False
+            self.emit(
+                "function.group_seeded",
+                {"address": address, "group": group.name, "functions": tuple(missing)},
+            )
+        bits = pack_function_bits(group, state)
+        telegram = commands.cmd_function_group(address, group, bits, threshold=self.threshold)
+        reply = self.exchange(telegram, timeout=self.timing.li_ack_normal)
+        self._expect_ack(reply)
+        self._function_shadow[address] = state
+
+    def function_set(
+        self, address: int, function: int, on: bool, *, force_group: bool = False
+    ) -> None:
+        if not 0 <= function <= MAX_FUNCTION:
+            raise ValueError(f"function {function} out of range 0..{MAX_FUNCTION}")
+        single = self.capabilities.single_function_cmd is True
+        self._require_function_capability(function, single_function_path=single)
+        if single:
+            # No shadow, no read-modify-write: this touches exactly one
+            # function, so a stale shadow can never switch off a function
+            # another throttle turned on.
+            action = FunctionAction.ON if on else FunctionAction.OFF
+            telegram = commands.cmd_function_single(
+                address, function, action, threshold=self.threshold
+            )
+            reply = self.exchange(telegram, timeout=self.timing.li_ack_normal)
+            self._expect_ack(reply)
+            return
+        self._function_set_group_path(address, function, on, force_group=force_group)
+
+    def function_toggle(self, address: int, function: int, *, force_group: bool = False) -> bool:
+        """Read the current value, send an explicit ON or OFF - never the
+        TOGGLE wire action - and return the new value as a fact, not a
+        guess. Raises StationError, sending nothing, when the state cannot
+        be read at all."""
+        if not 0 <= function <= MAX_FUNCTION:
+            raise ValueError(f"function {function} out of range 0..{MAX_FUNCTION}")
+        single = self.capabilities.single_function_cmd is True
+        self._require_function_capability(function, single_function_path=single)
+        state = self.function_state(address, refresh=True)
+        if function not in state:
+            raise StationError(
+                f"F{function} state is unknown; a toggle cannot guess it",
+                hint="--force-group",
+            )
+        new_value = not state[function]
+        if single:
+            action = FunctionAction.ON if new_value else FunctionAction.OFF
+            telegram = commands.cmd_function_single(
+                address, function, action, threshold=self.threshold
+            )
+            reply = self.exchange(telegram, timeout=self.timing.li_ack_normal)
+            self._expect_ack(reply)
+            return new_value
+        self._function_set_group_path(address, function, new_value, force_group=force_group)
+        return new_value
