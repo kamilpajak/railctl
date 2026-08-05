@@ -39,6 +39,20 @@ uv run pytest -m hardware -s      # needs the YD7010 attached; deselected by def
 - **`transport.written` holds framed bytes**, prefix included, because that is what `Link.write()` was given. Comparing it against a bare telegram silently never matches.
 - **CV numbering conventions disagree and all four live in `xbus/cv.py`.** POM (`E6 30`) and Z21 (`23 11`) are zero-based; Lenz direct (`22 15`) and extended (`22 18`–`1B`) are one-based. A request can be zero-based and its echo one-based in the same exchange.
 - **`tools/probe/` is frozen M1 output.** Its mutation baseline in `docs/test-hardening.md` was measured against that exact AST; do not reformat it for a lint rule.
+- **The port's baud rate goes through `getattr(termios, f"B{rate}")`, never the literal.** On Darwin the constant equals the literal, so the literal worked locally and failed on every CI run — Linux speed constants are small indices and `tcsetattr` rejects the literal with `EINVAL`.
+
+## Checking CI
+
+Read the run's conclusion, not a shell exit status:
+
+```
+gh run view <id> --json conclusion --jq '.conclusion'
+gh pr checks <n>
+```
+
+**Never pipe `gh run watch --exit-status` into `tail` or `head`.** A pipeline exits with the status of its last command, so the pipe returns 0 whatever the run did — and a red build gets reported as green. This has happened here; a whole milestone merged with `main` red underneath it.
+
+The same trap applies to any check where the interesting result is on stdout and the verdict is in the exit status.
 
 ## Hardware
 
