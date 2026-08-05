@@ -24,6 +24,7 @@ import pytest
 from railctl.station.doctor import (
     CHECK_IDS,
     CHECK_TITLES,
+    _check_d0,
     exit_code_for_report,
     run_probe,
 )
@@ -162,11 +163,22 @@ def test_d0_records_link_description_and_identity_and_drains(doctor_bench):
     assert doctor_bench.link.poll(0.0) == []
 
 
+def test_d0_drains_before_any_exchange(doctor_bench):
+    """D0's drain must be observable before D1/D2 pump the link on their own
+    solicited exchanges - otherwise a deleted `station.link.drain()` call is
+    indistinguishable from one that ran, since D1/D2's own polling would
+    dispatch the pushed broadcast anyway."""
+    doctor_bench.push(encode(0x81, 0x00))
+    _check_d0(doctor_bench.station)
+    assert doctor_bench.link.poll(0.0) == []
+
+
 def test_d1_records_xpressnet_version_and_station_id(doctor_bench):
     report = run_probe(doctor_bench.station, now_utc=lambda: "2026-08-05T00:00:00Z")
     assert report.check("D1").status == "ok"
     assert report.capabilities.xpressnet_version == "4.0"
     assert report.capabilities.command_station_id == 0x12
+    assert report.capabilities.probed_at == "2026-08-05T00:00:00Z"
 
 
 def test_d2_decodes_the_status_bits(doctor_bench):
@@ -200,3 +212,4 @@ def test_d3_powers_on_when_allowed_and_the_reread_confirms_it(doctor_bench):
     )
     assert report.check("D3").status == "ok"
     assert "turned on" in report.check("D3").detail
+    assert cmd_track_power_on() in doctor_bench.sent
