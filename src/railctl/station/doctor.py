@@ -217,22 +217,24 @@ def _service_probe(
     if isinstance(reply, Unsupported):
         return reply
     matcher = CvMatcher(encoding, cv)
-    try:
-        outcome = station.programmer.await_result(
-            matcher,
-            timeout=TIMING.service_result,
-            first_delay=TIMING.service_first_poll_delay,
-            interval=TIMING.service_poll_interval,
-            exchange_timeout=TIMING.li_ack_programming,
-            allow_poll=True,
-            ready_means_done=False,
-            context="service",
-        )
-    except UnsupportedCommandError:
-        # A 61 82 to the 21 10 result poll is the same refusal as a 61 82 to
-        # the read itself - the station can reject either half of the
-        # exchange, and both mean the same thing here.
-        return UNSUPPORTED
+    # No try/except UnsupportedCommandError here: CvProgrammer.await_result
+    # (programming.py:995-1005) catches that exception itself, around its own
+    # 21 10 31 poll, and explicitly documents "never raised past this loop" -
+    # a poll's 61 82 just switches the loop from polling to passive waiting,
+    # it is never treated as a durable capability verdict. Wrapping this call
+    # in the same except here was dead code that could never run, and its
+    # comment claimed the opposite of what programming.py's own comment says
+    # about the identical reply.
+    outcome = station.programmer.await_result(
+        matcher,
+        timeout=TIMING.service_result,
+        first_delay=TIMING.service_first_poll_delay,
+        interval=TIMING.service_poll_interval,
+        exchange_timeout=TIMING.li_ack_programming,
+        allow_poll=True,
+        ready_means_done=False,
+        context="service",
+    )
     if isinstance(outcome, (CvValue, NoAck)):
         return outcome
     return None  # a stray reply or TimedOut: inconclusive, not a capability verdict
@@ -362,7 +364,15 @@ def run_probe(
         )
     checks.append(d4_check)
 
-    if use_programming_track:
+    if use_programming_track and track_powered:
+        # Gated on the same `track_powered` D3 already established, not merely
+        # on the flag: entering service mode cuts main power, and leaving it
+        # again (exit_service_mode) unconditionally sends resume-operations
+        # (cmd_track_power_on()) to check the station left service mode -
+        # briefly re-energising the main track even when the operator never
+        # authorised power at all. D3 already recorded "unknown - re-run with
+        # --power-on" for an unpowered bench with no --power-on; driving the
+        # programming track here anyway would silently overrule that refusal.
         power_before = station.status().track_power
         try:
             checks.append(_check_d5(station))
@@ -372,6 +382,10 @@ def run_probe(
             checks.append(_check_d8(station, d4_noack=d4_noack, d5_passed=d5_passed))
         finally:
             station.programmer.exit_service_mode(restore_power=power_before)
+    elif use_programming_track:
+        detail = "track power is off; re-run with --power-on to run D5-D8"
+        for check_id in ("D5", "D6", "D7", "D8"):
+            checks.append(Check(check_id, CHECK_TITLES[check_id], "unknown", detail))
     else:
         skip_detail = "programming track disabled (--no-programming-track)"
         for check_id in ("D5", "D6", "D7", "D8"):
