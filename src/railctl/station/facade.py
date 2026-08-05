@@ -582,6 +582,15 @@ class Station:
             )
         bits = pack_function_bits(group, state)
         telegram = commands.cmd_function_group(address, group, bits, threshold=self.threshold)
+        # Drop whatever the `function_state(refresh=True)` call above just
+        # wrote for this address BEFORE the exchange is attempted, not
+        # after it succeeds: a write that raises - LinkTimeout included,
+        # CLAUDE.md's "silence is unknown" - must not leave that pre-write
+        # picture behind for the next function_state() to serve as a
+        # settled fact with no wire traffic. The freshly-validated `state`
+        # (with `function`'s new value already folded in) is only stored
+        # once the exchange and its ack both succeed.
+        self._function_shadow.pop(address, None)
         reply = self.exchange(telegram, timeout=self.timing.li_ack_normal)
         self._expect_ack(reply)
         self._function_shadow[address] = state
@@ -600,18 +609,22 @@ class Station:
                 # another throttle turned on. What it CAN do is leave a
                 # SHADOWED function stale - if `address` already had an
                 # entry from an earlier group read, that entry now
-                # disagrees with the station about `function` - so a
-                # successful write drops the shadow entirely rather than
-                # patching one key: dropping produces "unknown, re-read"
-                # on the next function_state() call, never a value this
+                # disagrees with the station about `function`. The drop
+                # happens BEFORE the exchange, not after a successful one:
+                # a write that raises - LinkTimeout included, CLAUDE.md's
+                # "silence is unknown" - must leave no entry behind either,
+                # or the next function_state() would serve the pre-write
+                # value as a settled fact with no wire traffic at all.
+                # Dropping unconditionally produces "unknown, re-read" on
+                # the next function_state() call, never a value this
                 # method only half-knows to be true.
+                self._function_shadow.pop(address, None)
                 action = FunctionAction.ON if on else FunctionAction.OFF
                 telegram = commands.cmd_function_single(
                     address, function, action, threshold=self.threshold
                 )
                 reply = self.exchange(telegram, timeout=self.timing.li_ack_normal)
                 self._expect_ack(reply)
-                self._function_shadow.pop(address, None)
                 return
             self._function_set_group_path(address, function, on, force_group=force_group)
 
@@ -634,15 +647,16 @@ class Station:
             new_value = not state[function]
             if single:
                 # Same reasoning as function_set's single-function branch:
-                # drop rather than patch, so a stale shadow can never
-                # answer with a value the write already changed.
+                # drop BEFORE the exchange, not after a successful one, so
+                # a write that raises (LinkTimeout included) leaves no
+                # stale entry for the shadow to answer from either.
+                self._function_shadow.pop(address, None)
                 action = FunctionAction.ON if new_value else FunctionAction.OFF
                 telegram = commands.cmd_function_single(
                     address, function, action, threshold=self.threshold
                 )
                 reply = self.exchange(telegram, timeout=self.timing.li_ack_normal)
                 self._expect_ack(reply)
-                self._function_shadow.pop(address, None)
                 return new_value
             # `state` above is already a fresh (refresh=True) read - pass
             # it through instead of letting the group path repeat the same

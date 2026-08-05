@@ -17,7 +17,12 @@ from __future__ import annotations
 
 import pytest
 
-from railctl.errors import StationError, UnsupportedCommandError, UnsupportedFeatureError
+from railctl.errors import (
+    LinkTimeout,
+    StationError,
+    UnsupportedCommandError,
+    UnsupportedFeatureError,
+)
 from railctl.xbus.speed import Direction
 
 ACK = b"\x01\x04\x05"
@@ -344,6 +349,54 @@ def test_function_set_single_path_drops_the_shadow_so_a_stale_value_is_never_rep
     fixture.expect(FUNCTION_STATE_REQUEST, UNSUPPORTED)
     fixture.station.function_state(3)
     assert len(fixture.sent) == 5
+
+
+def test_function_set_single_path_drops_the_shadow_on_a_timeout_too(bench_factory):
+    """The write's outcome can also be UNKNOWN, not just successful: silence
+    after the single-function telegram raises LinkTimeout (CLAUDE.md -
+    "Silence is unknown"). The shadow entry `function_state(3)` seeded a
+    moment earlier must not survive that either - if it did, the very next
+    function_state() would answer F0's OLD value as a settled False with no
+    wire traffic, even though the station may well have executed the write.
+    The drop has to happen before the exchange is attempted, not after it
+    succeeds, so a raise never skips it."""
+    fixture = bench_factory(single_function_cmd=True)
+    fixture.expect(LOCO_INFO_REQUEST, LOCO_INFO_REPLY_IDLE)
+    fixture.expect(FUNCTION_STATE_REQUEST, UNSUPPORTED)
+    state = fixture.station.function_state(3)
+    assert state[0] is False
+    assert len(fixture.sent) == 2
+
+    fixture.expect(FUNCTION_SINGLE_F0_ON, reply=b"")  # scripted silence -> LinkTimeout
+    with pytest.raises(LinkTimeout):
+        fixture.station.function_set(3, 0, True)
+    assert len(fixture.sent) == 3
+
+    fixture.expect(LOCO_INFO_REQUEST, LOCO_INFO_REPLY_IDLE)
+    fixture.expect(FUNCTION_STATE_REQUEST, UNSUPPORTED)
+    fixture.station.function_state(3)
+    assert len(fixture.sent) == 5
+
+
+def test_function_set_group_path_drops_the_shadow_on_a_timeout_too(bench):
+    """Same finding as above, group path: `_function_set_group_path` seeds
+    the shadow with the pre-write group state via its own
+    `function_state(refresh=True)` call moments before the group write. A
+    write that then raises LinkTimeout must not leave that pre-write entry
+    behind - it does not reflect `function`'s requested new value, and
+    serving it as fact would be wrong even though it came from a real
+    read."""
+    bench.expect(LOCO_INFO_REQUEST, LOCO_INFO_REPLY_IDLE)
+    bench.expect(FUNCTION_STATE_REQUEST, UNSUPPORTED)
+    bench.expect(FUNCTION_GROUP_G1_F0_ON, reply=b"")  # scripted silence -> LinkTimeout
+    with pytest.raises(LinkTimeout):
+        bench.station.function_set(3, 0, True)
+    assert len(bench.sent) == 3
+
+    bench.expect(LOCO_INFO_REQUEST, LOCO_INFO_REPLY_IDLE)
+    bench.expect(FUNCTION_STATE_REQUEST, UNSUPPORTED)
+    bench.station.function_state(3)
+    assert len(bench.sent) == 5
 
 
 # -- function_toggle() ---------------------------------------------------------
