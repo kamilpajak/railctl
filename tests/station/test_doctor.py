@@ -21,6 +21,7 @@ from typing import TYPE_CHECKING
 
 import pytest
 
+from railctl.station import doctor as doctor_module
 from railctl.station.doctor import (
     CHECK_IDS,
     CHECK_TITLES,
@@ -41,6 +42,7 @@ from railctl.xbus.commands import (
     cmd_service_result_request,
     cmd_station_status,
     cmd_station_version,
+    cmd_track_power_off,
     cmd_track_power_on,
     cmd_z21_cv_read,
 )
@@ -214,10 +216,18 @@ def test_d3_unpowered_without_power_on_is_unknown_not_a_failure(doctor_bench):
 
 
 def test_d3_powers_on_when_allowed_and_the_reread_confirms_it(doctor_bench):
+    """`use_programming_track=False`: with the D5-D8 batch disabled,
+    `exit_service_mode` never runs and so can never supply its own
+    `cmd_track_power_on()` (its unconditional resume-operations telegram) -
+    the only source of that telegram left in this run is D3's own
+    `station.power_on()`, which is exactly the claim this test pins."""
     doctor_bench.transport.on_write.set(cmd_station_status(), STATUS_REPLY_UNPOWERED)
     doctor_bench.transport.on_write.set(cmd_track_power_on(), encode(0x61, 0x01))
     report = run_probe(
-        doctor_bench.station, allow_power_on=True, now_utc=lambda: "2026-08-05T00:00:00Z"
+        doctor_bench.station,
+        allow_power_on=True,
+        use_programming_track=False,
+        now_utc=lambda: "2026-08-05T00:00:00Z",
     )
     assert report.check("D3").status == "ok"
     assert "turned on" in report.check("D3").detail
@@ -438,6 +448,17 @@ def test_d5_unsupported_records_service_direct_cv_false(doctor_bench):
     assert report.check("D5").status == "ok"
 
 
+def test_d5_noack_leaves_service_direct_cv_unknown_not_false(doctor_bench):
+    """Pinned regression, D5's own version of D7's noack test: a decoder
+    `61 13` on the programming track is a fact about the DECODER, not the
+    station's opcode support. Only a `61 82` may write `service_direct_cv`
+    False; a NoAck must leave the capability at None."""
+    doctor_bench.transport.on_write.queue_once(cmd_service_result_request(), NOACK_REPLY)
+    report = run_probe(doctor_bench.station, now_utc=lambda: "2026-08-05T00:00:00Z")
+    assert report.capabilities.service_direct_cv is None
+    assert report.check("D5").status == "unknown"
+
+
 def test_d6_probes_only_the_z21_read_opcode_never_the_write_one(doctor_bench):
     """Pinned: 23 11 only. 23 11 has no meaning in classic XpressNet, so a
     station that lacks it answers 61 82 and nothing happens; probing 24 12
@@ -466,6 +487,17 @@ def test_d6_unsupported_records_z21_cv_opcodes_false(doctor_bench):
     doctor_bench.transport.on_write.set(cmd_z21_cv_read(1), UNSUPPORTED_REPLY)
     report = run_probe(doctor_bench.station, now_utc=lambda: "2026-08-05T00:00:00Z")
     assert report.capabilities.z21_cv_opcodes is False
+
+
+def test_d6_noack_leaves_z21_cv_opcodes_unknown_not_false(doctor_bench):
+    """D6's version of the same D5/D7 regression: a `61 13` on the Z21 CV
+    read is a decoder fact, not a station one. queue_once_for, not
+    queue_once: D5 polls the identical 21 10 telegram first and would
+    otherwise drain this NoAck before D6 ever gets a turn."""
+    doctor_bench.transport.on_write.queue_once_for(cmd_z21_cv_read(1), NOACK_REPLY)
+    report = run_probe(doctor_bench.station, now_utc=lambda: "2026-08-05T00:00:00Z")
+    assert report.capabilities.z21_cv_opcodes is None
+    assert report.check("D6").status == "unknown"
 
 
 EXT_HIGH_PROBE_CV = 257  # first CV of page 1: 22 19 01, the design's own example
@@ -585,3 +617,77 @@ def test_d8_runs_after_d4_noack_and_d5_pass_and_reports_cv29_cv28(doctor_bench):
     assert d8.status == "ok"
     assert "CV29" in d8.detail and "CV28" in d8.detail
     assert "bit 3" in d8.detail
+
+
+def test_d5_through_d8_batch_calls_exit_service_mode_and_restores_power_on(doctor_bench):
+    """Pinned: the D5-D8 try/finally must call
+    `station.programmer.exit_service_mode` on the ordinary, no-exception
+    path. The default bench already has the track powered, so D3 itself
+    never sends `cmd_track_power_on()` - it only does that when it finds the
+    track OFF (see `_check_d3`) - so the only possible source of that
+    telegram in this run is `exit_service_mode`'s own unconditional
+    resume-operations call."""
+    run_probe(doctor_bench.station, now_utc=lambda: "2026-08-05T00:00:00Z")
+    assert cmd_track_power_on() in doctor_bench.sent
+
+
+def test_d5_through_d8_batch_restores_power_off_when_it_found_the_track_off(doctor_bench):
+    """Companion to the test above: `restore_power` must follow the power
+    state the batch actually found before it ran, not default to leaving
+    power on. `allow_power_on=True` lets D3 succeed - which is what opens the
+    `track_powered` gate the D5-D8 batch now shares with D3 - while the
+    persistent station-status reply keeps reporting unpowered throughout, so
+    `power_before` (read fresh right before the batch) still comes back
+    False, the same as a station that really was off when the batch started."""
+    doctor_bench.transport.on_write.set(cmd_station_status(), STATUS_REPLY_UNPOWERED)
+    doctor_bench.transport.on_write.set(cmd_track_power_on(), encode(0x61, 0x01))
+    run_probe(doctor_bench.station, allow_power_on=True, now_utc=lambda: "2026-08-05T00:00:00Z")
+    assert cmd_track_power_off() in doctor_bench.sent
+
+
+def test_d5_through_d8_batch_exits_service_mode_even_when_a_check_raises(doctor_bench, monkeypatch):
+    """Pinned: the try/finally must call `exit_service_mode` even when a
+    check raises past its own `except RailctlError` - a genuine bug in the
+    check, not a modelled protocol error. Skipping it would leave the
+    layout stuck off the main track until an unrelated command happens to
+    touch power (`exit_service_mode`'s own docstring). Monkeypatching
+    `_check_d5` is simpler and more direct than crafting a damaged reply
+    that happens to make production code raise something other than a
+    `RailctlError` subclass."""
+
+    def _raise(_station):
+        raise RuntimeError("boom")
+
+    monkeypatch.setattr(doctor_module, "_check_d5", _raise)
+    with pytest.raises(RuntimeError):
+        run_probe(doctor_bench.station, now_utc=lambda: "2026-08-05T00:00:00Z")
+    assert cmd_track_power_on() in doctor_bench.sent
+
+
+def test_d5_through_d8_report_unknown_when_track_is_off_without_power_on(doctor_bench):
+    """Pinned: entering service mode cuts main power, and leaving it again
+    unconditionally re-energises the main track through
+    `exit_service_mode`'s own resume-operations telegram - so the D5-D8
+    batch must not run at all when D3 refused to power the track on. Running
+    it anyway would silently overrule D3's own '--power-on' refusal and
+    briefly re-power a track the operator left off on purpose. Distinct from
+    `test_d5_through_d8_are_skipped_under_no_programming_track`: that one is
+    an explicit opt-out (`skip`), this one is an unmet precondition
+    (`unknown`), the same distinction D4 already makes for the same reason."""
+    doctor_bench.transport.on_write.set(cmd_station_status(), STATUS_REPLY_UNPOWERED)
+    report = run_probe(doctor_bench.station, now_utc=lambda: "2026-08-05T00:00:00Z")
+    for check_id in ("D5", "D6", "D7", "D8"):
+        check = report.check(check_id)
+        assert check.status == "unknown"
+        assert "power" in check.detail.lower()
+    assert report.capabilities.service_direct_cv is None
+    assert report.capabilities.z21_cv_opcodes is None
+    assert report.capabilities.service_ext_cv is None
+    # No service-mode telegram was sent at all - not even an entry attempt -
+    # and exit_service_mode never ran, so neither power telegram appears.
+    assert not any(
+        request.startswith(b"\x21\x10") or request[:1] == b"\x22" or request[:1] == b"\x23"
+        for request in doctor_bench.sent
+    )
+    assert cmd_track_power_on() not in doctor_bench.sent
+    assert cmd_track_power_off() not in doctor_bench.sent
