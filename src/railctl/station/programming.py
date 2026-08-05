@@ -40,11 +40,14 @@ from railctl.xbus.commands import (
     cmd_pom_read_byte,
     cmd_pom_write_byte,
     cmd_service_direct_read,
+    cmd_service_direct_write,
     cmd_service_ext_read,
+    cmd_service_ext_write,
     cmd_service_result_request,
     cmd_track_power_off,
     cmd_track_power_on,
     cmd_z21_cv_read,
+    cmd_z21_cv_write,
 )
 from railctl.xbus.cv import (
     CV_MIN,
@@ -431,8 +434,16 @@ class CvProgrammer:
                 self._station.emit("page.unverified", {"page": page, "mode": resolved_mode})
         self._pages[key] = (page, now)
 
-    def service_read_telegram(self, cv: int) -> tuple[bytes, CvEncoding, int]:
-        """Choose the wire encoding for a service-mode CV read.
+    def _service_encoding_for(self, cv: int) -> tuple[CvEncoding, int]:
+        """First encoding `SERVICE_ENCODING_ORDER` allows for `cv`, with its page
+        index (0 unless the encoding is `SERVICE_EXT`). Shared by
+        `service_read_telegram` and `service_write_telegram`, so a station that
+        answers `23 11` for reads answers `24 12` for writes through the
+        identical gate.
+
+        Every step requires its capability to be exactly `True` - `None` means
+        "not established", and an unprobed station never sends an opcode that
+        has not been observed to work.
 
         Z21 first, not third: measured on the reference station, the Z21
         16-bit opcode covers CV1..1024 in one unambiguous field and its
@@ -441,21 +452,19 @@ class CvProgrammer:
         all until separately polled with `21 10 31`; leading with it (the
         earlier order) means every read pays for a poll round trip the Z21
         opcode never needs.
-
-        Every step requires its capability to be exactly True. `None` means
-        "not established" - docs/probe-results.md distinguishes true, false
-        and unknown throughout - and an unprobed station never sends an
-        opcode that has not been observed to work.
         """
-        capabilities = self._station.capabilities
-        if capabilities.z21_cv_opcodes is True and cv <= MAX_CV_Z21:
-            return cmd_z21_cv_read(cv), CvEncoding.Z21_16BIT, 0
-        if capabilities.service_direct_cv is True and cv <= MAX_CV_DIRECT:
-            return cmd_service_direct_read(cv), CvEncoding.SERVICE_DIRECT, 0
-        if capabilities.service_ext_cv is True and cv <= MAX_CV_EXT:
-            page, _ = ext_cv_fields(cv)
-            return cmd_service_ext_read(cv), CvEncoding.SERVICE_EXT, page
-        if all(getattr(capabilities, name) is None for name, _ in SERVICE_ENCODING_ORDER):
+        caps = self._station.capabilities
+        for field_name, encoding in SERVICE_ENCODING_ORDER:
+            if getattr(caps, field_name) is not True:
+                continue
+            if encoding is CvEncoding.Z21_16BIT and cv <= MAX_CV_Z21:
+                return encoding, 0
+            if encoding is CvEncoding.SERVICE_DIRECT and cv <= MAX_CV_DIRECT:
+                return encoding, 0
+            if encoding is CvEncoding.SERVICE_EXT and cv <= MAX_CV_EXT:
+                page_index, _c = ext_cv_fields(cv)
+                return encoding, page_index
+        if all(getattr(caps, field_name) is None for field_name, _ in SERVICE_ENCODING_ORDER):
             raise CvOutOfRangeError(
                 f"CV{cv} is not reachable in service mode: no encoding has been "
                 f"probed on this command station (Z21 covers CV{CV_MIN}..{MAX_CV_Z21}, "
@@ -471,6 +480,25 @@ class CvProgrammer:
             hint="use `--mode pom`",
             cv=cv,
         )
+
+    def service_read_telegram(self, cv: int) -> tuple[bytes, CvEncoding, int]:
+        """Choose the wire encoding for a service-mode CV read."""
+        encoding, page_index = self._service_encoding_for(cv)
+        if encoding is CvEncoding.Z21_16BIT:
+            return cmd_z21_cv_read(cv), encoding, page_index
+        if encoding is CvEncoding.SERVICE_DIRECT:
+            return cmd_service_direct_read(cv), encoding, page_index
+        return cmd_service_ext_read(cv), encoding, page_index
+
+    def service_write_telegram(self, cv: int, value: int) -> tuple[bytes, CvEncoding, int]:
+        """Choose the wire encoding for a service-mode CV write, through the
+        same gate `service_read_telegram` uses."""
+        encoding, page_index = self._service_encoding_for(cv)
+        if encoding is CvEncoding.Z21_16BIT:
+            return cmd_z21_cv_write(cv, value), encoding, page_index
+        if encoding is CvEncoding.SERVICE_DIRECT:
+            return cmd_service_direct_write(cv, value), encoding, page_index
+        return cmd_service_ext_write(cv, value), encoding, page_index
 
     def exit_service_mode(self, *, restore_power: bool) -> None:
         """Leave service mode and restore the pre-operation track power state.
