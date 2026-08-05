@@ -388,7 +388,9 @@ class CvProgrammer:
                     f"the value is not usable",
                     cv=cv,
                 )
-            if outcome.raw_register in echo_candidates(CvEncoding.SERVICE_DIRECT, cv):
+            if cv <= MAX_CV_DIRECT and outcome.raw_register in echo_candidates(
+                CvEncoding.SERVICE_DIRECT, cv
+            ):
                 return CvResult(
                     cv=cv,
                     value=outcome.value,
