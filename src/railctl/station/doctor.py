@@ -31,11 +31,18 @@ from railctl.station.types import (
     DoctorReport,
     decoder_family,
 )
-from railctl.xbus.commands import cmd_service_direct_read, cmd_service_ext_read, cmd_z21_cv_read
+from railctl.xbus.commands import (
+    cmd_loco_info,
+    cmd_service_direct_read,
+    cmd_service_ext_read,
+    cmd_z21_cv_read,
+)
 from railctl.xbus.cv import CvEncoding
+from railctl.xbus.dialect import DIVERGENCE_BAND, XPRESSNET, Z21
 from railctl.xbus.replies import (
     UNSUPPORTED,
     CvValue,
+    LocoInfo,
     NoAck,
     Reply,
     StationStatus,
@@ -373,6 +380,38 @@ def _check_d9(station: Station) -> Check:
     return Check("D9", CHECK_TITLES["D9"], status, f"decoder family: {family}; {rendered}")
 
 
+def _check_d10(station: Station, *, address: int | None, track_powered: bool) -> Check:
+    if not track_powered:
+        detail = "track power is off; re-run with --power-on to verify D10"
+        return Check("D10", CHECK_TITLES["D10"], "unknown", detail)
+    resolved = _resolved_address(station, address)
+    if resolved is None or resolved not in DIVERGENCE_BAND:
+        detail = "no address in 100..127 given; pass --address in that range"
+        return Check("D10", CHECK_TITLES["D10"], "skip", detail)
+    try:
+        xpressnet_reply = station.exchange(
+            cmd_loco_info(resolved, threshold=XPRESSNET.long_address_threshold),
+            timeout=TIMING.li_ack_normal,
+        )
+        z21_reply = station.exchange(
+            cmd_loco_info(resolved, threshold=Z21.long_address_threshold),
+            timeout=TIMING.li_ack_normal,
+        )
+    except RailctlError as exc:
+        return Check("D10", CHECK_TITLES["D10"], "fail", str(exc))
+    xpressnet_ok, z21_ok = isinstance(xpressnet_reply, LocoInfo), isinstance(z21_reply, LocoInfo)
+    if xpressnet_ok == z21_ok:
+        detail = (
+            f"address {resolved} answers identically under both encodings; threshold unresolved"
+        )
+        return Check("D10", CHECK_TITLES["D10"], "ok", detail)
+    threshold = XPRESSNET.long_address_threshold if xpressnet_ok else Z21.long_address_threshold
+    station.record(loco_address_threshold=threshold)
+    form = "XpressNet (long from 100)" if xpressnet_ok else "Z21 (long from 128)"
+    detail = f"address {resolved} answers only the {form} form"
+    return Check("D10", CHECK_TITLES["D10"], "ok", detail)
+
+
 def run_probe(
     station: Station,
     *,
@@ -429,7 +468,8 @@ def run_probe(
             checks.append(Check(check_id, CHECK_TITLES[check_id], "skip", skip_detail))
 
     checks.append(_check_d9(station))
-    for check_id in CHECK_IDS[10:]:
+    checks.append(_check_d10(station, address=address, track_powered=track_powered))
+    for check_id in CHECK_IDS[11:]:
         checks.append(Check(check_id, CHECK_TITLES[check_id], "skip", _PLACEHOLDER_DETAIL))
     clock = now_utc or _iso_utc_now
     station.record(probed_at=clock())
