@@ -41,6 +41,17 @@ uv run pytest -m hardware -s      # needs the YD7010 attached; deselected by def
 - **`tools/probe/` is frozen M1 output.** Its mutation baseline in `docs/test-hardening.md` was measured against that exact AST; do not reformat it for a lint rule.
 - **The port's baud rate goes through `getattr(termios, f"B{rate}")`, never the literal.** On Darwin the constant equals the literal, so the literal worked locally and failed on every CI run — Linux speed constants are small indices and `tcsetattr` rejects the literal with `EINVAL`.
 
+## Proving a test is alive
+
+Break the production line the test covers, run **only that test's own file**, and report whether it
+went red. That is the whole evidence. Running the full suite for each mutation adds nothing and
+costs a lot: ten mutations against ~1600 tests is twenty full runs to learn what ten file-scoped
+runs already showed. Restore with `git checkout --`, and when every mutation you meant to make is
+done, run the full suite **once** with `PYTHONDONTWRITEBYTECODE=1`.
+
+A test that has never been seen to fail has not been shown to constrain anything. This is separate
+from mutation-testing tooling, which this project does not use at this stage.
+
 ## Checking CI
 
 Read the run's conclusion, not a shell exit status:
@@ -57,6 +68,10 @@ The same trap applies to any check where the interesting result is on stdout and
 ## Hardware
 
 The probe and the tools must **never write a decoder CV** unless the change explicitly asks for it, and a write must be read back to be believed — a station echo proves the station produced a value, not that the decoder kept it.
+
+**The status byte's bits 0 and 1 are the reverse of the Lenz spec** — bit 0 is emergency stop, bit 1
+is emergency off. Measured, not read; `docs/probe-results.md` has the table and the reasoning. Two
+manuals disagree here, and the states this bench normally sits in (`0x04`, `0x07`) fit both.
 
 `railctl` auto-detects the port; the CDC interface index picks the bus (1 LocoNet, 3 XpressNet, 5 telemetry). Do not read `TC` from the telemetry stream to decide whether a locomotive is present: it reports 0 mA for a standing sound decoder that is demonstrably alive.
 
