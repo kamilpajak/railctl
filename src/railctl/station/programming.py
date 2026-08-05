@@ -343,18 +343,43 @@ class CvProgrammer:
                 ready_means_done=True,
                 context="service",
             )
+            # Exhaustive on purpose, the way `_finish_service_read` is: success
+            # is `Ready` and nothing else. A silent `TimedOut` or an
+            # unrecognised outcome falling through here used to return
+            # `encoding` regardless - a service-mode write the station never
+            # answered came back `verified=True`, the exact "silence read as
+            # a hardware verdict" failure this project exists to catch.
+            no_ack_hint = (
+                "decoder did not acknowledge; sound decoders often fail "
+                "on a 750 mA programming track - use POM instead"
+            )
             if isinstance(outcome, NoAck):
                 raise DecoderNoAckError(
                     f"CV{cv} service-mode write: decoder did not acknowledge",
-                    hint=(
-                        "decoder did not acknowledge; sound decoders often fail "
-                        "on a 750 mA programming track - use POM instead"
-                    ),
+                    hint=no_ack_hint,
                     cv=cv,
                 )
-            if isinstance(outcome, ShortCircuit):
+            if isinstance(outcome, (ShortCircuit, TrackShortCircuit)):
                 raise ShortCircuitError(
                     f"short circuit on the programming track writing CV{cv}", cv=cv
+                )
+            if isinstance(outcome, (Busy, StationBusy)):
+                raise StationBusyError(f"station busy while writing CV{cv}", cv=cv)
+            if isinstance(outcome, TimedOut):
+                if outcome.saw_no_ack:
+                    raise DecoderNoAckError(
+                        f"CV{cv} service-mode write: decoder did not acknowledge",
+                        hint=no_ack_hint,
+                        cv=cv,
+                    )
+                raise DecoderNotRespondingError(
+                    f"no confirmation arrived for the CV{cv} service-mode write "
+                    f"within {self._station.timing.service_result} s",
+                    cv=cv,
+                )
+            if not isinstance(outcome, Ready):
+                raise DecoderNotRespondingError(
+                    f"unexpected reply writing CV{cv} in service mode: {outcome!r}", cv=cv
                 )
         finally:
             self.exit_service_mode(restore_power=power_before)
@@ -744,9 +769,9 @@ class CvProgrammer:
                         "POM CV write needs a locomotive address: pass --address or set a default"
                     )
                 self.ensure_page(address, resolved_mode, cv, page)
-                return self.pom_write(cv, value, address=address, verify=verify)
+                return self.pom_write(cv, value, address=address, verify=verify, page=page)
             self.ensure_page(None, resolved_mode, cv, page)
-            return self.service_write(cv, value, verify=verify)
+            return self.service_write(cv, value, verify=verify, page=page)
         except RailctlError:
             self.invalidate_pages()
             raise
@@ -1084,7 +1109,15 @@ class CvProgrammer:
             "CV29 bit 5 changes the answering address; a read-back would ask the wrong locomotive"
         )
 
-    def pom_write(self, cv: int, value: int, *, address: int, verify: bool) -> CvResult:
+    def pom_write(
+        self,
+        cv: int,
+        value: int,
+        *,
+        address: int,
+        verify: bool,
+        page: CvPage | None = None,
+    ) -> CvResult:
         started = self._station.now()
         blind = not verify or cv in BLIND_WRITE_CVS
         old_value: int | None = None
@@ -1103,9 +1136,21 @@ class CvProgrammer:
             # known True, to detect a bit-5 (long/short address) flip; every
             # other CV only needs this read when pom_read is unestablished.
             if capabilities.pom_read is None or cv == 29:
+                # Narrowed to the three failure shapes that genuinely mean "the
+                # probing read did not work" - a broken instrument, not a
+                # station capability. `TrackPowerError`, `IndexPageRequiredError`,
+                # `ShortCircuitError`, `CvVerifyError` and `ValueError` all
+                # propagate unchanged: each names a real fault of its own, and
+                # reporting it as "this station cannot verify POM writes" would
+                # hide it from the operator behind a capability verdict the
+                # station never gave.
                 try:
-                    old_value = self.pom_read(cv, address=address).value
-                except RailctlError:
+                    old_value = self.pom_read(cv, address=address, page=page).value
+                except (
+                    DecoderNotRespondingError,
+                    DecoderNoAckError,
+                    PomReadUnsupportedError,
+                ) as exc:
                     if self._station.capabilities.pom_read is True:
                         # A known-working capability failing once is a real
                         # fault (e.g. DecoderNotRespondingError), not grounds
@@ -1118,7 +1163,7 @@ class CvProgrammer:
                             "with `--no-verify` or use `--mode service`"
                         ),
                         cv=cv,
-                    ) from None
+                    ) from exc
             if cv == 29 and old_value is not None:
                 if (old_value ^ value) & (1 << CV29_LONG_ADDRESS_BIT):
                     blind = True
@@ -1143,10 +1188,10 @@ class CvProgrammer:
                 verified=False,
                 elapsed=self._station.now() - started,
             )
-        read = self.cv_read(cv, address=address, mode=ProgMode.POM)
+        read = self.cv_read(cv, address=address, mode=ProgMode.POM, page=page)
         if read.value != value:
             self._station.pause(self._station.timing.pom_write_settle)
-            read = self.cv_read(cv, address=address, mode=ProgMode.POM)
+            read = self.cv_read(cv, address=address, mode=ProgMode.POM, page=page)
             if read.value != value:
                 raise CvVerifyError(
                     f"CV{cv} write verification failed twice: expected {value}, "
@@ -1176,13 +1221,21 @@ class CvProgrammer:
             raise ProtocolError(f"expected a station status reply, got {reply!r}")
         return reply.track_power
 
-    def service_write(self, cv: int, value: int, *, verify: bool) -> CvResult:
+    def service_write(
+        self, cv: int, value: int, *, verify: bool, page: CvPage | None = None
+    ) -> CvResult:
         """Unlike `pom_write`, `verified=True` here does not come from a
         separate follow-up read: `_write_and_confirm`'s SERVICE branch already
         gets a decoder-level acknowledgement (`61 11`/`61 13`) for every CV,
         including CV1/8/17/18, so `BLIND_WRITE_CVS` - which exists to skip an
         unreliable POM re-read after a write that could change the answering
         address - has nothing to skip here. Blind means only `verify=False`.
+
+        `page` is accepted, not used: unlike `pom_write`, this method never
+        calls `cv_read` to verify, so there is no internal read whose own
+        `ensure_page` needs it. Kept only so `cv_write` can forward `page` to
+        either write method uniformly - `cv_write`'s own `ensure_page` call
+        already selected it before either method is reached.
         """
         started = self._station.now()
         blind = not verify

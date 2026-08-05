@@ -10,11 +10,13 @@ from railctl.errors import (
     DecoderNotRespondingError,
     IndexPageRequiredError,
     PomReadUnsupportedError,
+    ShortCircuitError,
+    StationBusyError,
     TrackPowerError,
     UnsupportedCommandError,
 )
 from railctl.station.capabilities import Capabilities
-from railctl.station.programming import PageKey
+from railctl.station.programming import PageKey, TimedOut
 from railctl.station.timing import TIMING
 from railctl.station.types import ADDRESS_CVS, CV29_LONG_ADDRESS_BIT, CvResult, ProgMode
 from railctl.xbus.codec import encode
@@ -656,6 +658,107 @@ def test_service_write_with_verify_false_is_blind(bench_factory, monkeypatch):
     assert set(payload) == {"cv", "value", "reason"}
 
 
+def test_service_write_raises_decoder_not_responding_when_the_wait_loop_times_out_silently(
+    bench_factory, monkeypatch
+):
+    """The review finding this pins: `_write_and_confirm`'s SERVICE branch used
+    to raise only on `NoAck`/`ShortCircuit` and fall through to `return
+    encoding` for everything else, so 95 s of complete silence (`TimedOut`,
+    exactly what `await_result` returns when the deadline passes with no
+    reply) came back as `verified=True` - a write the station never answered,
+    reported as confirmed. `saw_no_ack=False` is what makes this silence
+    rather than a negative answer, so the exception must be
+    `DecoderNotRespondingError`, not `DecoderNoAckError`.
+    """
+    bench = bench_factory(capabilities=make_capabilities(z21_cv_opcodes=True))
+    programmer = bench.station.programmer
+    bench.expect(cmd_station_status(), reply=STATUS_POWERED)
+    bench.expect(cmd_z21_cv_write(8, 145), reply=ACK)
+    monkeypatch.setattr(
+        programmer,
+        "await_result",
+        lambda *a, **k: TimedOut(polls=190, ready_streak=0, saw_no_ack=False),
+    )
+    monkeypatch.setattr(programmer, "exit_service_mode", lambda *, restore_power: None)
+    with pytest.raises(DecoderNotRespondingError):
+        programmer.service_write(8, 145, verify=True)
+
+
+def test_service_write_raises_decoder_no_ack_when_the_wait_loop_times_out_after_seeing_no_ack(
+    bench_factory, monkeypatch
+):
+    bench = bench_factory(capabilities=make_capabilities(z21_cv_opcodes=True))
+    programmer = bench.station.programmer
+    bench.expect(cmd_station_status(), reply=STATUS_POWERED)
+    bench.expect(cmd_z21_cv_write(8, 145), reply=ACK)
+    monkeypatch.setattr(
+        programmer,
+        "await_result",
+        lambda *a, **k: TimedOut(polls=190, ready_streak=0, saw_no_ack=True),
+    )
+    monkeypatch.setattr(programmer, "exit_service_mode", lambda *, restore_power: None)
+    with pytest.raises(DecoderNoAckError):
+        programmer.service_write(8, 145, verify=True)
+
+
+def test_service_write_raises_short_circuit_error_on_a_track_short_circuit(
+    bench_factory, monkeypatch
+):
+    """The same fall-through the review finding caught for `TimedOut` also
+    swallowed `TrackShortCircuit`: the ladder checked `isinstance(outcome,
+    ShortCircuit)` only, and `TrackShortCircuit` is a sibling class, not a
+    subclass, so a short circuit on the main track was reported as a
+    confirmed write too.
+    """
+    from railctl.xbus.replies import TrackShortCircuit
+
+    bench = bench_factory(capabilities=make_capabilities(z21_cv_opcodes=True))
+    programmer = bench.station.programmer
+    bench.expect(cmd_station_status(), reply=STATUS_POWERED)
+    bench.expect(cmd_z21_cv_write(8, 145), reply=ACK)
+    monkeypatch.setattr(programmer, "await_result", lambda *a, **k: TrackShortCircuit())
+    monkeypatch.setattr(programmer, "exit_service_mode", lambda *, restore_power: None)
+    with pytest.raises(ShortCircuitError):
+        programmer.service_write(8, 145, verify=True)
+
+
+def test_service_write_raises_station_busy_error_when_the_wait_loop_reports_busy(
+    bench_factory, monkeypatch
+):
+    from railctl.xbus.replies import StationBusy
+
+    bench = bench_factory(capabilities=make_capabilities(z21_cv_opcodes=True))
+    programmer = bench.station.programmer
+    bench.expect(cmd_station_status(), reply=STATUS_POWERED)
+    bench.expect(cmd_z21_cv_write(8, 145), reply=ACK)
+    monkeypatch.setattr(programmer, "await_result", lambda *a, **k: StationBusy())
+    monkeypatch.setattr(programmer, "exit_service_mode", lambda *, restore_power: None)
+    with pytest.raises(StationBusyError):
+        programmer.service_write(8, 145, verify=True)
+
+
+def test_service_write_raises_decoder_not_responding_on_an_unrecognised_outcome(
+    bench_factory, monkeypatch
+):
+    """The final catch-all, kept exhaustive on purpose: success is `Ready`
+    and nothing else, so anything `await_result` could hand back that is
+    not one of the named failure shapes still has to end in a raised
+    exception, never a silent `verified=True`.
+    """
+    from railctl.xbus.replies import PagedCvValue
+
+    bench = bench_factory(capabilities=make_capabilities(z21_cv_opcodes=True))
+    programmer = bench.station.programmer
+    bench.expect(cmd_station_status(), reply=STATUS_POWERED)
+    bench.expect(cmd_z21_cv_write(8, 145), reply=ACK)
+    monkeypatch.setattr(
+        programmer, "await_result", lambda *a, **k: PagedCvValue(raw_register=1, value=1)
+    )
+    monkeypatch.setattr(programmer, "exit_service_mode", lambda *, restore_power: None)
+    with pytest.raises(DecoderNotRespondingError, match="unexpected reply"):
+        programmer.service_write(8, 145, verify=True)
+
+
 # -- cv_write: mode dispatch ------------------------------------------------------
 
 
@@ -664,7 +767,7 @@ def test_cv_write_dispatches_to_pom_when_capabilities_allow(bench, monkeypatch):
     bench.station.learn(pom_read=True)
     calls: list[tuple[int, int, int, bool]] = []
 
-    def fake_pom_write(cv, value, *, address, verify):
+    def fake_pom_write(cv, value, *, address, verify, page=None):
         calls.append((cv, value, address, verify))
         return make_cv_result(cv=cv, value=value, operation="write", verified=verify)
 
@@ -679,7 +782,7 @@ def test_cv_write_dispatches_to_service_when_pom_is_unavailable(bench_factory, m
     programmer = bench.station.programmer
     calls: list[tuple[int, int, bool]] = []
 
-    def fake_service_write(cv, value, *, verify):
+    def fake_service_write(cv, value, *, verify, page=None):
         calls.append((cv, value, verify))
         return make_cv_result(
             cv=cv, value=value, mode=ProgMode.SERVICE, operation="write", verified=verify
@@ -691,8 +794,15 @@ def test_cv_write_dispatches_to_service_when_pom_is_unavailable(bench_factory, m
 
 
 def test_cv_write_requires_an_address_for_pom(bench):
+    """`match` pins this to `cv_write`'s own guard specifically. Without it,
+    deleting `cv_write`'s `if address is None: raise ValueError(...)` still
+    passes this test: `_write_and_confirm` (programming.py) has its own,
+    differently-worded `ValueError` for a POM write with no address ("POM CV
+    write needs a locomotive address"), so a bare `pytest.raises(ValueError)`
+    cannot tell which guard actually fired.
+    """
     bench.station.learn(pom_read=True)
-    with pytest.raises(ValueError):
+    with pytest.raises(ValueError, match="pass --address"):
         bench.station.programmer.cv_write(5, 10, address=None)
 
 
@@ -708,12 +818,52 @@ def test_cv_write_ensures_the_page_for_an_indexed_cv(bench, monkeypatch):
     monkeypatch.setattr(
         programmer,
         "pom_write",
-        lambda cv, value, *, address, verify: make_cv_result(
+        lambda cv, value, *, address, verify, page=None: make_cv_result(
             cv=cv, value=value, operation="write", verified=verify
         ),
     )
     programmer.cv_write(265, 7, address=ADDRESS, page=(10, 2))
     assert ensure_calls == [(ADDRESS, ProgMode.POM, 265, (10, 2))]
+
+
+def test_cv_write_verifies_an_indexed_pom_write_end_to_end(bench):
+    """The review finding this pins: `pom_write` had no `page` parameter, so
+    its own verify read - `self.cv_read(cv, address=address, mode=ProgMode.POM)`
+    - ran with `page=None` and tripped `IndexPageRequiredError` on CV265, an
+    indexed CV, even though `cv_write`'s own `ensure_page` call had already
+    selected and cached the very page this read needed. The write reached the
+    wire and then the operator was told to pass `--page`, which they already
+    had. Runs `pom_write`, `cv_read` and `pom_read` for real - nothing here
+    is stubbed except the wire replies - so a regression that drops `page`
+    from any of those calls raises `IndexPageRequiredError` again instead of
+    reaching the assertion below.
+    """
+    programmer = bench.station.programmer
+    bench.station.learn(pom_read=True, pom_echo_zero_based=True)
+    # select_page: write CV31/CV32, then (pom_read is known True) read them
+    # back to confirm the page selection stuck.
+    bench.expect(cmd_pom_write_byte(ADDRESS, 31, 10, threshold=THRESHOLD), reply=ACK)
+    bench.expect(cmd_pom_write_byte(ADDRESS, 32, 2, threshold=THRESHOLD), reply=ACK)
+    bench.expect(STATUS_REQUEST, reply=STATUS_POWER_ON)
+    bench.expect(
+        cmd_pom_read_byte(ADDRESS, 31, threshold=THRESHOLD), reply=encode(0x63, 0x14, 30, 10)
+    )
+    bench.expect(STATUS_REQUEST, reply=STATUS_POWER_ON)
+    bench.expect(
+        cmd_pom_read_byte(ADDRESS, 32, threshold=THRESHOLD), reply=encode(0x63, 0x14, 31, 2)
+    )
+    # the write itself
+    bench.expect(cmd_pom_write_byte(ADDRESS, 265, 7, threshold=THRESHOLD), reply=ACK)
+    # the verify read of CV265 - the exchange that used to raise
+    # IndexPageRequiredError before `page` reached it.
+    bench.expect(STATUS_REQUEST, reply=STATUS_POWER_ON)
+    bench.expect(
+        cmd_pom_read_byte(ADDRESS, 265, threshold=THRESHOLD), reply=encode(0x63, 0x15, 8, 7)
+    )
+
+    result = programmer.cv_write(265, 7, address=ADDRESS, page=(10, 2), verify=True)
+
+    assert result.verified is True
 
 
 def test_cv_write_invalidates_the_page_cache_on_any_failure(bench):
