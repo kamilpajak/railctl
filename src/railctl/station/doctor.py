@@ -16,7 +16,13 @@ from collections.abc import Callable
 from datetime import UTC, datetime
 from typing import TYPE_CHECKING, Final
 
-from railctl.errors import RailctlError
+from railctl.errors import (
+    DecoderNoAckError,
+    DecoderNotRespondingError,
+    PomReadUnsupportedError,
+    RailctlError,
+)
+from railctl.station.timing import TIMING
 from railctl.station.types import Check, DoctorReport
 from railctl.xbus.replies import StationStatus, StationVersion
 
@@ -119,6 +125,40 @@ def _check_d3(
     return Check("D3", CHECK_TITLES["D3"], "ok", "track power turned on"), True
 
 
+_SILENCE_NOTE: Final[str] = (
+    "POM read produced no result at all (neither 61 13 nor 61 82) after "
+    f"{TIMING.pom_read_attempts} attempts; recorded as unsupported from silence "
+    "rather than left unknown, or every AUTO operation would retry POM for "
+    "several seconds forever. Fix RailCom on the decoder and re-run the doctor."
+)
+
+
+def _check_d4(station: Station, *, address: int) -> tuple[Check, bool]:
+    try:
+        result = station.programmer.pom_read(PROBE_CV, address=address)
+    except PomReadUnsupportedError:
+        return Check("D4", CHECK_TITLES["D4"], "ok", "POM read unsupported (61 82)"), False
+    except DecoderNoAckError:
+        detail = (
+            "decoder answered 61 13 (no acknowledgement) on the operations track; "
+            "check RailCom wiring/configuration on the decoder and re-run the doctor"
+        )
+        return Check("D4", CHECK_TITLES["D4"], "unknown", detail), True
+    except DecoderNotRespondingError:
+        station.record(pom_read=False, pom_result_channel="none")
+        capabilities = station.capabilities.with_note(_SILENCE_NOTE)
+        station.record(notes=capabilities.notes)
+        return Check("D4", CHECK_TITLES["D4"], "ok", _SILENCE_NOTE), False
+    if result.value == PROBE_CV_VALUE:
+        detail = f"POM read confirmed (CV{PROBE_CV}={result.value})"
+    else:
+        detail = (
+            f"POM read confirmed, but CV{PROBE_CV}={result.value}, expected the ZIMO "
+            f"manufacturer id {PROBE_CV_VALUE} - verify this is a ZIMO decoder"
+        )
+    return Check("D4", CHECK_TITLES["D4"], "ok", detail), False
+
+
 def run_probe(
     station: Station,
     *,
@@ -130,9 +170,27 @@ def run_probe(
     checks: list[Check] = [_check_d0(station), _check_d1(station)]
     d2_check, status = _check_d2(station)
     checks.append(d2_check)
-    d3_check, _track_powered = _check_d3(station, status, allow_power_on=allow_power_on)
+    d3_check, track_powered = _check_d3(station, status, allow_power_on=allow_power_on)
     checks.append(d3_check)
-    for check_id in CHECK_IDS[4:]:
+
+    resolved_address = _resolved_address(station, address)
+    # `_d4_noack` (whether this run's D4 saw 61 13) is not consumed here yet -
+    # task-7c's D8 reads it to decide whether it may run at all. Capturing the
+    # tuple now, once, avoids reshaping every call site a second time later.
+    _d4_noack = False
+    if track_powered and resolved_address is not None:
+        d4_check, _d4_noack = _check_d4(station, address=resolved_address)
+    elif not track_powered:
+        d4_check = Check(
+            "D4", CHECK_TITLES["D4"], "unknown", "track power is off; re-run with --power-on"
+        )
+    else:
+        d4_check = Check(
+            "D4", CHECK_TITLES["D4"], "skip", "no locomotive address given; pass --address"
+        )
+    checks.append(d4_check)
+
+    for check_id in CHECK_IDS[5:]:
         checks.append(Check(check_id, CHECK_TITLES[check_id], "skip", _PLACEHOLDER_DETAIL))
     clock = now_utc or _iso_utc_now
     station.record(probed_at=clock())
