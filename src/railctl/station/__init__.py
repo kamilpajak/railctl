@@ -18,6 +18,7 @@ from railctl.station.capabilities import (
     Capabilities,
     ResultChannel,
 )
+from railctl.station.facade import Station
 from railctl.station.timing import TIMING, Timing
 from railctl.station.types import (
     ADDRESS_CVS,
@@ -74,6 +75,7 @@ __all__ = [
     "LocoInfo",
     "ProgMode",
     "ResultChannel",
+    "Station",
     "StationEvent",
     "StationStatus",
     "StationVersion",
