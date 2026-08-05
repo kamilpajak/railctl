@@ -34,6 +34,7 @@ from railctl.transport.fake import FakeTransport
 from railctl.xbus.codec import encode
 from railctl.xbus.commands import (
     cmd_pom_read_byte,
+    cmd_service_direct_read,
     cmd_service_result_request,
     cmd_station_status,
     cmd_station_version,
@@ -385,3 +386,49 @@ def test_d4_short_circuit_is_unknown_and_the_report_still_reaches_d12(doctor_ben
     assert "short circuit" in d4.detail.lower()
     assert report.capabilities.pom_read is None
     assert report.check("D12") is not None
+
+
+def test_d5_through_d8_are_skipped_under_no_programming_track(doctor_bench):
+    # D4 (POM, unrelated to use_programming_track) shares the same 21 10 31
+    # result-poll telegram D5-D8 use, so it is answered 61 82 here - D4
+    # settles on its own request without ever polling - and this test's
+    # "nothing 21 10/22/23-shaped was sent" assertion measures D5-D8 alone,
+    # not D4's ordinary POM traffic.
+    telegram = cmd_pom_read_byte(50, PROBE_CV, threshold=doctor_bench.station.threshold)
+    doctor_bench.transport.on_write.set(telegram, UNSUPPORTED_REPLY)
+    report = run_probe(
+        doctor_bench.station,
+        address=50,
+        use_programming_track=False,
+        now_utc=lambda: "2026-08-05T00:00:00Z",
+    )
+    for check_id in ("D5", "D6", "D7", "D8"):
+        check = report.check(check_id)
+        assert check.status == "skip"
+    assert report.capabilities.service_direct_cv is None
+    assert report.capabilities.z21_cv_opcodes is None
+    assert report.capabilities.service_ext_cv is None
+    # No service-mode telegram was sent at all - not even an entry attempt.
+    # doctor_bench.sent, not .transport.written: the latter is framed (an
+    # LI-USB header the envelope adds), so request[:1] would compare against
+    # the frame prefix instead of the telegram's own first byte.
+    assert not any(
+        request.startswith(b"\x21\x10") or request[:1] == b"\x22" or request[:1] == b"\x23"
+        for request in doctor_bench.sent
+    )
+
+
+def test_d5_success_records_service_direct_cv_true(doctor_bench):
+    doctor_bench.transport.on_write.queue_once(
+        cmd_service_result_request(), cv_reply(0x14, PROBE_CV, PROBE_CV_VALUE)
+    )
+    report = run_probe(doctor_bench.station, now_utc=lambda: "2026-08-05T00:00:00Z")
+    assert report.capabilities.service_direct_cv is True
+    assert report.check("D5").status == "ok"
+
+
+def test_d5_unsupported_records_service_direct_cv_false(doctor_bench):
+    doctor_bench.transport.on_write.set(cmd_service_direct_read(PROBE_CV), UNSUPPORTED_REPLY)
+    report = run_probe(doctor_bench.station, now_utc=lambda: "2026-08-05T00:00:00Z")
+    assert report.capabilities.service_direct_cv is False
+    assert report.check("D5").status == "ok"
