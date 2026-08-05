@@ -53,6 +53,11 @@ A capability recorded as absent because of a defect in the instrument measuring 
 
 - Commit style: Conventional Commits (`type(scope): description`). Never mention AI assistance in a commit message, body, or list.
 - Test and lint run through the existing venv: `.venv/bin/python -m pytest …`, `.venv/bin/python -m ruff check …`.
+- `pyproject.toml`'s `addopts` already carries `-q`, so the commands in this plan do not repeat it: a
+  second command-line `-q` takes the quiet level to 2, and at that level pytest prints no summary
+  line at all - the `N passed` this plan expects would never appear. The one place a doubled `-q`
+  is used on purpose is Task 3 Step 13, which demonstrates that exact silence for the mutation
+  runner's fixed `test-command`.
 - The 292 probe tests already in `tests/` must stay green through every task in this plan.
 - Git identity in this repo is already configured as `Kamil Pająk <kamilpajak@users.noreply.github.com>`.
 
@@ -1125,7 +1130,8 @@ class AmbiguousPort(TransportError):
 
 
 class PortBusy(TransportError):
-    """The port exists but another process holds it."""
+    """The port exists but could not be opened - another process holds it,
+    or permission was denied. The message carries the OS strerror either way."""
 
 
 class PortConfigError(TransportError):
@@ -1255,6 +1261,13 @@ def exit_code_for(exc: BaseException) -> int:
             return code
     return UNMAPPED_EXIT_CODE
 ```
+
+> Corrected after review: `PortBusy`'s docstring said only "another process holds
+> it", but `serial_posix.py`'s `open()` raises `PortBusy` for every `OSError`
+> that is not `FileNotFoundError`, including `PermissionError`. The docstring
+> now names both causes instead of describing one and silently covering the
+> other. No new error class, and the exception raised does not change - the
+> message already carries `strerror`, and both causes map to the same exit code.
 
 Note on codes 0, 2 and 8: they are never in `EXIT_CODES`. 0 is success, 2 is a Typer usage error or
 a plain `ValueError` from the facade, and 8 is partial success - all three are decided by
@@ -3083,7 +3096,7 @@ and still finish in well under a second.
 
 - [ ] **Step 9: Run the property file under the CI profile**
 
-Run: `HYPOTHESIS_PROFILE=ci .venv/bin/python -m pytest tests/unit/test_properties.py -q`
+Run: `HYPOTHESIS_PROFILE=ci .venv/bin/python -m pytest tests/unit/test_properties.py`
 
 Expected: PASS — 7 passed, at 500 examples each with a fixed seed.
 `test_the_loaded_profile_matches_the_environment` is the check that makes this step mean
@@ -3094,7 +3107,7 @@ random examples and at 500 fixed ones, so both runs pass either way.
 
 Then confirm the negative case, so the check is known to be able to fail:
 
-Run: `.venv/bin/python -m pytest tests/unit/test_properties.py -q -k loaded_profile`
+Run: `.venv/bin/python -m pytest tests/unit/test_properties.py -k loaded_profile`
 
 Expected: PASS — 1 passed. This is the same test under the `default` profile, where it now
 asserts `derandomize is False` and `max_examples == 100`. If it passed identically under
@@ -4047,7 +4060,7 @@ Expected: PASS — 93 passed.
 
 - [ ] **Step 8: Run the whole unit suite**
 
-Run: `.venv/bin/python -m pytest tests/unit -q`
+Run: `.venv/bin/python -m pytest tests/unit`
 
 Expected: PASS — 240 passed. That is 197 from this part (49 from Task 4, 55 from Task 5,
 93 from Task 6) on top of the 43 Task 1 and Task 2 already put in `tests/unit/`
@@ -4261,7 +4274,7 @@ def test_pack_function_bits_refuses_a_function_index_that_does_not_exist():
 
 - [ ] **Step 2: Run the tests to verify they fail**
 
-Run: `.venv/bin/python -m pytest tests/unit/test_xbus_commands.py -q`
+Run: `.venv/bin/python -m pytest tests/unit/test_xbus_commands.py`
 Expected: collection ERROR — `ModuleNotFoundError: No module named 'railctl.xbus.commands'`
 
 - [ ] **Step 3: Create the module with the headers, the function tables and `pack_function_bits`**
@@ -4437,7 +4450,7 @@ def pack_function_bits(group: FunctionGroup, state: Mapping[int, bool]) -> int:
 
 - [ ] **Step 4: Run the tests to verify they pass**
 
-Run: `.venv/bin/python -m pytest tests/unit/test_xbus_commands.py -q`
+Run: `.venv/bin/python -m pytest tests/unit/test_xbus_commands.py`
 Expected: PASS, 19 tests
 
 - [ ] **Step 5: Add the failing golden-vector tests for every encoder**
@@ -4567,7 +4580,7 @@ def test_the_emergency_stop_for_one_loco_is_the_dedicated_92_instruction():
 
 - [ ] **Step 6: Run the tests to verify they fail**
 
-Run: `.venv/bin/python -m pytest tests/unit/test_xbus_commands.py -q`
+Run: `.venv/bin/python -m pytest tests/unit/test_xbus_commands.py`
 Expected: collection ERROR — `ImportError: cannot import name 'cmd_drive_128' from 'railctl.xbus.commands'`
 
 - [ ] **Step 7: Implement the encoders**
@@ -4749,7 +4762,7 @@ def cmd_pom_write_bit(address: int, cv: int, bit: int, value: bool, *, threshold
 
 - [ ] **Step 8: Run the tests to verify they pass**
 
-Run: `.venv/bin/python -m pytest tests/unit/test_xbus_commands.py -q`
+Run: `.venv/bin/python -m pytest tests/unit/test_xbus_commands.py`
 Expected: PASS, 68 tests
 
 - [ ] **Step 9: Add the failing tests for `timeout_class`**
@@ -4846,7 +4859,7 @@ def test_every_service_mode_encoder_is_in_the_programming_table():
 
 - [ ] **Step 10: Run the tests to verify they fail**
 
-Run: `.venv/bin/python -m pytest tests/unit/test_xbus_commands.py -q`
+Run: `.venv/bin/python -m pytest tests/unit/test_xbus_commands.py`
 Expected: collection ERROR — `ImportError: cannot import name 'TimeoutClass' from 'railctl.xbus.commands'`
 
 - [ ] **Step 11: Implement `TimeoutClass` and `timeout_class`**
@@ -4897,7 +4910,7 @@ def timeout_class(telegram: bytes) -> TimeoutClass:
 
 - [ ] **Step 12: Run the tests to verify they pass**
 
-Run: `.venv/bin/python -m pytest tests/unit/test_xbus_commands.py -q`
+Run: `.venv/bin/python -m pytest tests/unit/test_xbus_commands.py`
 Expected: PASS, 96 tests
 
 - [ ] **Step 13: Prove the module obeys layering rule 2 (no CV arithmetic outside `cv.py`)**
@@ -5418,7 +5431,7 @@ def test_the_header_nibble_is_the_only_length_guard_parse_needs():
 
 - [ ] **Step 2: Run the tests to verify they fail**
 
-Run: `.venv/bin/python -m pytest tests/unit/test_xbus_replies.py -q`
+Run: `.venv/bin/python -m pytest tests/unit/test_xbus_replies.py`
 Expected: collection ERROR — `ModuleNotFoundError: No module named 'railctl.xbus.replies'`
 
 - [ ] **Step 3: Write the reply dataclasses and `parse`**
@@ -5915,7 +5928,7 @@ def parse(telegram: bytes) -> Reply:
 
 - [ ] **Step 4: Run the tests to verify they pass**
 
-Run: `.venv/bin/python -m pytest tests/unit/test_xbus_replies.py -q`
+Run: `.venv/bin/python -m pytest tests/unit/test_xbus_replies.py`
 Expected: PASS, 51 tests
 
 - [ ] **Step 5: Add the exhaustive dispatch test and its converse**
@@ -6115,7 +6128,7 @@ def test_the_loco_info_function_layout_agrees_with_the_command_byte_layout():
 
 - [ ] **Step 6: Run the new tests and see them pass**
 
-Run: `.venv/bin/python -m pytest tests/unit/test_xbus_replies.py -q`
+Run: `.venv/bin/python -m pytest tests/unit/test_xbus_replies.py`
 Expected: PASS, 57 tests
 
 - [ ] **Step 7: Prove the exhaustive test can fail — weaken one header comparison**
@@ -6128,14 +6141,14 @@ exactly header comparisons weakened from `==` to `>=` or `<=`. Edit
     if header == HDR_RESULT_5 and db0 <= DB_PAGED_RESULT:
 ```
 
-Run: `.venv/bin/python -m pytest tests/unit/test_xbus_replies.py -q -k dispatch_table`
+Run: `.venv/bin/python -m pytest tests/unit/test_xbus_replies.py -k dispatch_table`
 Expected: FAIL —
 `AssertionError: 16 misparsed pairs, first few: [('0x63', '0x0', 'Other', 'PagedCvValue'), ('0x63', '0x1', 'Other', 'PagedCvValue'), ...]`
 — the sixteen db0 values 0x00..0x0F that `<=` swallows and `==` does not.
 
 Then revert the line to `if header == HDR_RESULT_5 and db0 == DB_PAGED_RESULT:` and re-run:
 
-Run: `.venv/bin/python -m pytest tests/unit/test_xbus_replies.py -q`
+Run: `.venv/bin/python -m pytest tests/unit/test_xbus_replies.py`
 Expected: PASS, 57 tests
 
 - [ ] **Step 8: Prove the converse test can fail — add a header nobody documented**
@@ -6148,13 +6161,13 @@ final `return Other(telegram=telegram, reason="unknown_form")` in `parse`:
         return CvValue(raw_cv=data[0], value=0, ident=0x71, z21_form=False)
 ```
 
-Run: `.venv/bin/python -m pytest tests/unit/test_xbus_replies.py -q -k "outside_the_table or entitles"`
+Run: `.venv/bin/python -m pytest tests/unit/test_xbus_replies.py -k "outside_the_table or entitles"`
 Expected: FAIL, 2 tests — `test_no_header_pair_outside_the_table_produces_a_typed_reply` and
 `test_parse_only_claims_what_the_header_entitles_it_to`, the second reporting `71 aa`.
 
 Then delete those two lines and re-run:
 
-Run: `.venv/bin/python -m pytest tests/unit/test_xbus_replies.py -q`
+Run: `.venv/bin/python -m pytest tests/unit/test_xbus_replies.py`
 Expected: PASS, 57 tests
 
 - [ ] **Step 9: Prove no CV arithmetic escaped into the parser**
@@ -6306,7 +6319,7 @@ def test_the_table_is_not_silently_empty():
 
 - [ ] **Step 3: Run the tests to verify they fail**
 
-Run: `.venv/bin/python -m pytest tests/unit/test_xbus_vectors.py -q`
+Run: `.venv/bin/python -m pytest tests/unit/test_xbus_vectors.py`
 Expected: collection ERROR — `ModuleNotFoundError: No module named 'tests.vectors'`
 
 The module name in that message carries the `tests.` prefix because Task 1 made `tests/` a package. A bare `No module named 'vectors'` would mean the import in Step 2 was written as `from vectors import ...`, which cannot work under this layout — go back and fix the import rather than the expectation.
@@ -6580,7 +6593,7 @@ ALL_VECTORS: tuple[EncodeVector | DecodeVector, ...] = ENCODE_VECTORS + DECODE_V
 
 - [ ] **Step 5: Run the tests to verify they pass**
 
-Run: `.venv/bin/python -m pytest tests/unit/test_xbus_vectors.py -q`
+Run: `.venv/bin/python -m pytest tests/unit/test_xbus_vectors.py`
 Expected: PASS, 67 tests
 
 - [ ] **Step 6: Prove the self-consistency tests can fail**
@@ -6588,13 +6601,13 @@ Expected: PASS, 67 tests
 Edit `tests/vectors.py`, changing the `service_ext_read(1024)` row from `22 18 00 3A` to
 `22 18 00 3B`.
 
-Run: `.venv/bin/python -m pytest tests/unit/test_xbus_vectors.py -q -k xor`
+Run: `.venv/bin/python -m pytest tests/unit/test_xbus_vectors.py -k xor`
 Expected: FAIL, 1 test — `test_every_vector_carries_a_correct_xor[service_ext_read(1024)]`,
 `assert 58 == 59`.
 
 Restore `3A` and re-run:
 
-Run: `.venv/bin/python -m pytest tests/unit/test_xbus_vectors.py -q`
+Run: `.venv/bin/python -m pytest tests/unit/test_xbus_vectors.py`
 Expected: PASS, 67 tests
 
 - [ ] **Step 7: Write the failing encode and decode tests that consume the table**
@@ -6662,7 +6675,7 @@ def test_no_decode_row_raises(vector):
 
 - [ ] **Step 8: Run the tests and see them pass**
 
-Run: `.venv/bin/python -m pytest tests/unit/test_xbus_vectors.py -q`
+Run: `.venv/bin/python -m pytest tests/unit/test_xbus_vectors.py`
 Expected: PASS, 103 tests
 
 These tests cannot be seen red by writing them first: the encoders and the parser they consume
@@ -6677,14 +6690,14 @@ Both directions, one mutation each, each reverted before the next.
 **The encode direction.** Edit `src/railctl/xbus/commands.py` and change `cmd_service_ext_read` to
 use `EXT_READ_OPCODES[0]` unconditionally instead of `EXT_READ_OPCODES[page]`.
 
-Run: `.venv/bin/python -m pytest tests/unit/test_xbus_vectors.py -q -k service_ext_read`
+Run: `.venv/bin/python -m pytest tests/unit/test_xbus_vectors.py -k service_ext_read`
 Expected: FAIL, 1 test — `test_each_encoder_produces_the_bytes_in_the_table[service_ext_read(256)]`,
 showing `22 18 00` where `22 19 00` was expected. This is the exact confusion the row exists for:
 `22 18 00` is CV1024, not CV256.
 
 Revert the edit and re-run:
 
-Run: `.venv/bin/python -m pytest tests/unit/test_xbus_vectors.py -q`
+Run: `.venv/bin/python -m pytest tests/unit/test_xbus_vectors.py`
 Expected: PASS, 103 tests
 
 **The decode direction.** Edit `src/railctl/xbus/replies.py` and change the final line of `parse`
@@ -6692,7 +6705,7 @@ from `return Other(telegram=telegram, reason="unknown_form")` to
 `return Other(telegram=telegram, reason="length")` — a parser that files a well-formed telegram it
 does not recognise under the label meaning "the frame did not arrive".
 
-Run: `.venv/bin/python -m pytest tests/unit/test_xbus_vectors.py -q -k decode_row`
+Run: `.venv/bin/python -m pytest tests/unit/test_xbus_vectors.py -k decode_row`
 Expected: `1 failed, 11 passed` —
 `test_each_decode_row_parses_to_the_whole_object_in_the_table[unknown 71 AA]`, with
 `AssertionError: assert Other(telegram=b'q\xaa\xdb', reason='length') == Other(telegram=b'q\xaa\xdb', reason='unknown_form')`.
@@ -6706,12 +6719,12 @@ test module.)
 
 Revert the line and re-run:
 
-Run: `.venv/bin/python -m pytest tests/unit/test_xbus_vectors.py -q`
+Run: `.venv/bin/python -m pytest tests/unit/test_xbus_vectors.py`
 Expected: PASS, 103 tests
 
 - [ ] **Step 10: Run the whole suite so nothing in the probe collides**
 
-Run: `.venv/bin/python -m pytest -q`
+Run: `.venv/bin/python -m pytest`
 Expected: PASS — the 292 M1 probe tests, now under `tests/probe/`, plus every railctl test added
 by Tasks 1–9, with no `import file mismatch` error. Task 1 put an `__init__.py` in every test
 directory, so `tests.probe.test_commands` and `tests.unit.test_xbus_commands` are distinct module
@@ -6783,7 +6796,7 @@ over the whole table. No hardware needed." One command covers all three clauses,
 last task of M3, so it is checked here:
 
 ```bash
-.venv/bin/python -m pytest tests/unit/test_xbus_vectors.py -q
+.venv/bin/python -m pytest tests/unit/test_xbus_vectors.py
 ```
 
 Expected: `103 passed`. Read the three clauses off that run:
@@ -7019,16 +7032,29 @@ def test_a_stray_prefix_in_front_of_a_real_frame_does_not_swallow_it(env):
 
 
 def test_a_stray_prefix_further_into_the_buffer_still_resyncs(env):
-    """Mutation pinning. docs/test-hardening.md records the most serious survivor
-    in frames.py as the salvage scan starting at pos << 1 instead of pos + 1:
-    with the noise at the FRONT the doubled offset still lands near the frame,
-    and every test passed. With the noise further in it jumps past the frame and
-    nothing comes back at all.
+    """Mutation pinning for `_salvage_start`'s own offset arithmetic (`pos`
+    doubled to `pos << 1` instead of used directly), not the `_salvage(buffer,
+    pos + 1)` base-offset shape docs/test-hardening.md records for
+    tools/probe/frames.py - LiUsbEnvelope's scan has no base-offset argument to
+    mutate that way.
+
+    The real salvage offset has to land on an odd number, or `pos << 1` (which
+    is always even) can coincide with it by chance and the mutant hides behind
+    a green suite - that is exactly what happened when this test fed a stray
+    prefix at an even offset: `_complete_at(1 << 1)` found the same frame
+    `_complete_at(2)` would have, and the mutant passed. The extra `0xFF` here
+    pushes the real frame to offset 3 so the two expressions diverge.
     """
-    env.feed(b"\xff\xfe" + ACK + b"\xff\xfe" + b"\xff\xfe" + VERSION_REPLY)
+    env.feed(b"\xff\xfe" + ACK + b"\xff\xfe\xff" + b"\xff\xfe" + VERSION_REPLY)
     assert env.pop() == Frame(Kind.SOLICITED, ACK)
     assert env.pop() == Frame(Kind.SOLICITED, VERSION_REPLY)
     assert env.pop() is None
+    assert env.stats.bytes_dropped == 3
+
+> Corrected after review: the buffer above did not reach the odd offset the
+> docstring claims to test, so the printed block could not have killed the
+> `pos << 1` mutant it describes. The block above is the version that runs the
+> real salvage offset onto an odd number and actually kills that mutant.
 
 
 def test_an_incomplete_frame_with_nothing_behind_it_is_waited_for(env):
@@ -7246,7 +7272,7 @@ def test_the_framing_bytes_appear_only_where_they_are_allowed():
 
 - [ ] **Step 3: Run the tests to verify they fail**
 
-Run: `.venv/bin/python -m pytest tests/unit/test_envelope_liusb.py -q`
+Run: `.venv/bin/python -m pytest tests/unit/test_envelope_liusb.py`
 Expected: FAIL - `ModuleNotFoundError: No module named 'railctl.envelope'`
 
 If it says `No module named 'railctl'` instead, the M2 scaffolding task has not been run;
@@ -7529,12 +7555,12 @@ def envelope_factory(request):
 
 - [ ] **Step 7: Run the tests to verify they pass**
 
-Run: `.venv/bin/python -m pytest tests/unit/test_envelope_liusb.py tests/unit/test_envelope_isolation.py -q`
+Run: `.venv/bin/python -m pytest tests/unit/test_envelope_liusb.py tests/unit/test_envelope_isolation.py`
 Expected: PASS, 27 passed
 
 - [ ] **Step 8: Run the whole suite so the probe tests are not disturbed**
 
-Run: `.venv/bin/python -m pytest -q`
+Run: `.venv/bin/python -m pytest`
 Expected: PASS, the 292 M1 tests plus the new ones, 0 failed
 
 - [ ] **Step 9: Check formatting and lint**
@@ -7737,13 +7763,24 @@ def test_a_read_that_finds_bytes_does_not_advance_the_clock(env):
 
 
 def test_chunk_size_one_replays_worst_case_usb_fragmentation(env):
+    """Asserts the size of every individual piece, not just the reassembled total.
+
+    A FakeTransport that ignores chunk_size and hands back the whole frame on
+    the first read (then b"" on every read after) would satisfy a bare
+    `got == framed` check. Asserting each piece is exactly one byte long is
+    what actually proves fragmentation was replayed.
+    """
     transport = _open(chunk_size=1)
     framed = env.frame(Kind.SOLICITED, VERSION_REPLY)
     transport.queue(framed)
-    got = b""
-    for _ in range(len(framed)):
-        got += transport.read(256, 0.1)
-    assert got == framed
+    pieces = [transport.read(256, 0.1) for _ in range(len(framed))]
+    assert [len(piece) for piece in pieces] == [1] * len(framed)
+    assert b"".join(pieces) == framed
+
+> Corrected after review: accumulating into `got` and asserting `got == framed`
+> passes even when chunk_size is ignored entirely and the whole frame comes
+> back on the first read. The block above asserts the length of every
+> individual piece, which is what chunk_size is actually supposed to control.
 
 
 def test_max_write_splits_the_write_but_delivers_everything(env):
@@ -7807,7 +7844,7 @@ def test_script_pending_shows_what_was_never_sent(env):
 
 - [ ] **Step 2: Run the tests to verify they fail**
 
-Run: `.venv/bin/python -m pytest tests/unit/test_fake_transport.py -q`
+Run: `.venv/bin/python -m pytest tests/unit/test_fake_transport.py`
 Expected: FAIL - `ModuleNotFoundError: No module named 'railctl.transport'`
 
 - [ ] **Step 3: Write the `Transport` protocol**
@@ -8072,12 +8109,12 @@ def chunk_size(request):
 
 - [ ] **Step 6: Run the tests to verify they pass**
 
-Run: `.venv/bin/python -m pytest tests/unit/test_fake_transport.py -q`
+Run: `.venv/bin/python -m pytest tests/unit/test_fake_transport.py`
 Expected: PASS, 15 passed
 
 - [ ] **Step 7: Check the framing guard still holds and lint**
 
-Run: `.venv/bin/python -m pytest tests/unit/test_envelope_isolation.py -q && .venv/bin/python -m ruff format . && .venv/bin/python -m ruff check .`
+Run: `.venv/bin/python -m pytest tests/unit/test_envelope_isolation.py && .venv/bin/python -m ruff format . && .venv/bin/python -m ruff check .`
 Expected: `1 passed`, then `All checks passed!`
 
 `1 passed` here is the point of Step 1's `hex_bytes` rendering. If it reports `1 failed`
@@ -8091,7 +8128,7 @@ switch the guard off for every future edit to it.
 syntax error, a fixture name collision or an import that fails on a half-installed
 scaffolding breaks every one of them, and no gate so far has looked.
 
-Run: `.venv/bin/python -m pytest -q`
+Run: `.venv/bin/python -m pytest`
 Expected: PASS, the 292 M1 tests plus the new ones, 0 failed
 
 - [ ] **Step 9: Check the coverage gate before committing**
@@ -8325,6 +8362,18 @@ def test_a_timeout_does_not_flush_the_receive_buffer(station):
     """Flushing risks cutting a frame in half. A late reply is caught, counted as
     a stray by the next drain(), and KEPT.
 
+    The reply has to be sitting in the transport's receive buffer WHILE the
+    timeout budget is still running, not pushed in afterwards - otherwise a
+    flush_input() call inserted right before the raise would find nothing to
+    destroy and the test would stay green for the wrong reason. FakeTransport
+    burns the clock one _READ_SLICE at a time when there is nothing to read
+    (see FakeTransport.read), so the fake clock's sleep() is the one place a
+    test can land bytes exactly at the moment the budget runs out: the
+    injected sleep delivers the reply the instant the clock reaches the
+    deadline, and by then _pump has already decided remaining <= 0 and will
+    not call read() again to pick it up. That is what "sitting in the buffer
+    while the timeout is running" means here.
+
     docs/probe-results.md investigation R1 is a station that acknowledges a
     request and returns no result. The question there is whether something
     arrived late and what it was, so a counter alone is not enough: "one stray
@@ -8333,12 +8382,35 @@ def test_a_timeout_does_not_flush_the_receive_buffer(station):
     "POM read is slower than the budget".
     """
     station.open().expect(STATUS_REQUEST)
+    late_reply = station.envelope.frame(Kind.SOLICITED, STATUS_REPLY)
+    budget = 1.0
+    deadline = station.clock.monotonic() + budget
+    delivered = False
+    real_sleep = station.clock.sleep
+
+    def sleep_then_deliver_at_the_deadline(seconds: float) -> None:
+        real_sleep(seconds)
+        nonlocal delivered
+        if not delivered and station.clock.monotonic() >= deadline - 1e-9:
+            delivered = True
+            station.transport.queue(late_reply)
+
+    station.clock.sleep = sleep_then_deliver_at_the_deadline
     with pytest.raises(LinkTimeout):
-        station.link.request(STATUS_REQUEST, timeout=1.0)
-    station.push(Kind.SOLICITED, STATUS_REPLY)
+        station.link.request(STATUS_REQUEST, timeout=budget)
+    assert delivered, "the fake never reached the deadline; the timing rigging is broken"
     station.link.drain()
     assert station.link.stats().stray_replies == 1
     assert station.link.recent_late_replies() == [Frame(Kind.SOLICITED, STATUS_REPLY)]
+
+> Corrected after review: the printed version pushed the late reply only
+> AFTER the timeout had already been raised, so at flush time there was
+> nothing in the buffer to lose - inserting a `flush_input()` call right
+> before the `raise LinkTimeout(...)` in `link.py` left the whole suite green.
+> The block above rigs the fake clock to deliver the reply the instant the
+> deadline is crossed, so the bytes are genuinely sitting in the buffer while
+> the timeout is still running, and the same `flush_input()` insertion now
+> fails the test.
 
 
 def test_the_same_request_answered_first_with_silence_then_with_the_value(station):
@@ -8508,6 +8580,24 @@ def test_await_frame_that_never_matches_raises_link_timeout(station):
         station.link.await_frame(lambda f: False, timeout=1.0)
 
 
+def test_await_frame_files_a_non_matching_solicited_frame_as_a_late_reply(station):
+    """await_frame must mirror poll(): a solicited frame that does not match
+    the predicate is a late reply, not a frame silently thrown away. A
+    discarded frame leaves only a counter, and a counter cannot say what
+    arrived.
+    """
+    station.open()
+    station.push(Kind.SOLICITED, STATUS_REPLY)
+    station.push(Kind.SOLICITED, CV8_RESULT)
+    frame = station.link.await_frame(lambda f: f.payload[:2] == b"\x63\x14", timeout=1.0)
+    assert frame.payload == CV8_RESULT
+    assert station.link.recent_late_replies() == [Frame(Kind.SOLICITED, STATUS_REPLY)]
+
+> Added after review: `await_frame` used to drop a non-matching solicited frame
+> on the floor while `poll()` filed the same thing in `self._late`. This test
+> pins the fix in the `await_frame` block above.
+
+
 def test_link_never_logs_wire_bytes(station, caplog):
     """The envelope owns the wire log in both directions. Two loggers means the
     same frame printed twice, or once with the framing and once without.
@@ -8533,15 +8623,25 @@ def test_description_and_identity_come_from_the_transport(station):
     assert station.link.identity == "fake"
 
 
+def test_close_closes_the_transport(station):
+    station.open()
+    station.link.close()
+    assert station.transport.is_open is False
+
+
 def test_the_budgets_are_the_documented_ones():
     assert DEFAULT_TIMEOUT == 5.0
     assert PROGRAMMING_TIMEOUT == 95.0
     assert HANDSHAKE_TIMEOUT == 2.0
 ```
 
+> Added after review: `close()` had no test at all - coverage reported its two
+> lines as the only uncovered body in `link.py`. The block above closes that
+> gap.
+
 - [ ] **Step 2: Run the tests to verify they fail**
 
-Run: `.venv/bin/python -m pytest tests/unit/test_link.py -q`
+Run: `.venv/bin/python -m pytest tests/unit/test_link.py`
 Expected: FAIL - `ModuleNotFoundError: No module named 'railctl.link'`
 
 - [ ] **Step 3: Implement `Link`**
@@ -8771,9 +8871,7 @@ class Link:
                     remaining = deadline - self._clock.monotonic()
                     if remaining <= 0:
                         self._timeouts += 1
-                        raise LinkTimeout(
-                            f"no matching frame within {timeout} s; {self.stats()}"
-                        )
+                        raise LinkTimeout(f"no matching frame within {timeout} s; {self.stats()}")
                     self._envelope.feed(
                         self._transport.read(_READ_CHUNK, min(remaining, _READ_SLICE))
                     )
@@ -8782,6 +8880,17 @@ class Link:
                     self._dispatch(frame)
                 if match(frame):
                     return frame
+                if frame.kind is Kind.SOLICITED:
+                    # Mirrors poll(): a solicited frame that does not match is
+                    # a late reply, not silence. Keep the bytes - see
+                    # recent_late_replies().
+                    self._late.append(frame)
+
+> Corrected after review: the printed version dropped a solicited frame that
+> did not match, on the wire but nowhere else, while `poll()` a few lines down
+> files the same frame in `self._late`. A discarded frame leaves only a
+> counter, and a counter cannot say what arrived - so `await_frame` now mirrors
+> `poll()` instead of silently discarding.
 
     def poll(self, timeout: float = 0.0) -> list[Frame]:
         with self._lock:
@@ -8892,20 +9001,31 @@ class Link:
             return
         try:
             self._on_event(frame)
-        except Exception:  # noqa: BLE001 - a bad callback must not lose a reply
+        except Exception:  # a bad callback must not lose a reply
             _log.warning("on_event callback raised for %r", frame, exc_info=True)
 ```
 
+> Corrected after review: BLE (flake8-bugbear's blind-except code) is not in
+> this repo's ruff `select` list, so the `# noqa: BLE001` above was dead and
+> RUF100 (unused noqa) flagged it. The committed code carries a plain comment
+> instead - the exception handling itself does not change.
+
 - [ ] **Step 4: Run the tests to verify they pass**
 
-Run: `.venv/bin/python -m pytest tests/unit/test_link.py -q`
-Expected: PASS, 48 passed. The file defines 27 test functions: 21 take the `station` fixture
-and so run twice, whole-frame and byte-at-a-time (42), and 6 take no fixture parameter, so
-21 * 2 + 6 = 48.
+Run: `.venv/bin/python -m pytest tests/unit/test_link.py`
+Expected: PASS, 52 passed. The file defines 29 test functions: 23 take the `station` fixture
+and so run twice, whole-frame and byte-at-a-time (46), and 6 take no fixture parameter, so
+23 * 2 + 6 = 52.
+
+> Corrected after review: two tests were added to close review findings
+> (`test_close_closes_the_transport` and
+> `test_await_frame_files_a_non_matching_solicited_frame_as_a_late_reply`),
+> both taking the `station` fixture, which moves the count from 27/48 to
+> 29/52.
 
 - [ ] **Step 5: Run the whole suite and lint**
 
-Run: `.venv/bin/python -m pytest -q && .venv/bin/python -m ruff format . && .venv/bin/python -m ruff check .`
+Run: `.venv/bin/python -m pytest && .venv/bin/python -m ruff format . && .venv/bin/python -m ruff check .`
 Expected: `0 failed`, then `All checks passed!`
 
 - [ ] **Step 6: Check the coverage gate before committing**
@@ -8944,6 +9064,8 @@ git commit -m "feat(link): add the one-command link with retries, timeouts and s
 - Create: `src/railctl/transport/serial_posix.py`
 - Modify: `src/railctl/transport/__init__.py` - append below the `Transport` protocol block (end of file)
 - Create: `tests/unit/test_open_link.py`
+- Create: `tests/unit/test_serial_posix.py` (Step 3a - added when the review found `termios.error`
+  escaping untyped and `read()` unable to tell EOF from an idle port)
 - Create: `tests/hardware/test_m4_acceptance.py`
 - Not touched, and named here so nobody adds them back: `pyproject.toml` is **not** edited (Task 1 already registered the `hardware` marker and put `-m 'not hardware'` in `addopts`; a second `addopts` or `markers` key is a TOML parse error), and `tests/hardware/__init__.py` is **not** created (Task 1 created it). Step 7 verifies both instead of writing them a second time.
 
@@ -8970,13 +9092,17 @@ git commit -m "feat(link): add the one-command link with retries, timeouts and s
 `transport.open_link()` - is satisfied because `transport_for()` is the single place that
 looks inside the string, and nothing above `transport` may split it. `serial_posix.py` is the
 only module in `railctl` that owns a file descriptor and is omitted from coverage because it
-has no logic. The spec puts the budget at "~60 lines"; the file Step 3 writes measures **88**
+has no logic. The spec puts the budget at "~60 lines"; the file Step 3 writes measures **94**
 code lines by the count in Step 6 (non-blank, non-comment, docstring excluded), because the
 spec's estimate predates the error handling, the three properties and the context manager.
 **Step 6 fails above 95** - past that, logic has leaked into the one module coverage does not
 watch and belongs in `Link` or the envelope instead. `open_link` imports `Link` inside the function body: `link.py`
 type-hints `Transport` under `TYPE_CHECKING`, so a module-level import here would be the only
 edge closing the cycle.
+
+> Corrected after review: the figure was **88** before the review's `termios.error`
+> and end-of-file findings each added a handler to `open()` and `read()`. The
+> file now measures 94, still under the 95 budget this step enforces.
 
 - [ ] **Step 1: Write the failing target-grammar tests**
 
@@ -8986,12 +9112,18 @@ from __future__ import annotations
 
 import pytest
 
+import railctl.transport as transport_module
+from railctl.envelope import Kind
+from railctl.envelope.liusb import LiUsbEnvelope
 from railctl.errors import AmbiguousPort, PortNotFound, TransportError, UnsupportedFeatureError
-from railctl.transport import find_xpressnet_port, transport_for
+from railctl.transport import find_xpressnet_port, list_candidate_ports, open_link, transport_for
+from railctl.transport.fake import FakeClock, FakeTransport
 from railctl.transport.serial_posix import BAUDRATE, CDC_INDEX_HINT, SerialTransport
 
 PORT_43 = "/dev/cu.usbmodem7010A00011943"
 PORT_OTHER = "/dev/cu.usbmodemAAAA3"
+VERSION_REQUEST = b"\x21\x21\x00"
+VERSION_REPLY = b"\x63\x21\x40\x12\x10"
 
 # str(exc) is the message alone and exc.hint is the hint, because the CLI prints
 # them on separate lines (spec line 159). Anything asserted about advice is read
@@ -9058,11 +9190,70 @@ def test_an_unknown_target_names_the_forms_that_work():
 
 def test_the_baudrate_is_the_one_lenz_23151_specifies():
     assert BAUDRATE == 57600
+
+
+def test_list_candidate_ports_globs_the_xpressnet_pattern_and_sorts(monkeypatch):
+    """PORT_GLOB picks the CDC interface railctl talks to. Get the pattern wrong
+    - for example "*1", the silent LocoNet interface - and this is the only test
+    that would notice. sorted() is what decides which port AmbiguousPort names
+    first in its hint, so an unsorted glob.glob() result must come back sorted.
+    """
+    seen_patterns = []
+    unsorted = [PORT_OTHER, PORT_43]
+
+    def fake_glob(pattern):
+        seen_patterns.append(pattern)
+        return unsorted
+
+    monkeypatch.setattr(transport_module.glob, "glob", fake_glob)
+
+    result = list_candidate_ports()
+
+    assert seen_patterns == ["/dev/cu.usbmodem*3"]
+    assert result == sorted(unsorted)
+
+
+def test_z21_host_with_no_port_is_unsupported_not_malformed():
+    """z21:HOST with no explicit port is understood and refused, never a parse
+    error - Z21_DEFAULT_PORT must be filled in for the message.
+    """
+    with pytest.raises(UnsupportedFeatureError) as caught:
+        transport_for("z21:192.168.0.111")
+    assert "192.168.0.111:21105" in str(caught.value)
+
+
+def test_z21_host_with_trailing_colon_and_no_port_is_malformed():
+    with pytest.raises(TransportError):
+        transport_for("z21:192.168.0.111:")
+
+
+def test_transport_for_auto_uses_the_discovered_port(monkeypatch):
+    monkeypatch.setattr(transport_module, "list_candidate_ports", lambda: [PORT_43])
+
+    transport = transport_for("auto")
+
+    assert transport.identity == PORT_43
+
+
+def test_open_link_completes_the_handshake_through_a_fake_transport(monkeypatch):
+    envelope = LiUsbEnvelope()
+    fake = FakeTransport(clock=FakeClock())
+    fake.expect(
+        envelope.frame(Kind.SOLICITED, VERSION_REQUEST),
+        reply=envelope.frame(Kind.SOLICITED, VERSION_REPLY),
+    )
+    monkeypatch.setattr(transport_module, "transport_for", lambda target: fake)
+
+    link = open_link("auto")
+    try:
+        assert link.version_telegram == VERSION_REPLY
+    finally:
+        link.close()
 ```
 
 - [ ] **Step 2: Run the tests to verify they fail**
 
-Run: `.venv/bin/python -m pytest tests/unit/test_open_link.py -q`
+Run: `.venv/bin/python -m pytest tests/unit/test_open_link.py`
 Expected: FAIL - `ImportError: cannot import name 'find_xpressnet_port' from 'railctl.transport'`
 
 - [ ] **Step 3: Implement the serial transport**
@@ -9097,6 +9288,8 @@ from dataclasses import dataclass
 from railctl.errors import PortBusy, PortConfigError, PortNotFound, PortNotOpen, TransportError
 
 BAUDRATE = 57600
+# Suggested read size for callers; Link uses its own private _READ_CHUNK, a
+# second constant with the same value that can drift without anything noticing.
 READ_CHUNK = 256
 WRITE_SELECT_TIMEOUT = 1.0
 # Link quotes this whenever a handshake or an exchange fails on a serial port.
@@ -9152,6 +9345,9 @@ class SerialTransport:
             if (termios.tcgetattr(fd)[2] & termios.CSIZE) != termios.CS8:
                 raise PortConfigError(f"{self._config.port} silently rejected 8-N-1")
             termios.tcflush(fd, termios.TCIOFLUSH)
+        except termios.error as exc:
+            os.close(fd)
+            raise PortConfigError(f"{self._config.port} is not a serial device: {exc}") from exc
         except BaseException:
             os.close(fd)
             raise
@@ -9194,12 +9390,119 @@ class SerialTransport:
         if not select.select([fd], [], [], max(0.0, timeout))[0]:
             return b""
         try:
-            return os.read(fd, max_bytes)
+            data = os.read(fd, max_bytes)
         except BlockingIOError:
             return b""
         except OSError as exc:
             raise TransportError(f"read from {self._config.port} failed: {exc}") from exc
+        if not data:
+            # select() said readable, then os.read() returned nothing: that is
+            # end of file, not an idle port. Returning b"" here would read as
+            # silence one layer up and the real fault would only surface on the
+            # next write.
+            raise TransportError(f"{self._config.port} closed while reading")
+        return data
 ```
+
+> Corrected after review: three findings from the review of this file were
+> closed here.
+>
+> `termios.error` is not an `OSError` subclass, so it escaped `open()` untyped -
+> a bad path like `/dev/null` raised a bare `termios.error` instead of a
+> `RailctlError`, and the CLI printed a traceback instead of a message plus
+> hint. `except termios.error` is added before the `except BaseException`
+> cleanup arm, closing the fd itself before raising `PortConfigError` so the
+> cleanup is not lost by intercepting the exception earlier in the chain.
+>
+> `read()` could not tell a closed port from an idle one: on a pty with the
+> master closed, `os.read()` returns `b""` forever after `select()` reports
+> readable, which is end of file, not silence. Read the code path and weigh
+> this one - it is what the note below covers.
+>
+> `READ_CHUNK` is exported here and referenced nowhere; `link.py`'s private
+> `_READ_CHUNK` is the constant that actually governs reads. A comment now
+> says so at the definition, so the next reader does not assume changing one
+> changes the other.
+>
+> **Risk the owner must weigh, corrected after measurement**: the note here
+> previously claimed POSIX `read()` never returns zero bytes for a character
+> device in this driver class. That is backwards, and it does not hold on this
+> machine: with `VMIN=0` and `VTIME=0`, calling `os.read()` on an alive, idle
+> tty returns `b""` - it does **not** raise `BlockingIOError`. What actually
+> keeps the new `TransportError` from firing on a live, idle port is the
+> `select()` guard placed above the read, not anything about `read()` itself:
+> `select()` reports an alive idle tty as **not** readable, and only reports it
+> readable once bytes are waiting or the peer has hung up.
+>
+> That guard is load-bearing. Anyone who later simplifies it away - for
+> example, calling `os.read()` unconditionally and trusting the
+> `except BlockingIOError` branch below to cover the idle case - turns every
+> idle poll into a `TransportError`, because an idle tty does not raise
+> `BlockingIOError`; it returns `b""`, indistinguishable at that point from a
+> hung-up one. This is also why `except BlockingIOError: return b""` inside
+> `read()` is dead code for a tty either way, idle or hung-up: a real tty
+> returns `b""` rather than raising in both cases. It is kept only as a cheap
+> guard for a non-tty fd, so nobody deletes the wrong one of the two branches
+> believing it unreachable everywhere. `tests/unit/test_serial_posix.py`
+> (Step 3a) pins both the hang-up raise and the non-serial-device path on a
+> real pty, without needing the physical YD7010.
+
+- [ ] **Step 3a: Write the `serial_posix.py` unit tests the review findings needed**
+
+Lettered rather than renumbered so every later step in this task keeps the number it is already
+cited by elsewhere (Step 6, Step 7, Step 12, Step 13) - only this one step slots in.
+
+```python
+# tests/unit/test_serial_posix.py
+from __future__ import annotations
+
+import os
+
+import pytest
+
+from railctl.errors import PortConfigError, TransportError
+from railctl.transport.serial_posix import SerialConfig, SerialTransport
+
+
+def test_open_on_a_non_serial_device_raises_port_config_error():
+    """termios.error must not escape open() untyped. /dev/null exists, is not a
+    FileNotFoundError and not a permission error, but termios.tcgetattr() on it
+    raises termios.error - which is not a RailctlError and would otherwise print
+    a bare traceback instead of a message plus hint.
+    """
+    transport = SerialTransport(SerialConfig("/dev/null"))
+
+    with pytest.raises(PortConfigError, match="is not a serial device"):
+        transport.open()
+
+    assert transport.is_open is False
+
+
+def test_read_after_the_peer_hangs_up_raises_instead_of_looking_idle():
+    """A cable pulled between the write and the reply must not read as silence.
+
+    On a pty, closing the master makes the slave end of file: select() reports
+    readable and os.read() returns b"". Returning b"" here is indistinguishable
+    from an idle port, so a LinkTimeout ("silence") would fire instead of the
+    real fault, and it would only surface on the next write.
+    """
+    master_fd, slave_fd = os.openpty()
+    slave_path = os.ttyname(slave_fd)
+    os.close(slave_fd)
+
+    transport = SerialTransport(SerialConfig(slave_path))
+    transport.open()
+    try:
+        os.close(master_fd)
+        with pytest.raises(TransportError, match="closed while reading"):
+            transport.read(64, 1.0)
+    finally:
+        transport.close()
+```
+
+> Added when the review found two things this file's tests did not pin:
+> `termios.error` escaping `open()` untyped, and `read()` unable to tell a
+> hung-up port from an idle one.
 
 - [ ] **Step 4: Implement discovery and `open_link`**
 
@@ -9296,8 +9599,13 @@ def open_link(target: str = "auto", *, on_event: Callable[[Frame], None] | None 
 
 - [ ] **Step 5: Run the unit tests to verify they pass**
 
-Run: `.venv/bin/python -m pytest tests/unit/test_open_link.py -q`
-Expected: PASS, 9 passed
+Run: `.venv/bin/python -m pytest tests/unit/test_open_link.py`
+Expected: PASS, 14 passed - five tests were added when the review findings were closed
+(`test_list_candidate_ports_globs_the_xpressnet_pattern_and_sorts`,
+`test_z21_host_with_no_port_is_unsupported_not_malformed`,
+`test_z21_host_with_trailing_colon_and_no_port_is_malformed`,
+`test_transport_for_auto_uses_the_discovered_port`,
+`test_open_link_completes_the_handshake_through_a_fake_transport`), moving the count from 9 to 14.
 
 - [ ] **Step 6: Check `serial_posix.py` has not grown logic**
 
@@ -9311,11 +9619,15 @@ Run:
 .venv/bin/python -c "import ast,pathlib; s=pathlib.Path('src/railctl/transport/serial_posix.py').read_text(); print(len([l for l in s.splitlines() if l.strip() and not l.strip().startswith('#')]) - len(ast.get_docstring(ast.parse(s)).splitlines()) - 1)"
 ```
 
-Expected: `88` for the file Step 3 writes. **Fail the step above 95.** If it climbs past that,
+Expected: `94` for the file Step 3 writes. **Fail the step above 95.** If it climbs past that,
 protocol logic has leaked into the one module coverage does not watch - move it into `Link`
 or the envelope. Nothing currently in the file is removable: it is `open`, `close`, `read`,
 `write`, `flush_input`, three properties, the context manager and the `SerialConfig`
 dataclass, with no branch that is not an error path.
+
+> Corrected after review: the figure was `88` before review findings added a
+> `termios.error` handler to `open()` and an end-of-file check to `read()`,
+> which moved the count to 94, still under the 95 ceiling.
 
 - [ ] **Step 7: Verify the `hardware` marker is registered - do not register it again**
 
@@ -9346,7 +9658,7 @@ deselected count would never appear.
 # tests/hardware/test_m4_acceptance.py
 """M4 acceptance. NEEDS THE PHYSICAL YD7010 ATTACHED.
 
-Run explicitly:  .venv/bin/python -m pytest -m hardware -q -s
+Run explicitly:  .venv/bin/python -m pytest -m hardware -s
 These are skipped by the default addopts.
 """
 
@@ -9417,7 +9729,7 @@ def test_the_telemetry_port_shows_bytes_dropped_climbing_with_no_frames():
 
 - [ ] **Step 9: Run the software suite and confirm the hardware tests are excluded**
 
-Run: `.venv/bin/python -m pytest -q`
+Run: `.venv/bin/python -m pytest`
 Expected: `0 failed`, and the collection report shows **4 deselected** - the three written in
 Step 8 plus the `tests/hardware/test_marker.py` canary Task 1 left there. If it shows
 `0 deselected` and failures naming `PortNotFound`, the marker registration from Task 1 is
@@ -9433,7 +9745,7 @@ Connect the YD7010 over USB, then run in order:
 Expected on the reference unit: `/dev/cu.usbmodem7010A00011943`
 
 ```bash
-.venv/bin/python -m pytest -m hardware -q -s
+.venv/bin/python -m pytest -m hardware -s
 ```
 Expected: `4 passed` - the three written in Step 8 plus Task 1's `tests/hardware/test_marker.py`
 canary, which asserts nothing about the hardware and exists only so that the deselected count in
@@ -9458,10 +9770,10 @@ here as one gate rather than left to whoever remembers which task they were in. 
 order:
 
 ```bash
-.venv/bin/python -m pytest tests/unit/test_envelope_liusb.py -q
-.venv/bin/python -m pytest tests/unit/test_fake_transport.py -q -k "second_command_while_a_reply_is_outstanding"
+.venv/bin/python -m pytest tests/unit/test_envelope_liusb.py
+.venv/bin/python -m pytest tests/unit/test_fake_transport.py -k "second_command_while_a_reply_is_outstanding"
 .venv/bin/python -c "from railctl.transport import find_xpressnet_port; print(find_xpressnet_port())"
-.venv/bin/python -m pytest -m hardware -q -s
+.venv/bin/python -m pytest -m hardware -s
 ```
 
 | Clause of line 1581 | What proves it |
@@ -9512,7 +9824,7 @@ Plan 3 starts on top of it.
 
 ```bash
 .venv/bin/python -m ruff format . && .venv/bin/python -m ruff check .
-git add src/railctl/transport tests/unit/test_open_link.py tests/hardware/test_m4_acceptance.py
+git add src/railctl/transport tests/unit/test_open_link.py tests/unit/test_serial_posix.py tests/hardware/test_m4_acceptance.py
 git commit -m "feat(transport): add the POSIX serial transport, port discovery and open_link"
 ```
 

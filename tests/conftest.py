@@ -53,3 +53,27 @@ settings.register_profile(
 )
 
 settings.load_profile(os.environ.get("HYPOTHESIS_PROFILE", "default"))
+
+# --- railctl fixtures -------------------------------------------------------
+# The station and CLI suites take the envelope as a parameter and hold bare
+# telegrams, so adding Z21Envelope re-runs every one of them against new framing
+# with zero test edits. The list has one element today; retrofitting the
+# parametrisation later is what fails.
+import pytest  # noqa: E402
+
+from railctl.envelope.liusb import LiUsbEnvelope  # noqa: E402
+
+ENVELOPES = [LiUsbEnvelope]
+
+
+@pytest.fixture(params=ENVELOPES, ids=lambda cls: cls.__name__)
+def envelope_factory(request):
+    """The envelope CLASS under test. Call it to get a fresh instance."""
+    return request.param
+
+
+# Every scripted suite runs twice: whole-frame, then one byte at a time. The
+# byte-at-a-time run is the worst case a USB CDC port actually produces.
+@pytest.fixture(params=[None, 1], ids=["whole-frame", "byte-at-a-time"])
+def chunk_size(request):
+    return request.param

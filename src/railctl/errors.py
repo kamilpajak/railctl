@@ -49,7 +49,8 @@ class AmbiguousPort(TransportError):
 
 
 class PortBusy(TransportError):
-    """The port exists but another process holds it."""
+    """The port exists but could not be opened - another process holds it,
+    or permission was denied. The message carries the OS strerror either way."""
 
 
 class PortConfigError(TransportError):
