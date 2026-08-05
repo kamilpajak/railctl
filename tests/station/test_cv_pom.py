@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import pytest
 
+from railctl.envelope import Frame, Kind
 from railctl.errors import (
     DecoderNoAckError,
     DecoderNotRespondingError,
@@ -186,13 +187,56 @@ def test_closing_the_station_runs_the_registered_cache_hook(bench):
     assert bench.station.programmer._pages == {}
 
 
-def test_the_passive_branch_binds_and_tests_the_frame_it_polls(bench):
+def test_the_passive_branch_binds_and_tests_the_frame_it_polls(bench, monkeypatch):
     """A passive branch that polls for a frame and discards it makes POM
     reads fail on exactly the behaviour they exist to support: a station that
-    only pushes its result once polling has been switched off."""
+    only pushes its result once polling has been switched off.
+
+    `bench.link.poll(0.0)` - the drain at the TOP of `await_result`'s loop -
+    runs unconditionally on every pass, before `polling` is even consulted,
+    and `FakeTransport` hands over everything currently sitting on the port
+    in that one call (`Link.poll`'s own drain loop keeps reading until the
+    port goes quiet, not just once). So whatever this scenario's own
+    `push()` or `broadcast=` puts on the port - however it is timed - is
+    always visible to THAT poll first; it never survives to be the frame
+    `link.poll(min(interval, remaining))` (the passive branch's own call,
+    lines 337-339) discovers. Proven directly: attaching
+    `broadcast=cv_value(...)` to this same `POLL`/`61 82` exchange (the
+    shape that works for `test_a_61_82_answer_to_the_poll_never_becomes_a_
+    durable_capability_fact`, which is exactly this drain path) still passes
+    even with `link.poll`'s passive-branch call site replaced by a bare,
+    discarding one - because the top-of-loop drain resolves it first and the
+    passive branch's own call site is never reached with a frame in hand.
+
+    `bench.link.poll` is monkeypatched instead, matching the existing
+    `test_exchange_keeps_a_bad_cable_and_an_unknown_reply_form_apart`
+    pattern (`tests/station/test_power_and_status.py`) for the same reason:
+    the scenario needed does not exist on the wire `FakeTransport` can
+    produce. The stub answers every `timeout=0.0` call (the drain) with
+    nothing, and hands the CV frame to the first call with a non-zero
+    timeout - the passive branch's own call, and nowhere else - which is
+    what pins the frame to that exact call site rather than to "whichever
+    poll happens to run first"."""
     matcher = CvMatcher(CvEncoding.POM_ZERO_BASED, 8, zero_based=False)
     bench.expect(POLL, reply=UNSUPPORTED)
-    bench.push(cv_value(0x14, 8, ZIMO_CV8))
+    frame = Frame(kind=Kind.UNSOLICITED, payload=cv_value(0x14, 8, ZIMO_CV8))
+    served = False
+
+    def fake_poll(timeout: float = 0.0) -> list[Frame]:
+        nonlocal served
+        if timeout == 0.0:
+            return []  # the top-of-loop drain: nothing ever sits on the port
+        if not served:
+            served = True
+            return [frame]
+        # A second passive-branch call means lines 337-339 discarded the
+        # first frame instead of returning it - drive the clock past the
+        # attempt's own deadline so the test fails clean, as a TimedOut, on
+        # the very next iteration rather than looping forever.
+        bench.clock.advance(timeout)
+        return []
+
+    monkeypatch.setattr(bench.link, "poll", fake_poll)
     outcome = bench.station.programmer.await_result(
         matcher,
         timeout=2.0,
@@ -208,9 +252,16 @@ def test_the_passive_branch_binds_and_tests_the_frame_it_polls(bench):
 
 
 def test_a_61_82_answer_to_the_poll_never_becomes_a_durable_capability_fact(bench):
+    """`broadcast=`, not `push()`, so the CV answer only lands on the port once
+    this exchange - the one that actually answers `61 82` - has completed.
+    `push()`ing it up front (the previous shape of this test) put it on the
+    port before `await_result` ever ran, so its own first `link.poll(0.0)`
+    caught it before the scripted `POLL` was even sent: deleting the `expect`
+    line below left the test green, proving no `61 82` was involved in what
+    it measured. With `broadcast=` here, removing the `expect` line makes
+    `FakeTransport` raise "the script is exhausted" instead."""
     matcher = CvMatcher(CvEncoding.POM_ZERO_BASED, 8, zero_based=False)
-    bench.expect(POLL, reply=UNSUPPORTED)
-    bench.push(cv_value(0x14, 8, ZIMO_CV8))
+    bench.expect(POLL, reply=UNSUPPORTED, broadcast=cv_value(0x14, 8, ZIMO_CV8))
     outcome = bench.station.programmer.await_result(
         matcher,
         timeout=2.0,
@@ -222,8 +273,10 @@ def test_a_61_82_answer_to_the_poll_never_becomes_a_durable_capability_fact(benc
         context="pom",
     )
     assert isinstance(outcome, CvValue)
-    # The eventual match arrived as an unsolicited push, not as the poll's own
-    # answer, so learning must say "broadcast" - never a trace of the 61 82.
+    assert outcome.value == ZIMO_CV8
+    # The eventual match arrived as an unsolicited broadcast after the 61 82,
+    # not as the poll's own answer, so learning must say "broadcast" - never a
+    # trace of the 61 82.
     assert bench.station.capabilities.pom_result_channel == "broadcast"
 
 
