@@ -591,6 +591,58 @@ def test_a_read_in_an_exercised_band_emits_no_note(bench_factory, monkeypatch):
     assert bench.events == []
 
 
+def test_service_read_emits_page_not_selected_when_a_page_is_given(bench_factory, monkeypatch):
+    """`service_read` cannot select a page yet: `select_page` over SERVICE
+    routes through `_write_and_confirm`'s SERVICE branch, whose
+    `service_write_telegram`/`_track_power` are added by Task 6b, not this
+    one. A caller-supplied page must not be silently dropped in the
+    meantime - this is what stops a CV265 read under an assumed page from
+    quietly reading whatever page the decoder already had selected.
+    """
+    capabilities = make_capabilities(z21_cv_opcodes=True)
+    bench = bench_factory(capabilities=capabilities)
+    _script_read_and_clean_exit(bench, cmd_z21_cv_read(8))
+    monkeypatch.setattr(
+        bench.station.programmer,
+        "await_result",
+        lambda matcher, **kw: CvValue(raw_cv=8, value=1, ident=0x14, z21_form=True),
+    )
+
+    bench.station.programmer.service_read(8, page=(10, 2))
+
+    assert bench.events == [("page.not_selected", {"cv": 8, "page": (10, 2), "mode": "service"})]
+
+
+def test_service_read_emits_nothing_about_pages_when_none_is_given(bench_factory, monkeypatch):
+    capabilities = make_capabilities(z21_cv_opcodes=True)
+    bench = bench_factory(capabilities=capabilities)
+    _script_read_and_clean_exit(bench, cmd_z21_cv_read(8))
+    monkeypatch.setattr(
+        bench.station.programmer,
+        "await_result",
+        lambda matcher, **kw: CvValue(raw_cv=8, value=1, ident=0x14, z21_form=True),
+    )
+
+    bench.station.programmer.service_read(8)
+
+    assert bench.events == []
+
+
+def test_cv_read_in_service_mode_with_a_page_still_emits_not_selected(bench_factory, monkeypatch):
+    capabilities = make_capabilities(z21_cv_opcodes=True, pom_read=False)
+    bench = bench_factory(capabilities=capabilities)
+    _script_read_and_clean_exit(bench, cmd_z21_cv_read(8))
+    monkeypatch.setattr(
+        bench.station.programmer,
+        "await_result",
+        lambda matcher, **kw: CvValue(raw_cv=8, value=1, ident=0x14, z21_form=True),
+    )
+
+    bench.station.programmer.cv_read(8, mode=ProgMode.SERVICE, page=(10, 2))
+
+    assert bench.events == [("page.not_selected", {"cv": 8, "page": (10, 2), "mode": "service"})]
+
+
 def test_a_real_63_10_reply_drives_paged_cv_value_through_the_unstubbed_loop(bench_factory):
     """Every outcome test above stubs `await_result` and never drives a real
     `PagedCvValue` through the wait loop. Task 4's own `_consider` must
