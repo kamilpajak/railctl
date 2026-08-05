@@ -24,6 +24,8 @@ import pytest
 from railctl.station.doctor import (
     CHECK_IDS,
     CHECK_TITLES,
+    PROBE_CV,
+    PROBE_CV_VALUE,
     _check_d0,
     exit_code_for_report,
     run_probe,
@@ -31,6 +33,8 @@ from railctl.station.doctor import (
 from railctl.transport.fake import FakeTransport
 from railctl.xbus.codec import encode
 from railctl.xbus.commands import (
+    cmd_pom_read_byte,
+    cmd_service_result_request,
     cmd_station_status,
     cmd_station_version,
     cmd_track_power_on,
@@ -213,3 +217,90 @@ def test_d3_powers_on_when_allowed_and_the_reread_confirms_it(doctor_bench):
     assert report.check("D3").status == "ok"
     assert "turned on" in report.check("D3").detail
     assert cmd_track_power_on() in doctor_bench.sent
+
+
+def test_d4_success_records_pom_read_true_and_the_echo_convention(doctor_bench):
+    """CV8 echoed as 7 (zero-based) fixes pom_echo_zero_based True."""
+    telegram = cmd_pom_read_byte(50, PROBE_CV, threshold=doctor_bench.station.threshold)
+    doctor_bench.transport.on_write.set(telegram, GENERIC_ACK)
+    doctor_bench.transport.on_write.queue_once(
+        cmd_service_result_request(), cv_reply(0x14, 7, PROBE_CV_VALUE)
+    )
+    report = run_probe(doctor_bench.station, address=50, now_utc=lambda: "2026-08-05T00:00:00Z")
+    d4 = report.check("D4")
+    assert d4.status == "ok"
+    assert report.capabilities.pom_read is True
+    assert report.capabilities.pom_echo_zero_based is True
+    assert "145" in d4.detail
+    assert "expected" not in d4.detail  # value matched - no mismatch note
+
+
+def test_d4_success_with_one_based_echo_and_a_mismatched_value_adds_a_note(doctor_bench):
+    telegram = cmd_pom_read_byte(50, PROBE_CV, threshold=doctor_bench.station.threshold)
+    doctor_bench.transport.on_write.set(telegram, GENERIC_ACK)
+    doctor_bench.transport.on_write.queue_once(cmd_service_result_request(), cv_reply(0x14, 8, 3))
+    report = run_probe(doctor_bench.station, address=50, now_utc=lambda: "2026-08-05T00:00:00Z")
+    assert report.capabilities.pom_read is True
+    assert report.capabilities.pom_echo_zero_based is False
+    d4 = report.check("D4")
+    assert d4.status == "ok"
+    assert "3" in d4.detail and "145" in d4.detail  # a note, not a silent pass
+
+
+def test_d4_unsupported_sets_pom_read_false_with_no_silence_note(doctor_bench):
+    telegram = cmd_pom_read_byte(50, PROBE_CV, threshold=doctor_bench.station.threshold)
+    doctor_bench.transport.on_write.set(telegram, UNSUPPORTED_REPLY)
+    report = run_probe(doctor_bench.station, address=50, now_utc=lambda: "2026-08-05T00:00:00Z")
+    assert report.capabilities.pom_read is False
+    assert report.capabilities.notes == ()
+    assert report.check("D4").status == "ok"
+
+
+def test_d4_noack_keeps_pom_read_unknown_and_points_at_railcom(doctor_bench):
+    telegram = cmd_pom_read_byte(50, PROBE_CV, threshold=doctor_bench.station.threshold)
+    doctor_bench.transport.on_write.set(telegram, GENERIC_ACK)
+    for _ in range(3):  # TIMING.pom_read_attempts
+        doctor_bench.transport.on_write.queue_once(cmd_service_result_request(), NOACK_REPLY)
+    report = run_probe(doctor_bench.station, address=50, now_utc=lambda: "2026-08-05T00:00:00Z")
+    assert report.capabilities.pom_read is None
+    d4 = report.check("D4")
+    assert d4.status == "unknown"
+    assert "railcom" in d4.detail.lower()
+
+
+def test_d4_total_silence_sets_pom_read_false_with_a_silence_note(doctor_bench):
+    """Pinned: this is the ONE place False is written without a 61 82, and the
+    note naming it is the price. A plain cv_read hitting the same silence
+    (Task 4/5's own tests) must leave pom_read at None - only the doctor makes
+    this call, because AUTO would otherwise retry POM for 6s forever."""
+    telegram = cmd_pom_read_byte(50, PROBE_CV, threshold=doctor_bench.station.threshold)
+    doctor_bench.transport.on_write.set(telegram, GENERIC_ACK)
+    # No queued reply for 21 10 31 at all: every poll gets the persistent
+    # default (a generic ack, never a value or a 61 13) until the budget runs out.
+    report = run_probe(doctor_bench.station, address=50, now_utc=lambda: "2026-08-05T00:00:00Z")
+    assert report.capabilities.pom_read is False
+    assert report.capabilities.pom_result_channel == "none"
+    d4 = report.check("D4")
+    note = next(n for n in report.capabilities.notes if "silence" in n.lower())
+    assert "silence" in note.lower()
+    assert "re-run" in note.lower() and "doctor" in note.lower()
+    assert note in d4.detail
+
+
+def test_d4_is_unknown_when_the_track_is_unpowered(doctor_bench):
+    """D4 (like D10) is 'unknown', not 'skip', when the reason it did not run
+    is that the track is off without --power-on: spec line 855, "D4 and D10
+    are skipped as unknown". 'skip' is reserved for a genuine opt-out (no
+    address given)."""
+    doctor_bench.transport.on_write.set(cmd_station_status(), STATUS_REPLY_UNPOWERED)
+    report = run_probe(doctor_bench.station, address=50, now_utc=lambda: "2026-08-05T00:00:00Z")
+    assert report.check("D4").status == "unknown"
+    assert report.capabilities.pom_read is None
+
+
+def test_d4_is_skipped_with_no_address_even_if_the_track_is_powered(doctor_bench):
+    """Distinct from the case above: track power is fine, there is simply
+    nothing to address a POM read at - that is an opt-out, 'skip'."""
+    report = run_probe(doctor_bench.station, now_utc=lambda: "2026-08-05T00:00:00Z")
+    assert report.check("D4").status == "skip"
+    assert report.capabilities.pom_read is None
