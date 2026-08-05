@@ -6,6 +6,7 @@ import pytest
 from railctl.errors import (
     CvOutOfRangeError,
     CvVerifyError,
+    DecoderNoAckError,
     DecoderNotRespondingError,
     IndexPageRequiredError,
     PomReadUnsupportedError,
@@ -578,3 +579,77 @@ def test_service_write_telegram_never_uses_an_unprobed_capability(bench_factory)
     )
     _telegram, encoding, _page = bench.station.programmer.service_write_telegram(8, 1)
     assert encoding is CvEncoding.SERVICE_EXT
+
+
+STATUS_POWERED = encode(0x62, 0x22, 0x00)  # HDR_STATUS, DB_STATUS, track_power bit clear -> True
+
+
+# -- service_write ------------------------------------------------------------
+
+
+def test_service_write_succeeds_when_the_wait_loop_reports_ready(bench_factory, monkeypatch):
+    from railctl.xbus.replies import Ready
+
+    bench = bench_factory(capabilities=make_capabilities(z21_cv_opcodes=True))
+    programmer = bench.station.programmer
+    bench.expect(cmd_station_status(), reply=STATUS_POWERED)
+    bench.expect(cmd_z21_cv_write(8, 145), reply=ACK)
+    monkeypatch.setattr(programmer, "await_result", lambda *a, **k: Ready())
+    monkeypatch.setattr(programmer, "exit_service_mode", lambda *, restore_power: None)
+    result = programmer.service_write(8, 145, verify=True)
+    assert result.verified is True
+    assert result.mode is ProgMode.SERVICE
+
+
+def test_service_write_raises_decoder_no_ack_when_the_wait_loop_reports_no_ack(
+    bench_factory, monkeypatch
+):
+    from railctl.xbus.replies import NoAck
+
+    bench = bench_factory(capabilities=make_capabilities(z21_cv_opcodes=True))
+    programmer = bench.station.programmer
+    bench.expect(cmd_station_status(), reply=STATUS_POWERED)
+    bench.expect(cmd_z21_cv_write(8, 145), reply=ACK)
+    monkeypatch.setattr(programmer, "await_result", lambda *a, **k: NoAck())
+    monkeypatch.setattr(programmer, "exit_service_mode", lambda *, restore_power: None)
+    with pytest.raises(DecoderNoAckError):
+        programmer.service_write(8, 145, verify=True)
+
+
+def test_service_write_calls_exit_service_mode_and_invalidates_cache_on_failure(
+    bench_factory, monkeypatch
+):
+    from railctl.xbus.replies import NoAck
+
+    bench = bench_factory(capabilities=make_capabilities(z21_cv_opcodes=True))
+    programmer = bench.station.programmer
+    invalidated = watch_invalidations(bench.station)
+    bench.expect(cmd_station_status(), reply=STATUS_POWERED)
+    bench.expect(cmd_z21_cv_write(8, 145), reply=ACK)
+    exit_calls: list[bool] = []
+    monkeypatch.setattr(programmer, "await_result", lambda *a, **k: NoAck())
+    monkeypatch.setattr(
+        programmer,
+        "exit_service_mode",
+        lambda *, restore_power: exit_calls.append(restore_power),
+    )
+    with pytest.raises(DecoderNoAckError):
+        programmer.service_write(8, 145, verify=True)
+    assert exit_calls == [True]
+    assert len(invalidated) == 1
+
+
+def test_service_write_with_verify_false_is_blind(bench_factory, monkeypatch):
+    from railctl.xbus.replies import Ready
+
+    bench = bench_factory(capabilities=make_capabilities(z21_cv_opcodes=True))
+    programmer = bench.station.programmer
+    bench.expect(cmd_station_status(), reply=STATUS_POWERED)
+    bench.expect(cmd_z21_cv_write(8, 145), reply=ACK)
+    monkeypatch.setattr(programmer, "await_result", lambda *a, **k: Ready())
+    monkeypatch.setattr(programmer, "exit_service_mode", lambda *, restore_power: None)
+    result = programmer.service_write(8, 145, verify=False)
+    assert result.verified is False
+    name, payload = bench.events[-1]
+    assert name == "cv.write_unverified"
+    assert set(payload) == {"cv", "value", "reason"}
