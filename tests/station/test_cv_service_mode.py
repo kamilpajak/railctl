@@ -30,7 +30,7 @@ from railctl.station.programming import (
     TimedOut,
 )
 from railctl.station.timing import TIMING
-from railctl.station.types import ProgMode
+from railctl.station.types import EVENT_NAMES, ProgMode
 from railctl.xbus.codec import encode
 from railctl.xbus.commands import (
     cmd_service_direct_read,
@@ -611,6 +611,12 @@ def test_service_read_emits_page_not_selected_when_a_page_is_given(bench_factory
     bench.station.programmer.service_read(8, page=(10, 2))
 
     assert bench.events == [("page.not_selected", {"cv": 8, "page": (10, 2), "mode": "service"})]
+    # `Station.emit` never validates its own `name` argument (facade.py), so a
+    # typo or an unregistered event name would still show up in `bench.events`
+    # above and this assertion is the only thing that would catch it: it must
+    # be a member of the pinned `EVENT_NAMES` tuple or no renderer will ever
+    # reach it through the CLI.
+    assert bench.events[0][0] in EVENT_NAMES
 
 
 def test_service_read_emits_nothing_about_pages_when_none_is_given(bench_factory, monkeypatch):
@@ -641,6 +647,7 @@ def test_cv_read_in_service_mode_with_a_page_still_emits_not_selected(bench_fact
     bench.station.programmer.cv_read(8, mode=ProgMode.SERVICE, page=(10, 2))
 
     assert bench.events == [("page.not_selected", {"cv": 8, "page": (10, 2), "mode": "service"})]
+    assert bench.events[0][0] in EVENT_NAMES
 
 
 def test_a_real_63_10_reply_drives_paged_cv_value_through_the_unstubbed_loop(bench_factory):

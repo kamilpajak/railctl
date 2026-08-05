@@ -189,20 +189,25 @@ def test_blind_write_cvs_excludes_cv29():
     assert 29 in ADDRESS_CVS
 
 
-def test_event_names_are_exactly_the_twelve_defined_events():
-    """Twelve names from this task onward, not five: `cv.unexercised_band` is
+def test_event_names_are_exactly_the_thirteen_defined_events():
+    """Thirteen names from this task onward, not five: `cv.unexercised_band` is
     emitted by a later CV-programming task and `function.group_seeded` by a
     later drive/function task; `power.on`, `power.off`, `loco.emergency_stop`,
     `service.entered` and `reply.unknown` are emitted by the facade (Task 2)
-    and rendered by `monitor`. A later CLI task pins that every name in this
-    tuple has a rendering - so the tuple has to be complete here, before any
-    emitter exists, or that later task has nothing to render against.
+    and rendered by `monitor`. `page.not_selected` (Task 6) is the signal that
+    a caller-supplied page could not be honoured yet because `service_read`
+    has no way to select one over SERVICE mode until Task 6b wires
+    `select_page`'s SERVICE branch through `_write_and_confirm`. A later CLI
+    task pins that every name in this tuple has a rendering - so the tuple
+    has to be complete here, before any emitter exists, or that later task
+    has nothing to render against.
     """
     assert EVENT_NAMES == (
         "cv.stale_result",
         "cv.write_unverified",
         "cv.unexercised_band",
         "page.unverified",
+        "page.not_selected",
         "loco.in_use_by_other",
         "address.band_unverified",
         "function.group_seeded",
