@@ -407,9 +407,16 @@ class Station:
             self._settle_power(reply, expected=False)
 
     def _settle_power(self, reply: Reply, *, expected: bool) -> None:
-        """`61 01` means on and `61 00` means off, read directly off the command's own reply -
-        no unconditional status round trip. A disagreeing reply gets exactly one status()
-        re-read after `power_settle`; if it still disagrees, TrackPowerError. Never a loop."""
+        """`61 01` means on and `61 00` means off, read directly off the command's own reply.
+        A disagreeing reply gets exactly one status() re-read after `power_settle`; if it still
+        disagrees, TrackPowerError. Never a loop.
+
+        MEASURED 2026-08-05: the YD7010 never takes the fast path. It answers both `21 80` and
+        `21 81` with the generic ack (`01 04 05`), never with `61 00`/`61 01` - those arrive as
+        unsolicited broadcasts on their own, not as this command's reply. So on this station every
+        power_on/power_off pays `power_settle` plus a status round trip. Keep the fast path: it
+        costs nothing when it does not fire, and a station that does reply `61 0x` gets the cheaper
+        route. Just do not describe it as the normal case."""
         wanted = POWER_ON if expected else POWER_OFF
         if reply == wanted:
             return

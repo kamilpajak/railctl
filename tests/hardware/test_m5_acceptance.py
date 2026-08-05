@@ -79,10 +79,22 @@ def test_power_drive_stop_power_off_restores_the_track_power_it_found():
         station.emergency_stop(ACCEPTANCE_ADDRESS)
         print(f"emergency-stopped loco {ACCEPTANCE_ADDRESS}")
 
-        if not was_on:
-            station.power_off()
-            print("track power restored to off")
+        # power_off() runs UNCONDITIONALLY, then the found state is restored.
+        # The old version only called it when it found the power already off,
+        # which is why this path had never once run on hardware - and why the
+        # swapped status bits (docs/probe-results.md R2) survived three
+        # acceptance runs. A branch that skips the risky call whenever the
+        # bench happens to be in the common state is not coverage.
+        station.power_off()
+        assert station.status().track_power is False, (
+            "power_off() returned but the station still reports the track live"
+        )
+        print("power off verified")
+
+        if was_on:
+            station.power_on()
+            print("track power restored to on, as found")
         else:
-            print("track power left on, as found")
+            print("track power left off, as found")
     finally:
         station.close()
