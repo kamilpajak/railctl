@@ -39,6 +39,7 @@ from railctl.errors import (
 )
 from railctl.link import Link
 from railctl.station.capabilities import LEARNABLE_FIELDS, UNKNOWN_IDENTITY, Capabilities
+from railctl.station.programming import CvProgrammer
 from railctl.station.timing import TIMING, Timing
 from railctl.station.types import StationEvent
 from railctl.transport import open_link
@@ -123,6 +124,8 @@ class Station:
         self._cache_clears: list[Callable[[], None]] = []
         self._function_shadow: dict[int, dict[int, bool]] = {}
         self.register_cache(self._function_shadow.clear)
+        self.programmer = CvProgrammer(self)
+        self.register_cache(self.programmer.invalidate_pages)
 
     @classmethod
     def open(

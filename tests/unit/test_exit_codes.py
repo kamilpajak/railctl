@@ -167,3 +167,15 @@ def test_errors_is_the_only_module_defining_exception_types():
     ]
     assert {obj.__module__ for obj in _tree()} == {"railctl.errors"}
     assert len(classes) == len(_tree())
+
+
+def test_railctl_error_details_defaults_to_empty_and_round_trips():
+    """`RailctlError` itself carries `details` - `ProgrammingError` only adds
+    `cv` alongside it, it does not introduce the field."""
+    bare = RailctlError("x")
+    assert bare.details == {}
+    carrying = RailctlError("x", details={"cv": 8, "attempts": 3})
+    assert carrying.details == {"cv": 8, "attempts": 3}
+    programming = ProgrammingError("x", cv=8, details={"attempts": 3})
+    assert programming.cv == 8
+    assert programming.details == {"attempts": 3}
