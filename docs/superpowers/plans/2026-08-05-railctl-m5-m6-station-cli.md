@@ -5027,7 +5027,16 @@ Append to `class CvProgrammer` in `src/railctl/station/programming.py` (after `i
                     reply = self._station.exchange(cmd_service_result_request(), timeout=budget)
                 except LinkTimeout:
                     continue
-                if isinstance(reply, Unsupported):
+                except UnsupportedCommandError:
+                    # `Station.exchange` (facade.py) already turns a `61 82`
+                    # reply into this exception rather than returning
+                    # `Unsupported` - by the time a reply reaches this method
+                    # it can never actually BE `Unsupported`. The station
+                    # only pushes its result once polling has been switched
+                    # off, so this ends the attempt's polling, not the read:
+                    # never recorded as a durable capability (a poll's 61 82
+                    # is the expected shape from a push-only station), and
+                    # never raised past this loop.
                     polling = False
                     continue
                 settled = settle(reply, channel="poll")
@@ -5043,6 +5052,8 @@ Append to `class CvProgrammer` in `src/railctl/station/programming.py` (after `i
                     if settled is not None:
                         return settled
 ```
+
+**`Station.exchange` raises; it does not return `Unsupported` as a value.** No code past this point may branch on `isinstance(reply, Unsupported)` - `exchange` (`facade.py`) turns a `61 82` reply into `UnsupportedCommandError` before it ever reaches a caller, so the one reply entitled to record `false` arrives as an exception, not a value to test with `isinstance`. Catch `UnsupportedCommandError` around the `exchange` call instead. This already cost two separate corrections before this plan reached task 6.
 
 Run:
 
@@ -5393,8 +5404,16 @@ Now append to `class CvProgrammer` in `src/railctl/station/programming.py` (afte
         for attempt in range(1, timing.pom_read_attempts + 1):
             self._drain_stale(matcher)
             telegram = cmd_pom_read_byte(resolved, cv, threshold=self._station.threshold)
-            reply = self._station.exchange(telegram, timeout=timing.li_ack_normal)
-            if isinstance(reply, Unsupported):
+            try:
+                reply = self._station.exchange(telegram, timeout=timing.li_ack_normal)
+            except UnsupportedCommandError:
+                # `Station.exchange` (facade.py) already turns a `61 82`
+                # reply into this exception rather than returning
+                # `Unsupported` - by the time a reply reaches this method it
+                # can never actually BE `Unsupported`. This is the ONLY reply
+                # that entitles this method to write `pom_read=False`: three
+                # silent attempts stay `None` (see the bottom of this loop),
+                # never `False`.
                 self._station.learn(pom_read=False)
                 raise PomReadUnsupportedError(
                     f"the command station answered `61 82` to a POM read of CV{cv}",
@@ -5407,7 +5426,7 @@ Now append to `class CvProgrammer` in `src/railctl/station/programming.py` (afte
                         "attempts": attempt,
                         "attempt_timeout_s": timing.pom_result,
                     },
-                )
+                ) from None
             settled = self._consider(reply, matcher, context="pom", channel="broadcast")
             outcome: WaitOutcome = (
                 settled
@@ -6493,13 +6512,23 @@ Expected: FAIL - `AttributeError: 'CvProgrammer' object has no attribute 'servic
         power_before = self._station.status().track_power
         start = self._station.now()
         try:
-            reply = self._station.exchange(
-                telegram, timeout=self._station.timing.li_ack_programming
-            )
-            if isinstance(reply, Unsupported):
+            try:
+                self._station.exchange(
+                    telegram, timeout=self._station.timing.li_ack_programming
+                )
+            except UnsupportedCommandError:
+                # `Station.exchange` (facade.py) already turns a `61 82` reply
+                # into this exception rather than returning `Unsupported` - by
+                # the time a reply reaches this method it can never actually
+                # BE `Unsupported`. Re-raised with a CV-specific message; the
+                # general `61 82` -> `UnsupportedCommandError` mapping is
+                # `Station.exchange`'s own docstring, not repeated here. The
+                # reply itself is not captured: `matcher` and `await_result`
+                # below do the polling and matching, so a successful exchange
+                # here needs nothing from it but confirmation it did not raise.
                 raise UnsupportedCommandError(
                     f"the command station rejected the service-mode read opcode for CV{cv}"
-                )
+                ) from None
             matcher = CvMatcher(
                 encoding,
                 cv,

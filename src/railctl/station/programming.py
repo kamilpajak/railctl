@@ -55,7 +55,6 @@ from railctl.xbus.replies import (
     Reply,
     ShortCircuit,
     TrackShortCircuit,
-    Unsupported,
     parse,
 )
 
@@ -323,19 +322,18 @@ class CvProgrammer:
         power_before = self._station.status().track_power
         start = self._station.now()
         try:
-            reply = self._station.exchange(
-                telegram, timeout=self._station.timing.li_ack_programming
-            )
-            if isinstance(reply, Unsupported):
+            try:
+                self._station.exchange(telegram, timeout=self._station.timing.li_ack_programming)
+            except UnsupportedCommandError:
                 # `Station.exchange` (facade.py) already turns a `61 82` reply
-                # into `UnsupportedCommandError` rather than returning
-                # `Unsupported` - by the time a reply reaches this method it
-                # can never actually BE `Unsupported`. Same reasoning as
-                # `Station._expect_ack`; kept as a totality guard, not dead
-                # code by oversight.
+                # into this exception rather than returning `Unsupported` - by
+                # the time a reply reaches this method it can never actually
+                # BE `Unsupported`. Re-raised with a CV-specific message; the
+                # general `61 82` -> `UnsupportedCommandError` mapping is
+                # `Station.exchange`'s own docstring, not repeated here.
                 raise UnsupportedCommandError(
                     f"the command station rejected the service-mode read opcode for CV{cv}"
-                )
+                ) from None
             matcher = CvMatcher(
                 encoding,
                 cv,
