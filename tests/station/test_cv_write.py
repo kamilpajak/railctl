@@ -14,6 +14,7 @@ from railctl.errors import (
     UnsupportedCommandError,
 )
 from railctl.station.capabilities import Capabilities
+from railctl.station.programming import PageKey
 from railctl.station.timing import TIMING
 from railctl.station.types import ADDRESS_CVS, CV29_LONG_ADDRESS_BIT, CvResult, ProgMode
 from railctl.xbus.codec import encode
@@ -653,3 +654,93 @@ def test_service_write_with_verify_false_is_blind(bench_factory, monkeypatch):
     name, payload = bench.events[-1]
     assert name == "cv.write_unverified"
     assert set(payload) == {"cv", "value", "reason"}
+
+
+# -- cv_write: mode dispatch ------------------------------------------------------
+
+
+def test_cv_write_dispatches_to_pom_when_capabilities_allow(bench, monkeypatch):
+    programmer = bench.station.programmer
+    bench.station.learn(pom_read=True)
+    calls: list[tuple[int, int, int, bool]] = []
+
+    def fake_pom_write(cv, value, *, address, verify):
+        calls.append((cv, value, address, verify))
+        return make_cv_result(cv=cv, value=value, operation="write", verified=verify)
+
+    monkeypatch.setattr(programmer, "pom_write", fake_pom_write)
+    result = programmer.cv_write(5, 10, address=ADDRESS)
+    assert calls == [(5, 10, ADDRESS, True)]
+    assert result.value == 10
+
+
+def test_cv_write_dispatches_to_service_when_pom_is_unavailable(bench_factory, monkeypatch):
+    bench = bench_factory(capabilities=make_capabilities(pom_read=False, service_direct_cv=True))
+    programmer = bench.station.programmer
+    calls: list[tuple[int, int, bool]] = []
+
+    def fake_service_write(cv, value, *, verify):
+        calls.append((cv, value, verify))
+        return make_cv_result(
+            cv=cv, value=value, mode=ProgMode.SERVICE, operation="write", verified=verify
+        )
+
+    monkeypatch.setattr(programmer, "service_write", fake_service_write)
+    programmer.cv_write(5, 10)
+    assert calls == [(5, 10, True)]
+
+
+def test_cv_write_requires_an_address_for_pom(bench):
+    bench.station.learn(pom_read=True)
+    with pytest.raises(ValueError):
+        bench.station.programmer.cv_write(5, 10, address=None)
+
+
+def test_cv_write_ensures_the_page_for_an_indexed_cv(bench, monkeypatch):
+    programmer = bench.station.programmer
+    bench.station.learn(pom_read=True)
+    ensure_calls: list[tuple[int | None, ProgMode, int, tuple[int, int] | None]] = []
+    monkeypatch.setattr(
+        programmer,
+        "ensure_page",
+        lambda address, mode, cv, page: ensure_calls.append((address, mode, cv, page)),
+    )
+    monkeypatch.setattr(
+        programmer,
+        "pom_write",
+        lambda cv, value, *, address, verify: make_cv_result(
+            cv=cv, value=value, operation="write", verified=verify
+        ),
+    )
+    programmer.cv_write(265, 7, address=ADDRESS, page=(10, 2))
+    assert ensure_calls == [(ADDRESS, ProgMode.POM, 265, (10, 2))]
+
+
+def test_cv_write_invalidates_the_page_cache_on_any_failure(bench):
+    """`pom_write` already calls `station.invalidate_caches()` on failure, which
+    clears the page cache indirectly (Task 4 registered `invalidate_pages` as one
+    of its callbacks) - this pins the direct wrap on `cv_write` itself, which
+    stays correct even if that indirect path ever changes. Goes red if
+    `cv_write`'s own `try/except` is removed, since nothing else in this
+    specific scenario would clear `_pages`.
+    """
+    programmer = bench.station.programmer
+    bench.station.learn(pom_read=True)
+    programmer._pages[PageKey(address=ADDRESS, mode=ProgMode.POM)] = ((0, 0), 0.0)
+    bench.expect(cmd_pom_write_byte(ADDRESS, 5, 10, threshold=THRESHOLD), reply=UNSUPPORTED)
+    with pytest.raises(UnsupportedCommandError):
+        programmer.cv_write(5, 10, address=ADDRESS)
+    assert programmer._pages == {}
+
+
+def test_cv_read_invalidates_the_page_cache_on_any_failing_read(bench, monkeypatch):
+    programmer = bench.station.programmer
+    programmer._pages[PageKey(address=ADDRESS, mode=ProgMode.POM)] = ((0, 0), 0.0)
+
+    def fake_pom_read(cv, *, address, page=None):
+        raise DecoderNotRespondingError("no ack", cv=cv)
+
+    monkeypatch.setattr(programmer, "pom_read", fake_pom_read)
+    with pytest.raises(DecoderNotRespondingError):
+        programmer.cv_read(8, address=ADDRESS, mode=ProgMode.POM)
+    assert programmer._pages == {}
