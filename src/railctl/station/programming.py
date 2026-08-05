@@ -20,6 +20,7 @@ from railctl.errors import (
     IndexPageRequiredError,
     LinkTimeout,
     PomReadUnsupportedError,
+    ProtocolError,
     RailctlError,
     ShortCircuitError,
     StationBusyError,
@@ -44,6 +45,7 @@ from railctl.xbus.commands import (
     cmd_service_ext_read,
     cmd_service_ext_write,
     cmd_service_result_request,
+    cmd_station_status,
     cmd_track_power_off,
     cmd_track_power_on,
     cmd_z21_cv_read,
@@ -70,6 +72,7 @@ from railctl.xbus.replies import (
     Reply,
     ShortCircuit,
     StationBusy,
+    StationStatus,
     TrackShortCircuit,
     parse,
 )
@@ -1125,6 +1128,63 @@ class CvProgrammer:
             cv=cv,
             value=value,
             mode=ProgMode.POM,
+            encoding=encoding,
+            operation="write",
+            verified=True,
+            elapsed=self._station.now() - started,
+        )
+
+    def _track_power(self) -> bool:
+        """Read `21 24 05` once, self-contained: `service_write` needs this
+        BEFORE entering service mode (to know what to restore afterwards, spec
+        line 782), and it is simple enough not to need `await_result`'s poll
+        machinery - a status reply is immediate, never paged.
+        """
+        reply = self._station.exchange(
+            cmd_station_status(), timeout=self._station.timing.li_ack_normal
+        )
+        if not isinstance(reply, StationStatus):
+            raise ProtocolError(f"expected a station status reply, got {reply!r}")
+        return reply.track_power
+
+    def service_write(self, cv: int, value: int, *, verify: bool) -> CvResult:
+        """Unlike `pom_write`, `verified=True` here does not come from a
+        separate follow-up read: `_write_and_confirm`'s SERVICE branch already
+        gets a decoder-level acknowledgement (`61 11`/`61 13`) for every CV,
+        including CV1/8/17/18, so `BLIND_WRITE_CVS` - which exists to skip an
+        unreliable POM re-read after a write that could change the answering
+        address - has nothing to skip here. Blind means only `verify=False`.
+        """
+        started = self._station.now()
+        blind = not verify
+        try:
+            encoding = self._write_and_confirm(cv, value, address=None, mode=ProgMode.SERVICE)
+        except RailctlError:
+            self._station.invalidate_caches()
+            raise
+        if cv == 8 or cv in ADDRESS_CVS:
+            # Service mode ignores address, and the decoder on the programming
+            # track is not necessarily the one on the main track (spec line
+            # 782) - there is no address to narrow to, so the whole cache goes.
+            self._station.invalidate_caches()
+        if blind:
+            self._station.emit(
+                "cv.write_unverified",
+                {"cv": cv, "value": value, "reason": self._blind_reason(cv, verify)},
+            )
+            return CvResult(
+                cv=cv,
+                value=value,
+                mode=ProgMode.SERVICE,
+                encoding=encoding,
+                operation="write",
+                verified=False,
+                elapsed=self._station.now() - started,
+            )
+        return CvResult(
+            cv=cv,
+            value=value,
+            mode=ProgMode.SERVICE,
             encoding=encoding,
             operation="write",
             verified=True,
