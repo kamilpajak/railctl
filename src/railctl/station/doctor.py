@@ -604,7 +604,11 @@ def _fallback(caps: Capabilities) -> str:
         return "service mode, Z21 opcodes, CV1-1024"
     if caps.service_ext_cv is True:
         return "service mode, extended opcodes"
-    if caps.service_direct_cv is None and caps.z21_cv_opcodes is None and caps.service_ext_cv is None:
+    if (
+        caps.service_direct_cv is None
+        and caps.z21_cv_opcodes is None
+        and caps.service_ext_cv is None
+    ):
         return "unknown (re-run the doctor)"
     return "unavailable - service-mode opcodes unconfirmed"
 

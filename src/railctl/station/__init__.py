@@ -18,6 +18,7 @@ from railctl.station.capabilities import (
     Capabilities,
     ResultChannel,
 )
+from railctl.station.doctor import exit_code_for_report, run_probe, verdict_lines
 from railctl.station.facade import Station
 from railctl.station.timing import TIMING, Timing
 from railctl.station.types import (
@@ -81,5 +82,8 @@ __all__ = [
     "StationVersion",
     "Timing",
     "decoder_family",
+    "exit_code_for_report",
+    "run_probe",
     "treats_cv144_as_lock",
+    "verdict_lines",
 ]

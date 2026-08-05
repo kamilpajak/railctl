@@ -942,9 +942,7 @@ def test_the_doctor_never_writes_a_decoder_cv(doctor_bench):
 
 
 def test_every_check_id_appears_exactly_once_in_order(doctor_bench):
-    report = run_probe(
-        doctor_bench.station, address=105, now_utc=lambda: "2026-08-05T00:00:00Z"
-    )
+    report = run_probe(doctor_bench.station, address=105, now_utc=lambda: "2026-08-05T00:00:00Z")
     assert tuple(check.id for check in report.checks) == CHECK_IDS
 
 
@@ -980,3 +978,119 @@ def test_verdict_lines_on_an_all_unknown_capability_set_say_unknown_never_bare_n
         assert line.strip() != ""
         assert "unknown" in line.lower()
         assert re.search(r"\bno\b", line.lower()) is None
+
+
+def test_verdict_primary_cv_path_reports_pom_and_its_result_channel():
+    caps = Capabilities.unknown("test").with_learned(pom_read=True, pom_result_channel="poll")
+    report = DoctorReport(checks=(), capabilities=caps)
+    assert "POM (results arrive via poll)" in verdict_lines(report)[0]
+
+
+def test_verdict_primary_cv_path_falls_back_to_unknown_channel_when_none_recorded():
+    caps = Capabilities.unknown("test").with_learned(pom_read=True, pom_result_channel=None)
+    report = DoctorReport(checks=(), capabilities=caps)
+    assert "POM (results arrive via unknown)" in verdict_lines(report)[0]
+
+
+def test_verdict_primary_cv_path_points_at_fallback_when_pom_is_unsupported():
+    caps = Capabilities.unknown("test").with_learned(pom_read=False)
+    report = DoctorReport(checks=(), capabilities=caps)
+    assert "POM unavailable (61 82); see Fallback" in verdict_lines(report)[0]
+
+
+def test_verdict_fallback_names_direct_service_mode_first():
+    caps = Capabilities.unknown("test").with_learned(service_direct_cv=True)
+    report = DoctorReport(checks=(), capabilities=caps)
+    assert "service mode, direct opcodes, CV1-255 only" in verdict_lines(report)[1]
+
+
+def test_verdict_fallback_names_z21_service_mode():
+    caps = Capabilities.unknown("test").with_learned(z21_cv_opcodes=True)
+    report = DoctorReport(checks=(), capabilities=caps)
+    assert "service mode, Z21 opcodes, CV1-1024" in verdict_lines(report)[1]
+
+
+def test_verdict_fallback_names_extended_service_mode():
+    caps = Capabilities.unknown("test").with_learned(service_ext_cv=True)
+    report = DoctorReport(checks=(), capabilities=caps)
+    assert "service mode, extended opcodes" in verdict_lines(report)[1]
+
+
+def test_verdict_fallback_says_unavailable_when_every_service_opcode_is_confirmed_absent():
+    caps = Capabilities.unknown("test").with_learned(
+        service_direct_cv=False, z21_cv_opcodes=False, service_ext_cv=False
+    )
+    report = DoctorReport(checks=(), capabilities=caps)
+    assert "unavailable - service-mode opcodes unconfirmed" in verdict_lines(report)[1]
+
+
+def test_verdict_cv_above_255_names_z21_opcodes():
+    caps = Capabilities.unknown("test").with_learned(z21_cv_opcodes=True)
+    report = DoctorReport(checks=(), capabilities=caps)
+    assert "POM (write) + Z21 opcodes (read), CV1-1024" in verdict_lines(report)[2]
+
+
+def test_verdict_cv_above_255_names_extended_opcodes():
+    caps = Capabilities.unknown("test").with_learned(service_ext_cv=True)
+    report = DoctorReport(checks=(), capabilities=caps)
+    assert "POM (write) + extended opcodes (read)" in verdict_lines(report)[2]
+
+
+def test_verdict_cv_above_255_says_pom_only_when_both_read_paths_are_rejected():
+    caps = Capabilities.unknown("test").with_learned(z21_cv_opcodes=False, service_ext_cv=False)
+    report = DoctorReport(checks=(), capabilities=caps)
+    assert "POM only (extended opcodes rejected: 61 82)" in verdict_lines(report)[2]
+
+
+def test_verdict_loco_addresses_names_the_xpressnet_form():
+    caps = Capabilities.unknown("test").with_learned(loco_address_threshold=100)
+    report = DoctorReport(checks=(), capabilities=caps)
+    assert "1-99 short, 100+ long (XpressNet form confirmed)" in verdict_lines(report)[3]
+
+
+def test_verdict_loco_addresses_names_the_z21_form():
+    caps = Capabilities.unknown("test").with_learned(loco_address_threshold=128)
+    report = DoctorReport(checks=(), capabilities=caps)
+    assert "1-127 short, 128+ long (Z21 form confirmed)" in verdict_lines(report)[3]
+
+
+def test_exit_code_for_report_is_zero_when_ok():
+    caps = Capabilities.unknown("test")
+    checks = tuple(Check(cid, CHECK_TITLES[cid], "ok", "") for cid in ("D0", "D1", "D2"))
+    report = DoctorReport(checks=checks, capabilities=caps)
+    assert report.ok is True
+    assert exit_code_for_report(report) == 0
+
+
+def test_exit_code_for_report_is_three_when_d1_failed():
+    caps = Capabilities.unknown("test")
+    checks = (
+        Check("D0", CHECK_TITLES["D0"], "ok", ""),
+        Check("D1", CHECK_TITLES["D1"], "fail", "no reply"),
+        Check("D2", CHECK_TITLES["D2"], "ok", ""),
+    )
+    report = DoctorReport(checks=checks, capabilities=caps)
+    assert report.ok is False
+    assert exit_code_for_report(report) == 3
+
+
+def test_station_probe_delegates_to_run_probe(doctor_bench):
+    report = doctor_bench.station.probe(address=50)
+    assert isinstance(report, DoctorReport)
+    assert report.check("D0") is not None
+
+
+def test_run_probe_verdict_lines_and_exit_code_for_report_are_exported_from_the_station_package():
+    from railctl.station import (
+        exit_code_for_report as exported_exit_code_for_report,
+    )
+    from railctl.station import (
+        run_probe as exported_run_probe,
+    )
+    from railctl.station import (
+        verdict_lines as exported_verdict_lines,
+    )
+
+    assert exported_run_probe is run_probe
+    assert exported_verdict_lines is verdict_lines
+    assert exported_exit_code_for_report is exit_code_for_report
