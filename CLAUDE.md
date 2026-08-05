@@ -52,6 +52,11 @@ done, run the full suite **once** with `PYTHONDONTWRITEBYTECODE=1`.
 A test that has never been seen to fail has not been shown to constrain anything. This is separate
 from mutation-testing tooling, which this project does not use at this stage.
 
+**Commit the fix BEFORE you mutate it.** `git checkout -- <path>` restores the file to HEAD, so it
+throws away every uncommitted change in that file, not only the mutation you just made. Proving a
+brand-new fix this way deletes the fix. Commit first, then mutate, then restore — or the restore is
+the thing that breaks the build.
+
 ## Checking CI
 
 Read the run's conclusion, not a shell exit status:
