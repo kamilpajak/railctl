@@ -1358,15 +1358,24 @@ __all__ = [
 Run: `uv run pytest tests/station/`
 Expected: PASS, `43 passed`
 
+*Corrected: `43` is what this task's first commit's own tests total, and it is what Step 14 above
+actually prints at this point in the plan. A review pass after that commit found
+`Capabilities.load`'s per-field type-rejection arms and `save`'s temp-file cleanup on a write
+failure exercised by no test in this file, and a follow-up commit,
+`test(station): cover capabilities load and save failure branches`, added ten more test nodes to
+close them - landing this task's own total at `53`, not `43`. Steps 15 and 16 below, and every
+later step in this plan that adds "Task 1's own total" to its running count, use `53`.
+
 - [ ] **Step 15: Run the full suite**
 
 Run: `uv run pytest`
-Expected: PASS, `963 passed` (the 920 already on `main` plus the 43 added here)
+Expected: PASS, `973 passed` (the `920` already on `main` plus this task's own total of `53`, per
+the note above - not `43`)
 
 - [ ] **Step 16: Check the coverage gate**
 
 Run: `uv run pytest --cov --cov-report=term-missing`
-Expected: the coverage table, now listing `src/railctl/station/__init__.py`, `src/railctl/station/types.py`, `src/railctl/station/timing.py` and `src/railctl/station/capabilities.py`, then `Required test coverage of 90% reached.` and `963 passed`. `src/railctl/station/` is not in `omit`, so every branch this task adds - every field-type check and the `notes` string/list split in `capabilities.py`, every arm of `DoctorReport.ok` in `types.py` - needs to be the reason a line here is covered, not an accident of some other test. If the total comes in under 90%, the uncovered lines in the `term-missing` column belong to this task's own new modules; fix the test, not the gate.
+Expected: the coverage table, now listing `src/railctl/station/__init__.py`, `src/railctl/station/types.py`, `src/railctl/station/timing.py` and `src/railctl/station/capabilities.py`, then `Required test coverage of 90% reached.` and `973 passed`. `src/railctl/station/` is not in `omit`, so every branch this task adds - every field-type check and the `notes` string/list split in `capabilities.py`, every arm of `DoctorReport.ok` in `types.py` - needs to be the reason a line here is covered, not an accident of some other test. If the total comes in under 90%, the uncovered lines in the `term-missing` column belong to this task's own new modules; fix the test, not the gate.
 
 - [ ] **Step 17: Lint and format check**
 
@@ -2093,25 +2102,51 @@ def test_exchange_maps_an_unknown_form_to_railctl_error_carrying_the_bytes(bench
     assert "71 00 71" in str(caught.value)
 
 
-def test_exchange_keeps_a_bad_cable_and_an_unknown_reply_form_apart(bench):
+def test_exchange_keeps_a_bad_cable_and_an_unknown_reply_form_apart(bench, monkeypatch):
     """xbus/replies.py's own docstring on `Other.reason`: "Collapsing these into one value
     leaves the station unable to tell a bad cable from a reply form we do not know." A
     REASON_CHECKSUM/REASON_LENGTH `Other` is the LINK damaging bytes and gets `ProtocolError`
     (exit 4); a REASON_EMPTY/REASON_UNKNOWN_FORM `Other` is an incomplete reply table and stays
     on the base `RailctlError` (exit 9). This is the one test that pins the two exit codes
-    apart from each other - folding either mapping into the other makes this go red."""
-    bench.expect(CMD_STATION_VERSION, BAD_CHECKSUM_REPLY)
+    apart from each other - folding either mapping into the other makes this go red.
+
+    BAD_CHECKSUM_REPLY cannot be scripted through `bench.expect()`: the LI-USB envelope
+    (`railctl.envelope.liusb.LiUsbEnvelope.pop`) validates the xbus XOR itself while it hunts
+    for a frame boundary, so a reply with a bad checksum is discarded as noise before `Link`
+    ever hands it back - the exchange would see a timeout, never a damaged reply. `Link.request`
+    is monkeypatched directly instead, which is exactly what `exchange()` calls; this proves
+    `exchange()`'s own mapping table, not the envelope's frame search.
+    """
+    original_request = bench.link.request
+    monkeypatch.setattr(bench.link, "request", lambda telegram, *, timeout=None: BAD_CHECKSUM_REPLY)
     with pytest.raises(ProtocolError) as bad_cable:
         bench.station.version()
     assert exit_code_for(bad_cable.value) == 4
+    monkeypatch.setattr(bench.link, "request", original_request)
 
     bench.expect(CMD_STATION_VERSION, UNKNOWN_FORM_REPLY)
     with pytest.raises(RailctlError) as unknown_form:
         bench.station.version()
     assert exit_code_for(unknown_form.value) == 9
     assert exit_code_for(bad_cable.value) != exit_code_for(unknown_form.value)
+```
 
+*Corrected: as scripted above through `bench.expect()`, this test cannot reach `Station.exchange()`
+at all. The LI-USB envelope validates the X-Bus XOR itself while hunting for a frame boundary, so a
+reply with a deliberately bad checksum is discarded as noise and the call times out instead of
+reaching `exchange()` as a damaged reply. The committed version monkeypatches `Link.request`
+directly - exactly what `exchange()` calls - and keeps the docstring paragraph explaining why,
+because it names the layering fact that makes the naive version impossible.
 
+That fact is worth a second paragraph of its own: it means `Other(reason="checksum")` is
+UNREACHABLE through the live stack. The envelope's own `bad_xor` counter carries that fact
+instead, one layer down, in `railctl.envelope.liusb`. The mapping from a checksum-reason `Other`
+to `ProtocolError` in `exchange()` is therefore defensive rather than dead - a future Z21 envelope
+does its own framing and could hand a damaged telegram up to `Link` - but nobody should expect to
+see it fire on this transport, and a reviewer who finds that branch uncovered should read this
+note before "fixing" it.
+
+```python
 @pytest.mark.parametrize(
     "reply_bytes",
     [SHORT_CIRCUIT_REPLY, TRACK_SHORT_CIRCUIT_REPLY, BUSY_REPLY, STATION_BUSY_REPLY],
@@ -2610,10 +2645,26 @@ class Station:
             if address is None:
                 self.exchange(cmd_emergency_stop_all(), timeout=self.timing.li_ack_normal)
                 return
-            self._warn_if_unverified_band(address)
             telegram = cmd_emergency_stop_loco(address, threshold=self.threshold)
-            self.exchange(telegram, timeout=self.timing.li_ack_normal)
+            try:
+                self.exchange(telegram, timeout=self.timing.li_ack_normal)
+            finally:
+                self._warn_if_unverified_band(address)
+```
 
+*Corrected: the warning call moves from before the exchange to a `finally` wrapped around it. As
+written above (warn, then build the telegram, then exchange), `_warn_if_unverified_band` fires and
+emits `address.band_unverified` before `CMD_EMERGENCY_STOP_LOCO_105` has even been sent - which
+breaks `test_status_call_from_inside_on_event_does_not_deadlock` below (Step 7): its `on_event`
+callback reacts to that same event by scripting and sending `CMD_STATION_STATUS` from inside the
+still-running `emergency_stop()` call, and `FakeTransport` matches requests strictly in the order
+they were scripted, so the re-entrant `status()` request would have to go out before the
+emergency-stop telegram it is nested inside of - which never happens on the wire. Moving the
+warning into a `finally` also keeps it on the silent path: `_warn_if_unverified_band` is the one
+hint that matters most when the station never answers at all, and a bare `self.exchange(...)` call
+with no `finally` would lose the warning on exactly the `LinkTimeout` branch where it matters most.
+
+```python
     def _warn_if_unverified_band(self, address: int) -> None:
         """Addresses 100..127 are where XpressNet and Z21 disagree about the wire form. Until
         the doctor's D10 measures which one this station uses, `threshold` defaults to 100 and
@@ -2780,13 +2831,14 @@ Expected: `Station`
 uv run pytest
 ```
 
-Expected: `PASS`, `963 + 63 = 1026 passed` - `963` is Task 1's own full-suite total
-(task-1.md Step 15: the `920` already on `main` plus Task 1's `43`); `63` is this task's own total
-from Step 10. Only Tasks 1 and 2 have landed at this point in the plan's execution order, so this
-is the sum of exactly those two files' own counts, not a guessed number - if the actual run
-disagrees by a small amount, treat it as an arithmetic slip in one of the two files' step counts
-and correct it in place; if a *different* test fails, that is a real signal and this step must
-stop, not paper over it.
+Expected: `PASS`, `973 + 63 = 1036 passed` - `973` is Task 1's own full-suite total, corrected
+(Task 1 Step 15: the `920` already on `main` plus Task 1's actual landed total of `53`, not the
+`43` its own Step 14 first prints - see the note there); `63` is this task's own total from Step 10.
+Only Tasks 1 and 2 have landed at this point in the plan's execution order, so this is the sum of
+exactly those two files' own counts, not a guessed number - if the actual run disagrees by a small
+amount, treat it as an arithmetic slip in one of the two files' step counts and correct it in
+place; if a *different* test fails, that is a real signal and this step must stop, not paper over
+it.
 
 ```bash
 uv run pytest --cov --cov-report=term-missing
@@ -3815,6 +3867,10 @@ Append these methods to `Station`:
     ) -> None:
         group = FUNCTION_BITS[function][0]
         state = self.function_state(address, refresh=True)
+        # `function` gets its real requested value here, before `missing` is
+        # computed, so the function being written is never counted among the
+        # ones this call has to seed - it is known, by the caller's own hand.
+        state[function] = on
         missing = [f for f in GROUP_FUNCTIONS[group] if f not in state]
         if missing and not force_group:
             raise StationError(
@@ -3829,13 +3885,23 @@ Append these methods to `Station`:
                 "function.group_seeded",
                 {"address": address, "group": group.name, "functions": tuple(missing)},
             )
-        state[function] = on
         bits = pack_function_bits(group, state)
         telegram = commands.cmd_function_group(address, group, bits, threshold=self.threshold)
         reply = self.exchange(telegram, timeout=self.timing.li_ack_normal)
         self._expect_ack(reply)
         self._function_shadow[address] = state
+```
 
+*Corrected: `state[function] = on` moves above the `missing` computation. As written above, `missing`
+is computed while `state` still holds only what `function_state()` read - before the function this
+call is actually writing has been recorded - so a function this call is deliberately setting could
+itself come back as "missing" and get folded into the seeded-`False` set and the
+`function.group_seeded` payload. `test_function_set_with_force_group_seeds_false_and_emits_an_event`
+below writes F14 with `force_group=True` and asserts
+`set(payload["functions"]) == {13, 15, 16, 17, 18, 19, 20}` - G4 minus F14 - so the function being
+written must already be in `state` by the time `missing` is built, not after.
+
+```python
     def function_set(
         self, address: int, function: int, on: bool, *, force_group: bool = False
     ) -> None:
