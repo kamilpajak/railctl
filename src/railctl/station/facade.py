@@ -41,7 +41,7 @@ from railctl.link import Link
 from railctl.station.capabilities import LEARNABLE_FIELDS, UNKNOWN_IDENTITY, Capabilities
 from railctl.station.programming import CvProgrammer
 from railctl.station.timing import TIMING, Timing
-from railctl.station.types import StationEvent
+from railctl.station.types import CvPage, CvResult, ProgMode, StationEvent
 from railctl.transport import open_link
 from railctl.xbus import replies
 from railctl.xbus.address import LOCO_ADDR_MAX, LOCO_ADDR_MIN
@@ -294,6 +294,18 @@ class Station:
         with self._lock:
             for clear in self._cache_clears:
                 clear()
+
+    # -- CV programming -------------------------------------------------
+    def cv_read(
+        self,
+        cv: int,
+        *,
+        address: int | None = None,
+        mode: ProgMode = ProgMode.AUTO,
+        page: CvPage | None = None,
+    ) -> CvResult:
+        with self._lock:
+            return self.programmer.cv_read(cv, address=address, mode=mode, page=page)
 
     # -- session ---------------------------------------------------------
     def close(self) -> None:

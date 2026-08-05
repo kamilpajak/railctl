@@ -10,23 +10,44 @@ numbers and reply idents without ever touching a wire byte itself.
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import TYPE_CHECKING, Literal
+from typing import TYPE_CHECKING, Final, Literal
 
 from railctl.errors import (
+    CvOutOfRangeError,
     DecoderNoAckError,
     DecoderNotRespondingError,
     LinkTimeout,
     PomReadUnsupportedError,
     ShortCircuitError,
+    StationBusyError,
     TrackPowerError,
     UnsupportedCommandError,
 )
 from railctl.station.capabilities import Capabilities
-from railctl.station.types import CvResult, ProgMode
-from railctl.xbus.commands import cmd_pom_read_byte, cmd_service_result_request
-from railctl.xbus.cv import CvEncoding, decode_echo, echo_candidates, result_ident_for
+from railctl.station.types import CvPage, CvResult, ProgMode
+from railctl.xbus.commands import (
+    cmd_pom_read_byte,
+    cmd_service_direct_read,
+    cmd_service_ext_read,
+    cmd_service_result_request,
+    cmd_track_power_off,
+    cmd_track_power_on,
+    cmd_z21_cv_read,
+)
+from railctl.xbus.cv import (
+    CV_MIN,
+    MAX_CV_DIRECT,
+    MAX_CV_EXT,
+    MAX_CV_Z21,
+    CvEncoding,
+    decode_echo,
+    echo_candidates,
+    ext_cv_fields,
+    result_ident_for,
+)
 from railctl.xbus.replies import (
     TRANSIENT_REPLIES,
+    Busy,
     CvValue,
     NoAck,
     PagedCvValue,
@@ -34,6 +55,7 @@ from railctl.xbus.replies import (
     Reply,
     ShortCircuit,
     TrackShortCircuit,
+    Unsupported,
     parse,
 )
 
@@ -41,6 +63,8 @@ if TYPE_CHECKING:
     from railctl.station.facade import Station
 
 __all__ = [
+    "SERVICE_ENCODING_ORDER",
+    "UNEXERCISED_BANDS",
     "CvMatcher",
     "CvProgrammer",
     "ResultChannelSeen",
@@ -62,6 +86,14 @@ class TimedOut:
 
 WaitOutcome = Reply | TimedOut
 ResultChannelSeen = Literal["broadcast", "poll"]
+
+SERVICE_ENCODING_ORDER: Final[tuple[tuple[str, CvEncoding], ...]] = (
+    ("z21_cv_opcodes", CvEncoding.Z21_16BIT),
+    ("service_direct_cv", CvEncoding.SERVICE_DIRECT),
+    ("service_ext_cv", CvEncoding.SERVICE_EXT),
+)
+UNEXERCISED_BANDS: Final[frozenset[int]] = frozenset({2, 3})  # 63 16 / 63 17, never answered here
+_REGISTER_COLLISION_MAX: Final[int] = 8  # registers 1..8 collide with CV1..8
 
 
 class CvMatcher:
@@ -187,6 +219,237 @@ class CvProgrammer:
         no-op stub until Task 6 populates `_ensure_page`'s cache - there is
         nothing to clear yet, but the hook has to exist now."""
         self._pages.clear()
+
+    def service_read_telegram(self, cv: int) -> tuple[bytes, CvEncoding, int]:
+        """Choose the wire encoding for a service-mode CV read.
+
+        Z21 first, not third: measured on the reference station, the Z21
+        16-bit opcode covers CV1..1024 in one unambiguous field and its
+        result arrives unsolicited - the only channel here that cannot
+        return a stale stored result. `service_direct` answers nothing at
+        all until separately polled with `21 10 31`; leading with it (the
+        earlier order) means every read pays for a poll round trip the Z21
+        opcode never needs.
+
+        Every step requires its capability to be exactly True. `None` means
+        "not established" - docs/probe-results.md distinguishes true, false
+        and unknown throughout - and an unprobed station never sends an
+        opcode that has not been observed to work.
+        """
+        capabilities = self._station.capabilities
+        if capabilities.z21_cv_opcodes is True and cv <= MAX_CV_Z21:
+            return cmd_z21_cv_read(cv), CvEncoding.Z21_16BIT, 0
+        if capabilities.service_direct_cv is True and cv <= MAX_CV_DIRECT:
+            return cmd_service_direct_read(cv), CvEncoding.SERVICE_DIRECT, 0
+        if capabilities.service_ext_cv is True and cv <= MAX_CV_EXT:
+            page, _ = ext_cv_fields(cv)
+            return cmd_service_ext_read(cv), CvEncoding.SERVICE_EXT, page
+        if all(getattr(capabilities, name) is None for name, _ in SERVICE_ENCODING_ORDER):
+            raise CvOutOfRangeError(
+                f"CV{cv} is not reachable in service mode: no encoding has been "
+                f"probed on this command station (Z21 covers CV{CV_MIN}..{MAX_CV_Z21}, "
+                f"extended CV{CV_MIN}..{MAX_CV_EXT}, direct CV{CV_MIN}..{MAX_CV_DIRECT}, "
+                f"all unknown)",
+                hint="run `railctl doctor` to probe the service-mode encodings",
+                cv=cv,
+            )
+        raise CvOutOfRangeError(
+            f"CV{cv} is not reachable in service mode on this command station "
+            f"(no extended or Z21 CV opcodes; direct opcodes only cover "
+            f"CV{CV_MIN}..{MAX_CV_DIRECT})",
+            hint="use `--mode pom`",
+            cv=cv,
+        )
+
+    def exit_service_mode(self, *, restore_power: bool) -> None:
+        """Leave service mode and restore the pre-operation track power state.
+
+        Always called from a `finally` by every service-mode caller: a
+        `DecoderNoAckError` raised mid-read must still send resume-operations,
+        because that is what re-energises the main track, and skipping it
+        here would leave the layout dead until the next unrelated command
+        happens to touch power.
+
+        Every exchange in this method uses `TIMING.li_ack_programming`, the
+        same 95 s budget as the read itself, through completion: the LI-USB
+        rule is that no new command may be sent until the previous one is
+        acknowledged, and the station may still be finishing the read's
+        internal retries when this runs.
+        """
+        try:
+            left_service_mode = False
+            for _ in range(2):
+                self._station.exchange(
+                    cmd_track_power_on(), timeout=self._station.timing.li_ack_programming
+                )
+                self._station.pause(self._station.timing.service_exit_settle)
+                if not self._station.status().service_mode:
+                    left_service_mode = True
+                    break
+            if not left_service_mode:
+                raise StationBusyError(
+                    "the command station is still reporting service mode after "
+                    "resume-operations was sent twice"
+                )
+            if not restore_power:
+                # Not optional: the measured state of this hardware is an
+                # unpowered bench track, and the station's start mode is
+                # automatic, so every service read would otherwise start the
+                # locomotives moving.
+                self._station.exchange(
+                    cmd_track_power_off(), timeout=self._station.timing.li_ack_programming
+                )
+        finally:
+            self._station.invalidate_caches()
+
+    def service_read(self, cv: int) -> CvResult:
+        """Read one CV over the programming track in service mode.
+
+        Service mode is addressed by TRACK, not by locomotive: there is no
+        `address` parameter here at all, and nothing in this method sends
+        one. `Station.cv_read` still accepts an address for the POM path
+        and warns when one is given alongside `mode=SERVICE`.
+
+        Never retried automatically, unlike POM's three attempts: a service
+        read already costs up to `TIMING.service_result` (95 s) and the
+        command station retries the decoder handshake internally. One
+        failing read here is exactly one telegram plus its polls.
+
+        Takes no `page` keyword yet - Task 6 adds it, together with
+        `ensure_page`'s call at the top of this method, in the step that
+        implements `ensure_page` (1.5).
+        """
+        telegram, encoding, page_index = self.service_read_telegram(cv)
+        power_before = self._station.status().track_power
+        start = self._station.now()
+        try:
+            reply = self._station.exchange(
+                telegram, timeout=self._station.timing.li_ack_programming
+            )
+            if isinstance(reply, Unsupported):
+                # `Station.exchange` (facade.py) already turns a `61 82` reply
+                # into `UnsupportedCommandError` rather than returning
+                # `Unsupported` - by the time a reply reaches this method it
+                # can never actually BE `Unsupported`. Same reasoning as
+                # `Station._expect_ack`; kept as a totality guard, not dead
+                # code by oversight.
+                raise UnsupportedCommandError(
+                    f"the command station rejected the service-mode read opcode for CV{cv}"
+                )
+            matcher = CvMatcher(
+                encoding,
+                cv,
+                page_index=page_index if encoding is CvEncoding.SERVICE_EXT else None,
+            )
+            outcome = self.await_result(
+                matcher,
+                timeout=self._station.timing.service_result,
+                first_delay=self._station.timing.service_first_poll_delay,
+                interval=self._station.timing.service_poll_interval,
+                exchange_timeout=self._station.timing.li_ack_programming,
+                allow_poll=True,
+                ready_means_done=False,
+                context="service",
+            )
+            return self._finish_service_read(cv, encoding, page_index, outcome, start)
+        finally:
+            self.exit_service_mode(restore_power=power_before)
+
+    def _finish_service_read(
+        self,
+        cv: int,
+        encoding: CvEncoding,
+        page_index: int,
+        outcome: object,
+        start: float,
+    ) -> CvResult:
+        no_ack_hint = (
+            "decoder did not acknowledge; sound decoders often fail on a 750 mA "
+            "programming track - use POM instead"
+        )
+        if isinstance(outcome, CvValue):
+            if encoding is CvEncoding.SERVICE_EXT and page_index in UNEXERCISED_BANDS:
+                self._station.emit("cv.unexercised_band", {"cv": cv, "page": page_index})
+            return CvResult(
+                cv=cv,
+                value=outcome.value,
+                mode=ProgMode.SERVICE,
+                encoding=encoding,
+                operation="read",
+                verified=None,
+                elapsed=self._station.now() - start,
+            )
+        if isinstance(outcome, PagedCvValue):
+            self._station.learn(service_direct_cv=False)
+            if cv <= _REGISTER_COLLISION_MAX:
+                raise DecoderNotRespondingError(
+                    f"the station fell back to register mode for CV{cv}; register "
+                    f"numbers 1-8 are indistinguishable from these CV numbers, so "
+                    f"the value is not usable",
+                    cv=cv,
+                )
+            if outcome.raw_register in echo_candidates(CvEncoding.SERVICE_DIRECT, cv):
+                return CvResult(
+                    cv=cv,
+                    value=outcome.value,
+                    mode=ProgMode.SERVICE,
+                    encoding=CvEncoding.SERVICE_DIRECT,
+                    operation="read",
+                    verified=None,
+                    elapsed=self._station.now() - start,
+                )
+            raise DecoderNotRespondingError(
+                f"CV{cv}: the paged-mode fallback reply ({outcome.raw_register}, "
+                f"{outcome.value}) does not correspond to this CV",
+                cv=cv,
+            )
+        if isinstance(outcome, NoAck):
+            raise DecoderNoAckError(
+                f"CV{cv}: no acknowledgement from the decoder (61 13)",
+                hint=no_ack_hint,
+                cv=cv,
+            )
+        if isinstance(outcome, ShortCircuit):
+            raise ShortCircuitError(f"short circuit on the programming track reading CV{cv}", cv=cv)
+        if isinstance(outcome, Busy):
+            raise StationBusyError(
+                f"a programming operation was already running; CV{cv} read did not start",
+                cv=cv,
+            )
+        if isinstance(outcome, TimedOut):
+            if outcome.saw_no_ack:
+                raise DecoderNoAckError(
+                    f"CV{cv}: no acknowledgement from the decoder (61 13)",
+                    hint=no_ack_hint,
+                    cv=cv,
+                )
+            raise DecoderNotRespondingError(
+                f"no result arrived for CV{cv} within {self._station.timing.service_result} s",
+                cv=cv,
+            )
+        raise DecoderNotRespondingError(
+            f"unexpected reply reading CV{cv} in service mode: {outcome!r}", cv=cv
+        )
+
+    def cv_read(
+        self,
+        cv: int,
+        *,
+        address: int | None = None,
+        mode: ProgMode = ProgMode.AUTO,
+        page: CvPage | None = None,
+    ) -> CvResult:
+        """Read one CV, choosing POM or service mode through `resolve_mode`.
+
+        `address` matters only on the POM path; service mode is addressed
+        by track and never sends one. `page` is accepted for signature
+        symmetry with the write side - selecting the CV257..512 index page
+        is `ensure_page`'s job, added in Task 6, not this one.
+        """
+        resolved = resolve_mode(mode, self._station.capabilities, operation="read")
+        if resolved is ProgMode.POM:
+            return self.pom_read(cv, address=address)
+        return self.service_read(cv)
 
     def _learn_result_channel(
         self, context: Literal["pom", "service"], channel: ResultChannelSeen
