@@ -927,12 +927,20 @@ def test_the_doctor_never_writes_a_decoder_cv(doctor_bench):
     )
     run_probe(doctor_bench.station, address=105, now_utc=lambda: "2026-08-05T00:00:00Z")
 
-    # doctor_bench.sent, not .transport.written: the latter is framed, so
-    # telegram[0]/telegram[1] would read the envelope's own prefix bytes on
-    # every request rather than the X-Bus header and DB0 this check needs -
-    # every `assert not (...)` below would hold vacuously no matter what
-    # doctor.py sent, which is not a test, it is a tautology with a docstring.
-    for telegram in doctor_bench.sent:
+    # Unframed one write() call at a time, NOT doctor_bench.sent: that property
+    # joins every frame written since open() into a single buffer and feeds it
+    # through one LiUsbEnvelope, whose `feed()` caps its buffer at MAX_BUFFER
+    # (envelope/liusb.py) and silently drops the oldest bytes once a run's
+    # telegrams overflow it - this D0-D12 run is long enough to trigger exactly
+    # that truncation, which would leave the early checks unchecked while this
+    # test still reports green. `transport.written` holds one complete framed
+    # telegram per write() call (chunk_size only fragments *reads*), so
+    # unframing each entry with its own fresh decoder can't truncate.
+    telegrams = [doctor_bench.unframe(framed) for framed in doctor_bench.transport.written]
+    assert len(telegrams) > 20, (
+        "the run sent far fewer telegrams than expected - probe wiring broke"
+    )
+    for telegram in telegrams:
         header, db0 = telegram[0], telegram[1]
         assert not (header == 0xE6 and db0 == 0x30 and telegram[4] & 0xFC == POM_WRITE_BYTE_BASE)
         assert not (header == 0xE6 and db0 == 0x30 and telegram[4] & 0xFC == POM_WRITE_BIT_BASE)
@@ -996,6 +1004,21 @@ def test_verdict_primary_cv_path_points_at_fallback_when_pom_is_unsupported():
     caps = Capabilities.unknown("test").with_learned(pom_read=False)
     report = DoctorReport(checks=(), capabilities=caps)
     assert "POM unavailable (61 82); see Fallback" in verdict_lines(report)[0]
+
+
+def test_verdict_primary_cv_path_names_silence_not_61_82_when_that_is_the_provenance():
+    """D4's own exception (doctor.py's `_SILENCE_NOTE` path) records `pom_read=False` with
+    `pom_result_channel="none"` when the POM read produced no result at all - neither a value
+    nor `61 13` nor `61 82`. The verdict line must not claim the station said `61 82` when the
+    real cause was silence; the two origins must render two different lines."""
+    unsupported_caps = Capabilities.unknown("test").with_learned(pom_read=False)
+    silence_caps = Capabilities.unknown("test").with_learned(
+        pom_read=False, pom_result_channel="none"
+    )
+    unsupported_line = verdict_lines(DoctorReport(checks=(), capabilities=unsupported_caps))[0]
+    silence_line = verdict_lines(DoctorReport(checks=(), capabilities=silence_caps))[0]
+    assert "POM unavailable (silence, not 61 82); see Fallback" in silence_line
+    assert silence_line != unsupported_line
 
 
 def test_verdict_fallback_names_direct_service_mode_first():
@@ -1074,10 +1097,49 @@ def test_exit_code_for_report_is_three_when_d1_failed():
     assert exit_code_for_report(report) == 3
 
 
-def test_station_probe_delegates_to_run_probe(doctor_bench):
-    report = doctor_bench.station.probe(address=50)
+def test_station_probe_delegates_to_run_probe(doctor_bench, monkeypatch):
+    """Pins the wiring itself, not something incidentally true of every wiring: a spy replaces
+    `run_probe` (patched on `railctl.station.doctor`, which is where `Station.probe`'s lazy
+    `from railctl.station.doctor import run_probe` resolves it at call time) and records the
+    exact arguments it was called with, so corrupting any one of the three keyword arguments -
+    or the station reference itself - fails this test directly rather than leaving it green
+    because `report.check("D0")` happens to hold regardless of what `probe()` forwarded."""
+    calls: list[dict[str, object]] = []
+
+    def spy(
+        station: object,
+        *,
+        address: int | None = None,
+        allow_power_on: bool = False,
+        use_programming_track: bool = True,
+    ) -> DoctorReport:
+        calls.append(
+            {
+                "station": station,
+                "address": address,
+                "allow_power_on": allow_power_on,
+                "use_programming_track": use_programming_track,
+            }
+        )
+        return DoctorReport(
+            checks=(Check("D0", CHECK_TITLES["D0"], "ok", ""),),
+            capabilities=doctor_bench.station.capabilities,
+        )
+
+    monkeypatch.setattr(doctor_module, "run_probe", spy)
+    report = doctor_bench.station.probe(
+        address=50, allow_power_on=True, use_programming_track=False
+    )
     assert isinstance(report, DoctorReport)
     assert report.check("D0") is not None
+    assert calls == [
+        {
+            "station": doctor_bench.station,
+            "address": 50,
+            "allow_power_on": True,
+            "use_programming_track": False,
+        }
+    ]
 
 
 def test_run_probe_verdict_lines_and_exit_code_for_report_are_exported_from_the_station_package():

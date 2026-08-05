@@ -593,6 +593,8 @@ def _primary_cv_path(caps: Capabilities) -> str:
         channel = caps.pom_result_channel or "unknown"
         return f"POM (results arrive via {channel})"
     if caps.pom_read is False:
+        if caps.pom_result_channel == "none":
+            return "POM unavailable (silence, not 61 82); see Fallback"
         return "POM unavailable (61 82); see Fallback"
     return "unknown (re-run the doctor to establish this)"
 
