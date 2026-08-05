@@ -26,7 +26,7 @@ from railctl.errors import (
 from railctl.station.programming import CvMatcher
 from railctl.station.timing import TIMING
 from railctl.station.types import Check, DoctorReport
-from railctl.xbus.commands import cmd_service_direct_read, cmd_z21_cv_read
+from railctl.xbus.commands import cmd_service_direct_read, cmd_service_ext_read, cmd_z21_cv_read
 from railctl.xbus.cv import CvEncoding
 from railctl.xbus.replies import (
     UNSUPPORTED,
@@ -278,6 +278,36 @@ def _check_d6(station: Station) -> Check:
     return Check("D6", CHECK_TITLES["D6"], "unknown", "no result within the service-mode budget")
 
 
+def _check_d7(station: Station) -> Check:
+    high_cv = 257  # first CV of page 1 - 22 19 01, the design's own example
+    try:
+        low = _service_probe(
+            station, cmd_service_ext_read(PROBE_CV), PROBE_CV, CvEncoding.SERVICE_EXT
+        )
+        high = _service_probe(
+            station, cmd_service_ext_read(high_cv), high_cv, CvEncoding.SERVICE_EXT
+        )
+    except RailctlError as exc:
+        return Check("D7", CHECK_TITLES["D7"], "fail", str(exc))
+    low_ok, high_ok = isinstance(low, CvValue), isinstance(high, CvValue)
+    if low_ok and high_ok:
+        detail = f"extended read confirmed on CV{PROBE_CV} and CV{high_cv}"
+        station.record(service_ext_cv=True)
+        return Check("D7", CHECK_TITLES["D7"], "ok", detail)
+    low_unsupported, high_unsupported = isinstance(low, Unsupported), isinstance(high, Unsupported)
+    if low_unsupported or high_unsupported:
+        failed_cv = PROBE_CV if low_unsupported else high_cv
+        station.record(service_ext_cv=False)
+        detail = f"extended opcodes rejected for CV{failed_cv}'s band (61 82)"
+        return Check("D7", CHECK_TITLES["D7"], "ok", detail)
+    # Neither band was definitively rejected, yet they disagree (one silent,
+    # one NoAck, or both inconclusive): a decoder-side non-answer is not a
+    # station capability. Leave service_ext_cv at None rather than guessing.
+    inconclusive_cv = PROBE_CV if not low_ok else high_cv
+    detail = f"CV{inconclusive_cv}'s band gave no conclusive result within the service-mode budget"
+    return Check("D7", CHECK_TITLES["D7"], "unknown", detail)
+
+
 def run_probe(
     station: Station,
     *,
@@ -314,8 +344,8 @@ def run_probe(
         try:
             checks.append(_check_d5(station))
             checks.append(_check_d6(station))
-            for check_id in ("D7", "D8"):
-                checks.append(Check(check_id, CHECK_TITLES[check_id], "skip", _PLACEHOLDER_DETAIL))
+            checks.append(_check_d7(station))
+            checks.append(Check("D8", CHECK_TITLES["D8"], "skip", _PLACEHOLDER_DETAIL))
         finally:
             station.programmer.exit_service_mode(restore_power=power_before)
     else:

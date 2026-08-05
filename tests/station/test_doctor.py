@@ -37,6 +37,7 @@ from railctl.xbus.commands import (
     REQ_4_DATA,
     cmd_pom_read_byte,
     cmd_service_direct_read,
+    cmd_service_ext_read,
     cmd_service_result_request,
     cmd_station_status,
     cmd_station_version,
@@ -465,3 +466,72 @@ def test_d6_unsupported_records_z21_cv_opcodes_false(doctor_bench):
     doctor_bench.transport.on_write.set(cmd_z21_cv_read(1), UNSUPPORTED_REPLY)
     report = run_probe(doctor_bench.station, now_utc=lambda: "2026-08-05T00:00:00Z")
     assert report.capabilities.z21_cv_opcodes is False
+
+
+EXT_HIGH_PROBE_CV = 257  # first CV of page 1: 22 19 01, the design's own example
+
+
+def test_d7_both_bands_succeed_records_service_ext_cv_true(doctor_bench):
+    # queue_once_for, not queue_once: D5 and D6 poll the identical 21 10
+    # telegram before D7's low band does, and CV8's reply would satisfy D5's
+    # own matcher too - a plain queue_once would let D5 (and, for the second
+    # reply, D6) drain both replies before D7 ever gets a turn.
+    doctor_bench.transport.on_write.queue_once_for(
+        cmd_service_ext_read(PROBE_CV), cv_reply(0x14, PROBE_CV, PROBE_CV_VALUE)
+    )
+    doctor_bench.transport.on_write.queue_once_for(
+        cmd_service_ext_read(EXT_HIGH_PROBE_CV), cv_reply(0x15, 1, 7)
+    )
+    report = run_probe(doctor_bench.station, now_utc=lambda: "2026-08-05T00:00:00Z")
+    assert report.capabilities.service_ext_cv is True
+    d7 = report.check("D7")
+    assert str(PROBE_CV) in d7.detail and str(EXT_HIGH_PROBE_CV) in d7.detail
+
+
+def test_d7_high_band_rejected_records_false_and_names_the_band(doctor_bench):
+    """Pinned: a station could accept the low page and refuse the high one -
+    service_ext_cv is True only when BOTH succeed, and the failing band is
+    named so a user knows CV257+ is unreachable in service mode here. A 61 82
+    is the only reply this project ever lets a check record False from."""
+    # queue_once_for, not queue_once, for the same reason as the test above:
+    # D5 polls the identical 21 10 telegram first and CV8's reply satisfies its
+    # matcher too, so a plain queue_once is drained by D5 and D7's low band gets
+    # nothing. The assertions below would still pass - the detail names the high
+    # band whenever the high band is refused, whatever happened to the low one -
+    # so this test would go on reporting success while measuring a case its own
+    # docstring does not describe: accepts the low page, refuses the high one.
+    doctor_bench.transport.on_write.queue_once_for(
+        cmd_service_ext_read(PROBE_CV), cv_reply(0x14, PROBE_CV, PROBE_CV_VALUE)
+    )
+    doctor_bench.transport.on_write.set(cmd_service_ext_read(EXT_HIGH_PROBE_CV), UNSUPPORTED_REPLY)
+    report = run_probe(doctor_bench.station, now_utc=lambda: "2026-08-05T00:00:00Z")
+    assert report.capabilities.service_ext_cv is False
+    assert str(EXT_HIGH_PROBE_CV) in report.check("D7").detail
+    # A refused band is a real, measured fact about this station, not a
+    # failure of the probe itself - "fail" would print FAIL for a classic
+    # XpressNet station that is merely different, and D5/D6 render the
+    # identical 61 82 fact as "ok" too.
+    assert report.check("D7").status == "ok"
+
+
+def test_d7_one_band_noack_leaves_service_ext_cv_unknown_not_false(doctor_bench):
+    """Pinned regression: a decoder that fails to acknowledge on ONE band (a
+    decoder fact) must not be recorded as 'this station lacks extended
+    opcodes' (a station fact) in capabilities.json - that is the exact M1
+    failure this project exists to avoid. Only an actual 61 82 may write
+    False; a NoAck disagreement between the two bands leaves the capability
+    None and the check 'unknown', naming which band was inconclusive."""
+    # queue_once_for, not queue_once: without scoping to D7's own low-band
+    # probe, D5 (which polls first and shares CV8's exact reply bytes with
+    # D7's low band) drains this before D7 gets a turn, and D7's low band
+    # ends up as inconclusive as its high band - naming CV8, not CV257, and
+    # failing the assertion below for a reason the test is not about.
+    doctor_bench.transport.on_write.queue_once_for(
+        cmd_service_ext_read(PROBE_CV), cv_reply(0x14, PROBE_CV, PROBE_CV_VALUE)
+    )
+    doctor_bench.transport.on_write.set(cmd_service_ext_read(EXT_HIGH_PROBE_CV), NOACK_REPLY)
+    report = run_probe(doctor_bench.station, now_utc=lambda: "2026-08-05T00:00:00Z")
+    assert report.capabilities.service_ext_cv is None
+    d7 = report.check("D7")
+    assert d7.status == "unknown"
+    assert str(EXT_HIGH_PROBE_CV) in d7.detail
