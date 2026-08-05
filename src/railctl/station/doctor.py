@@ -25,7 +25,12 @@ from railctl.errors import (
 )
 from railctl.station.programming import CvMatcher
 from railctl.station.timing import TIMING
-from railctl.station.types import Check, DoctorReport
+from railctl.station.types import (
+    DECODER_TYPE_CV,
+    Check,
+    DoctorReport,
+    decoder_family,
+)
 from railctl.xbus.commands import cmd_service_direct_read, cmd_service_ext_read, cmd_z21_cv_read
 from railctl.xbus.cv import CvEncoding
 from railctl.xbus.replies import (
@@ -336,6 +341,38 @@ def _check_d8(station: Station, *, d4_noack: bool, d5_passed: bool) -> Check:
     return Check("D8", CHECK_TITLES["D8"], "unknown", "CV29/CV28 not readable in service mode")
 
 
+def _best_effort_read(station: Station, cv: int) -> int | None:
+    """Read one CV through whichever path D4-D7 already proved works: POM
+    first if `pom_read` is proven True and an address is resolvable, then a
+    single high-level `service_read` call, which already walks
+    SERVICE_ENCODING_ORDER (Z21, then direct, then extended) internally and
+    raises when none of those is proven. This file does no band or page
+    arithmetic of its own - that stays inside `service_read`, exactly as Rule
+    2 under `station/` requires."""
+    caps = station.capabilities
+    address = station.default_address
+    if caps.pom_read is True and address is not None:
+        try:
+            return station.programmer.pom_read(cv, address=address).value
+        except RailctlError:
+            pass
+    try:
+        return station.programmer.service_read(cv).value
+    except RailctlError:
+        return None
+
+
+def _check_d9(station: Station) -> Check:
+    values = {cv: _best_effort_read(station, cv) for cv in IDENTITY_CVS}
+    family = decoder_family(values[DECODER_TYPE_CV])
+    read_count = sum(1 for value in values.values() if value is not None)
+    rendered = ", ".join(
+        f"CV{cv}={values[cv]}" if values[cv] is not None else f"CV{cv}=?" for cv in IDENTITY_CVS
+    )
+    status = "ok" if read_count else "skip"
+    return Check("D9", CHECK_TITLES["D9"], status, f"decoder family: {family}; {rendered}")
+
+
 def run_probe(
     station: Station,
     *,
@@ -391,7 +428,8 @@ def run_probe(
         for check_id in ("D5", "D6", "D7", "D8"):
             checks.append(Check(check_id, CHECK_TITLES[check_id], "skip", skip_detail))
 
-    for check_id in CHECK_IDS[9:]:
+    checks.append(_check_d9(station))
+    for check_id in CHECK_IDS[10:]:
         checks.append(Check(check_id, CHECK_TITLES[check_id], "skip", _PLACEHOLDER_DETAIL))
     clock = now_utc or _iso_utc_now
     station.record(probed_at=clock())
