@@ -30,8 +30,13 @@ def make_cv_result(
     verified: bool | None = None,
 ) -> CvResult:
     return CvResult(
-        cv=cv, value=value, mode=mode, encoding=encoding,
-        operation=operation, verified=verified, elapsed=0.0,
+        cv=cv,
+        value=value,
+        mode=mode,
+        encoding=encoding,
+        operation=operation,
+        verified=verified,
+        elapsed=0.0,
     )
 
 
@@ -63,3 +68,173 @@ def watch_invalidations(station) -> list[None]:
 def test_reads_available(mode, overrides, expected, bench_factory):
     bench = bench_factory(capabilities=make_capabilities(**overrides))
     assert bench.station.programmer.reads_available(mode) is expected
+
+
+def test_raw_cv_write_bypasses_ensure_page(bench, monkeypatch):
+    programmer = bench.station.programmer
+
+    def guard(*args, **kwargs):
+        raise AssertionError("raw_cv_write must not call ensure_page")
+
+    monkeypatch.setattr(programmer, "ensure_page", guard)
+    bench.expect(cmd_pom_write_byte(ADDRESS, 31, 10, threshold=THRESHOLD), reply=ACK)
+    programmer.raw_cv_write(31, 10, address=ADDRESS, mode=ProgMode.POM)
+
+
+# -- ensure_page, select_page, and the page cache -----------------------------
+
+
+def test_ensure_page_is_a_no_op_outside_the_indexed_range(bench):
+    programmer = bench.station.programmer
+    before = list(bench.sent)
+    programmer.ensure_page(ADDRESS, ProgMode.POM, 8, page=(9, 9))
+    assert bench.sent == before
+
+
+def test_ensure_page_requires_a_page_for_an_indexed_cv(bench):
+    programmer = bench.station.programmer
+    before = list(bench.sent)
+    with pytest.raises(IndexPageRequiredError) as caught:
+        programmer.ensure_page(ADDRESS, ProgMode.POM, 265, page=None)
+    assert bench.sent == before
+    assert caught.value.cv == 265
+
+
+def test_ensure_page_cache_hit_sends_nothing(bench):
+    programmer = bench.station.programmer
+    bench.station.learn(pom_read=False)
+    bench.expect(cmd_pom_write_byte(ADDRESS, 31, 10, threshold=THRESHOLD), reply=ACK)
+    bench.expect(cmd_pom_write_byte(ADDRESS, 32, 2, threshold=THRESHOLD), reply=ACK)
+    programmer.select_page((10, 2), address=ADDRESS, mode=ProgMode.POM)
+    before = list(bench.sent)
+    bench.clock.advance(5.0)
+    programmer.ensure_page(ADDRESS, ProgMode.POM, 265, page=(10, 2))
+    assert bench.sent == before
+
+
+def test_ensure_page_reselects_after_the_ttl_expires(bench):
+    from railctl.station.timing import TIMING
+
+    programmer = bench.station.programmer
+    bench.station.learn(pom_read=False)
+    bench.expect(cmd_pom_write_byte(ADDRESS, 31, 10, threshold=THRESHOLD), reply=ACK)
+    bench.expect(cmd_pom_write_byte(ADDRESS, 32, 2, threshold=THRESHOLD), reply=ACK)
+    programmer.select_page((10, 2), address=ADDRESS, mode=ProgMode.POM)
+    bench.clock.advance(TIMING.page_cache_ttl + 0.1)
+    bench.expect(cmd_pom_write_byte(ADDRESS, 31, 10, threshold=THRESHOLD), reply=ACK)
+    bench.expect(cmd_pom_write_byte(ADDRESS, 32, 2, threshold=THRESHOLD), reply=ACK)
+    programmer.ensure_page(ADDRESS, ProgMode.POM, 265, page=(10, 2))
+    assert len(bench.sent) == 4
+
+
+def test_select_page_verifies_the_first_time_when_reads_are_available(bench, monkeypatch):
+    programmer = bench.station.programmer
+    bench.station.learn(pom_read=True)
+    bench.expect(cmd_pom_write_byte(ADDRESS, 31, 10, threshold=THRESHOLD), reply=ACK)
+    bench.expect(cmd_pom_write_byte(ADDRESS, 32, 2, threshold=THRESHOLD), reply=ACK)
+    monkeypatch.setattr(
+        programmer,
+        "cv_read",
+        lambda cv, *, address, mode, page=None: make_cv_result(
+            cv=cv, value={31: 10, 32: 2}[cv], mode=mode
+        ),
+    )
+    programmer.select_page((10, 2), address=ADDRESS, mode=ProgMode.POM)
+    assert bench.events == []
+
+
+def test_select_page_raises_cv_verify_error_when_the_page_did_not_stick(bench, monkeypatch):
+    programmer = bench.station.programmer
+    bench.station.learn(pom_read=True)
+    bench.expect(cmd_pom_write_byte(ADDRESS, 31, 10, threshold=THRESHOLD), reply=ACK)
+    bench.expect(cmd_pom_write_byte(ADDRESS, 32, 2, threshold=THRESHOLD), reply=ACK)
+    monkeypatch.setattr(
+        programmer,
+        "cv_read",
+        lambda cv, *, address, mode, page=None: make_cv_result(cv=cv, value=0, mode=mode),
+    )
+    with pytest.raises(CvVerifyError) as caught:
+        programmer.select_page((10, 2), address=ADDRESS, mode=ProgMode.POM)
+    assert caught.value.cv == 31
+    assert "did not stick" in str(caught.value)
+
+
+def test_select_page_emits_unverified_when_reads_are_not_available(bench):
+    programmer = bench.station.programmer
+    bench.station.learn(pom_read=False)
+    bench.expect(cmd_pom_write_byte(ADDRESS, 31, 10, threshold=THRESHOLD), reply=ACK)
+    bench.expect(cmd_pom_write_byte(ADDRESS, 32, 2, threshold=THRESHOLD), reply=ACK)
+    programmer.select_page((10, 2), address=ADDRESS, mode=ProgMode.POM)
+    assert bench.events == [("page.unverified", {"page": (10, 2), "mode": ProgMode.POM})]
+
+
+def test_select_page_force_reselects_even_within_the_ttl(bench):
+    programmer = bench.station.programmer
+    bench.station.learn(pom_read=False)
+    bench.expect(cmd_pom_write_byte(ADDRESS, 31, 10, threshold=THRESHOLD), reply=ACK)
+    bench.expect(cmd_pom_write_byte(ADDRESS, 32, 2, threshold=THRESHOLD), reply=ACK)
+    programmer.select_page((10, 2), address=ADDRESS, mode=ProgMode.POM)
+    bench.expect(cmd_pom_write_byte(ADDRESS, 31, 10, threshold=THRESHOLD), reply=ACK)
+    bench.expect(cmd_pom_write_byte(ADDRESS, 32, 2, threshold=THRESHOLD), reply=ACK)
+    programmer.select_page((10, 2), address=ADDRESS, mode=ProgMode.POM, force=True)
+    assert len(bench.sent) == 4
+
+
+def test_select_page_invalidates_the_cache_when_the_page_write_fails(bench):
+    """The `RailctlError` branch inside `select_page`'s own `raw_cv_write` pair -
+    rule 12's "any `RailctlError` from a CV operation" clause. Decided unconditionally
+    rather than left as a coverage-gap maybe: `select_page` writes CV31/CV32 through
+    `raw_cv_write`, and a station that refuses one of those writes has left the page
+    cache pointing at a page that was never actually selected.
+    """
+    programmer = bench.station.programmer
+    bench.station.learn(pom_read=False)
+    invalidated = watch_invalidations(bench.station)
+    bench.expect(cmd_pom_write_byte(ADDRESS, 31, 10, threshold=THRESHOLD), reply=encode(0x61, 0x82))
+    with pytest.raises(UnsupportedCommandError):
+        programmer.select_page((10, 2), address=ADDRESS, mode=ProgMode.POM)
+    assert len(invalidated) == 1
+
+
+def test_the_page_cache_is_cleared_by_the_shared_invalidation_hook(bench):
+    programmer = bench.station.programmer
+    bench.station.learn(pom_read=False)
+    bench.expect(cmd_pom_write_byte(ADDRESS, 31, 10, threshold=THRESHOLD), reply=ACK)
+    bench.expect(cmd_pom_write_byte(ADDRESS, 32, 2, threshold=THRESHOLD), reply=ACK)
+    programmer.select_page((10, 2), address=ADDRESS, mode=ProgMode.POM)
+    assert programmer._pages != {}
+    bench.station.invalidate_caches()  # what power_off(), close() and exit_service_mode() all call
+    assert programmer._pages == {}
+    bench.expect(cmd_pom_write_byte(ADDRESS, 31, 10, threshold=THRESHOLD), reply=ACK)
+    bench.expect(cmd_pom_write_byte(ADDRESS, 32, 2, threshold=THRESHOLD), reply=ACK)
+    programmer.ensure_page(ADDRESS, ProgMode.POM, 265, page=(10, 2))
+    assert len(bench.sent) == 4
+
+
+# -- ensure_page wired into the read paths (spec line 709) ----------------------
+
+
+def test_reading_an_indexed_cv_without_a_page_raises_before_any_telegram(bench):
+    before = list(bench.sent)
+    with pytest.raises(IndexPageRequiredError) as caught:
+        bench.station.programmer.cv_read(265, address=ADDRESS, mode=ProgMode.POM, page=None)
+    assert bench.sent == before
+    assert caught.value.cv == 265
+
+
+def test_reading_an_indexed_cv_with_a_page_selects_it_first(bench, monkeypatch):
+    programmer = bench.station.programmer
+    select_calls = []
+    monkeypatch.setattr(
+        programmer,
+        "select_page",
+        lambda page, *, address, mode, force: select_calls.append((page, address, mode, force)),
+    )
+    monkeypatch.setattr(
+        programmer,
+        "pom_read",
+        lambda cv, *, address, page=None: make_cv_result(cv=cv, value=7),
+    )
+    result = programmer.cv_read(265, address=ADDRESS, mode=ProgMode.POM, page=(10, 2))
+    assert select_calls == [((10, 2), ADDRESS, ProgMode.POM, False)]
+    assert result.value == 7

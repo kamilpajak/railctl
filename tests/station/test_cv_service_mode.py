@@ -628,9 +628,15 @@ def test_a_real_63_10_reply_drives_paged_cv_value_through_the_unstubbed_loop(ben
 def test_cv_read_uses_pom_when_the_resolved_mode_is_pom(bench_factory, monkeypatch):
     capabilities = make_capabilities(pom_read=True)
     bench = bench_factory(capabilities=capabilities)
-    monkeypatch.setattr(bench.station.programmer, "pom_read", lambda cv, *, address: "POM-RESULT")
     monkeypatch.setattr(
-        bench.station.programmer, "service_read", lambda cv: pytest.fail("must not be reached")
+        bench.station.programmer,
+        "pom_read",
+        lambda cv, *, address, page=None: "POM-RESULT",
+    )
+    monkeypatch.setattr(
+        bench.station.programmer,
+        "service_read",
+        lambda cv, *, page=None: pytest.fail("must not be reached"),
     )
 
     assert bench.station.programmer.cv_read(8, address=3) == "POM-RESULT"
@@ -642,9 +648,13 @@ def test_cv_read_uses_service_mode_when_the_resolved_mode_is_service(bench_facto
     monkeypatch.setattr(
         bench.station.programmer,
         "pom_read",
-        lambda cv, *, address: pytest.fail("must not be reached"),
+        lambda cv, *, address, page=None: pytest.fail("must not be reached"),
     )
-    monkeypatch.setattr(bench.station.programmer, "service_read", lambda cv: "SERVICE-RESULT")
+    monkeypatch.setattr(
+        bench.station.programmer,
+        "service_read",
+        lambda cv, *, page=None: "SERVICE-RESULT",
+    )
 
     assert bench.station.programmer.cv_read(8) == "SERVICE-RESULT"
 
