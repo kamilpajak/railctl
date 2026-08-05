@@ -345,6 +345,27 @@ def test_d4_re_measures_a_stale_false_verdict_even_when_it_confirms_unsupported(
     assert telegram in bench.sent
 
 
+def test_d4_ignores_a_stale_pom_echo_zero_based_and_re_learns_it(bench_factory):
+    """Companion to the two stale-`pom_read` tests above, pinning the OTHER field
+    `_check_d4` clears: a stale `pom_echo_zero_based=True` fixes `CvMatcher`'s accepted
+    echo byte to the zero-based candidate only (programming.py:1076, echo_candidates
+    narrows on a fixed `zero_based`). This station actually echoes one-based (CV8 comes
+    back as `8`, not `7`) - if the stale `True` survives into this run's matcher, every
+    attempt fails to match, `pom_read` runs out the clock and D4 (mis)records
+    `pom_read=False` from silence. Clearing `pom_echo_zero_based` before probing lets
+    this run's own one-based echo match and re-learn the field correctly."""
+    bench = bench_factory(default_address=None, pom_echo_zero_based=True)
+    bench.transport.on_write = Responder(bench)
+    telegram = cmd_pom_read_byte(50, PROBE_CV, threshold=bench.station.threshold)
+    bench.transport.on_write.set(telegram, GENERIC_ACK)
+    bench.transport.on_write.queue_once(
+        cmd_service_result_request(), cv_reply(0x14, 8, PROBE_CV_VALUE)
+    )
+    report = run_probe(bench.station, address=50, now_utc=lambda: "2026-08-05T00:00:00Z")
+    assert report.capabilities.pom_read is True
+    assert report.capabilities.pom_echo_zero_based is False
+
+
 def test_d4_short_circuit_is_unknown_and_the_report_still_reaches_d12(doctor_bench):
     """`station.programmer.pom_read` can raise a `ProgrammingError` subclass
     that is none of the three named ones - a short circuit reading CV8 over
