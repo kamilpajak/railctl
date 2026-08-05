@@ -1294,13 +1294,19 @@ def test_cv_read_many_deselects_the_current_page_when_a_later_read_carries_none(
             make_cv_result(cv=cv, value=cv, mode=mode),
         )[1],
     )
-    specs = [CvSpec(cv=5, page=(0, 0)), CvSpec(cv=9, page=None)]
+    specs = [
+        CvSpec(cv=5, page=(0, 0)),
+        CvSpec(cv=9, page=None),
+        CvSpec(cv=300, page=(0, 0)),
+    ]
     outcomes = programmer.cv_read_many(specs, address=ADDRESS, mode=ProgMode.POM)
-    assert [o.spec.cv for o in outcomes] == [5, 9]
+    assert [o.spec.cv for o in outcomes] == [5, 9, 300]
     assert calls == [
         ("select", (0, 0), True),
         ("read", 5),
         ("read", 9),
+        ("select", (0, 0), True),
+        ("read", 300),
     ]
 
 
