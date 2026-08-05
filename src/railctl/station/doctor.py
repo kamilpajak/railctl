@@ -32,6 +32,10 @@ from railctl.station.types import (
     decoder_family,
 )
 from railctl.xbus.commands import (
+    FunctionAction,
+    FunctionGroup,
+    cmd_function_group,
+    cmd_function_single,
     cmd_loco_info,
     cmd_service_direct_read,
     cmd_service_ext_read,
@@ -89,8 +93,6 @@ CHECK_TITLES: Final[dict[str, str]] = {
     "D11": "function groups 4/5",
     "D12": "single-function command",
 }
-
-_PLACEHOLDER_DETAIL: Final[str] = "not implemented yet"
 
 
 def _iso_utc_now() -> str:
@@ -412,6 +414,54 @@ def _check_d10(station: Station, *, address: int | None, track_powered: bool) ->
     return Check("D10", CHECK_TITLES["D10"], "ok", detail)
 
 
+def _check_d11(station: Station, *, address: int | None) -> Check:
+    resolved = _resolved_address(station, address)
+    if resolved is None:
+        detail = "no locomotive address given; pass --address"
+        return Check("D11", CHECK_TITLES["D11"], "skip", detail)
+    threshold = station.threshold
+    try:
+        g4 = _exchange(
+            station,
+            cmd_function_group(resolved, FunctionGroup.G4, 0, threshold=threshold),
+            timeout=TIMING.li_ack_normal,
+        )
+        g5 = _exchange(
+            station,
+            cmd_function_group(resolved, FunctionGroup.G5, 0, threshold=threshold),
+            timeout=TIMING.li_ack_normal,
+        )
+    except RailctlError as exc:
+        return Check("D11", CHECK_TITLES["D11"], "fail", str(exc))
+    if isinstance(g4, Unsupported) or isinstance(g5, Unsupported):
+        station.record(function_groups_4_5=False)
+        return Check("D11", CHECK_TITLES["D11"], "ok", "function groups 4/5 unsupported (61 82)")
+    station.record(function_groups_4_5=True)
+    return Check("D11", CHECK_TITLES["D11"], "ok", "function groups 4/5 accepted (F13-F28 off)")
+
+
+def _check_d12(station: Station, *, address: int | None) -> Check:
+    resolved = _resolved_address(station, address)
+    if resolved is None:
+        detail = "no locomotive address given; pass --address"
+        return Check("D12", CHECK_TITLES["D12"], "skip", detail)
+    try:
+        reply = _exchange(
+            station,
+            cmd_function_single(resolved, 0, FunctionAction.OFF, threshold=station.threshold),
+            timeout=TIMING.li_ack_normal,
+        )
+    except RailctlError as exc:
+        return Check("D12", CHECK_TITLES["D12"], "fail", str(exc))
+    if isinstance(reply, Unsupported):
+        station.record(single_function_cmd=False)
+        return Check(
+            "D12", CHECK_TITLES["D12"], "ok", "single-function command unsupported (61 82)"
+        )
+    station.record(single_function_cmd=True)
+    return Check("D12", CHECK_TITLES["D12"], "ok", "single-function command accepted (F0 off)")
+
+
 def run_probe(
     station: Station,
     *,
@@ -469,8 +519,8 @@ def run_probe(
 
     checks.append(_check_d9(station))
     checks.append(_check_d10(station, address=address, track_powered=track_powered))
-    for check_id in CHECK_IDS[11:]:
-        checks.append(Check(check_id, CHECK_TITLES[check_id], "skip", _PLACEHOLDER_DETAIL))
+    checks.append(_check_d11(station, address=address))
+    checks.append(_check_d12(station, address=address))
     clock = now_utc or _iso_utc_now
     station.record(probed_at=clock())
     return DoctorReport(checks=tuple(checks), capabilities=station.capabilities)
