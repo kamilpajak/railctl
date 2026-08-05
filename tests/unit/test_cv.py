@@ -39,6 +39,7 @@ from railctl.xbus.cv import (
     join_cv_field,
     pom_cv_fields,
     resolve_service_cv,
+    result_ident_for,
     z21_cv_fields,
 )
 
@@ -468,3 +469,37 @@ def test_the_z21_read_golden_telegram():
     assert encode(0x23, 0x11, msb, lsb) == b"\x23\x11\x00\x1c\x2e"
     assert MAX_CV_Z21 == 1024
     assert cvmod.MAX_CV_POM == 1024
+
+
+@pytest.mark.parametrize(
+    ("cv", "encoding", "expected"),
+    [
+        (8, CvEncoding.POM_ZERO_BASED, 0x14),
+        (265, CvEncoding.POM_ZERO_BASED, 0x15),
+        (511, CvEncoding.POM_ZERO_BASED, 0x15),
+        (512, CvEncoding.POM_ZERO_BASED, 0x16),
+        (1023, CvEncoding.POM_ZERO_BASED, 0x17),
+        (1024, CvEncoding.POM_ZERO_BASED, 0x14),
+        (8, CvEncoding.SERVICE_DIRECT, 0x14),
+        (255, CvEncoding.SERVICE_DIRECT, 0x14),
+        (8, CvEncoding.Z21_16BIT, 0x14),
+        (265, CvEncoding.SERVICE_EXT, 0x15),
+    ],
+)
+def test_result_ident_for_matches_the_measured_bands(cv: int, encoding: CvEncoding, expected: int):
+    """`63 14 08` answered CV8; `63 15 09` answered CV265 (docs/probe-results.md).
+
+    The band an ident carries is a property of the CV's own page, not of which
+    opcode asked for it - CV8 comes back on `63 14` whether it was requested
+    through POM, the legacy direct opcode, or the extended opcodes.
+    """
+    assert result_ident_for(cv, encoding) == expected
+
+
+def test_result_ident_for_refuses_a_cv_the_direct_opcode_cannot_reach():
+    """SERVICE_DIRECT tops out at CV255. `ext_cv_fields` alone reaches 1023 and
+    would silently promise a band the direct opcode family can never produce,
+    so this function checks the caller's own bound first."""
+    with pytest.raises(CvOutOfRangeError, match="direct") as excinfo:
+        result_ident_for(300, CvEncoding.SERVICE_DIRECT)
+    assert excinfo.value.cv == 300
