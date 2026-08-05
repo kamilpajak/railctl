@@ -434,6 +434,42 @@ def test_function_toggle_single_path_drops_the_shadow_so_a_stale_value_is_never_
     assert len(fixture.sent) == 5
 
 
+def test_function_toggle_single_path_drops_the_shadow_on_a_timeout_too(bench_factory):
+    """Same finding as function_set's timeout test above, reached through
+    function_toggle instead: the pop has to happen BEFORE the exchange is
+    attempted, not after it succeeds. function_toggle first does a
+    refresh=True read (which itself seeds the shadow), then computes
+    new_value and writes it. If the pop moved to after `_expect_ack()`, a
+    LinkTimeout on the write would leave that refresh=True read's value
+    behind as a settled fact - the exact stale-shadow failure this file
+    already pins for function_set, just unreached for function_toggle until
+    now, because ACK-only scripting can't tell "popped before" from "popped
+    after" apart: both leave the shadow empty once the call returns
+    normally. Only a raise between the two candidate pop points can tell
+    them apart."""
+    fixture = bench_factory(single_function_cmd=True)
+    fixture.expect(LOCO_INFO_REQUEST, LOCO_INFO_REPLY_IDLE)
+    fixture.expect(FUNCTION_STATE_REQUEST, UNSUPPORTED)
+    state = fixture.station.function_state(3)
+    assert state[0] is False
+    assert len(fixture.sent) == 2
+
+    # function_toggle's own refresh=True read re-seeds the shadow with F0
+    # still False, right before the write that flips it - reply=b"" scripts
+    # silence on that write, so the exchange raises LinkTimeout.
+    fixture.expect(LOCO_INFO_REQUEST, LOCO_INFO_REPLY_IDLE)
+    fixture.expect(FUNCTION_STATE_REQUEST, UNSUPPORTED)
+    fixture.expect(FUNCTION_SINGLE_F0_ON, reply=b"")  # scripted silence -> LinkTimeout
+    with pytest.raises(LinkTimeout):
+        fixture.station.function_toggle(3, 0)
+    assert len(fixture.sent) == 5
+
+    fixture.expect(LOCO_INFO_REQUEST, LOCO_INFO_REPLY_IDLE)
+    fixture.expect(FUNCTION_STATE_REQUEST, UNSUPPORTED)
+    fixture.station.function_state(3)
+    assert len(fixture.sent) == 7
+
+
 def test_function_toggle_uses_the_group_path_and_reads_state_only_once(bench):
     """The default fixture leaves single_function_cmd unset (None), so this
     is the group path - previously unreached by any test in this file.

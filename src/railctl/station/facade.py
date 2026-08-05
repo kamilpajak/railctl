@@ -42,7 +42,7 @@ from railctl.station.capabilities import LEARNABLE_FIELDS, UNKNOWN_IDENTITY, Cap
 from railctl.station.timing import TIMING, Timing
 from railctl.station.types import StationEvent
 from railctl.transport import open_link
-from railctl.xbus import commands, replies
+from railctl.xbus import replies
 from railctl.xbus.address import LOCO_ADDR_MAX, LOCO_ADDR_MIN
 from railctl.xbus.commands import (
     FUNCTION_BITS,
@@ -50,8 +50,13 @@ from railctl.xbus.commands import (
     MAX_FUNCTION,
     FunctionAction,
     FunctionGroup,
+    cmd_drive_128,
     cmd_emergency_stop_all,
     cmd_emergency_stop_loco,
+    cmd_function_group,
+    cmd_function_single,
+    cmd_function_state_13_28,
+    cmd_loco_info,
     cmd_station_status,
     cmd_station_version,
     cmd_track_power_off,
@@ -456,7 +461,7 @@ class Station:
             if not 0 <= speed <= MAX_SPEED_STEP:
                 raise ValueError(f"speed {speed} out of range 0..{MAX_SPEED_STEP}")
             self._validate_address(address)
-            telegram = commands.cmd_drive_128(address, speed, direction, threshold=self.threshold)
+            telegram = cmd_drive_128(address, speed, direction, threshold=self.threshold)
             reply = self.exchange(telegram, timeout=self.timing.li_ack_normal)
             self._expect_ack(reply)
 
@@ -465,7 +470,7 @@ class Station:
         locomotive blocks nothing here, it only gets reported."""
         with self._lock:
             self._validate_address(address)
-            telegram = commands.cmd_loco_info(address, threshold=self.threshold)
+            telegram = cmd_loco_info(address, threshold=self.threshold)
             reply = self.exchange(telegram, timeout=self.timing.li_ack_normal)
             if not isinstance(reply, LocoInfo):
                 raise StationError(f"unexpected reply to loco info: {reply!r}")
@@ -509,7 +514,7 @@ class Station:
                 return dict(self._function_shadow[address])
             info = self.loco_info(address)
             state: dict[int, bool] = dict(enumerate(info.function_bits))
-            telegram = commands.cmd_function_state_13_28(address, threshold=self.threshold)
+            telegram = cmd_function_state_13_28(address, threshold=self.threshold)
             try:
                 reply = self.exchange(telegram, timeout=self.timing.li_ack_normal)
             except (LinkTimeout, UnsupportedCommandError):
@@ -581,7 +586,7 @@ class Station:
                 {"address": address, "group": group.name, "functions": tuple(missing)},
             )
         bits = pack_function_bits(group, state)
-        telegram = commands.cmd_function_group(address, group, bits, threshold=self.threshold)
+        telegram = cmd_function_group(address, group, bits, threshold=self.threshold)
         # Drop whatever the `function_state(refresh=True)` call above just
         # wrote for this address BEFORE the exchange is attempted, not
         # after it succeeds: a write that raises - LinkTimeout included,
@@ -620,9 +625,7 @@ class Station:
                 # method only half-knows to be true.
                 self._function_shadow.pop(address, None)
                 action = FunctionAction.ON if on else FunctionAction.OFF
-                telegram = commands.cmd_function_single(
-                    address, function, action, threshold=self.threshold
-                )
+                telegram = cmd_function_single(address, function, action, threshold=self.threshold)
                 reply = self.exchange(telegram, timeout=self.timing.li_ack_normal)
                 self._expect_ack(reply)
                 return
@@ -652,9 +655,7 @@ class Station:
                 # stale entry for the shadow to answer from either.
                 self._function_shadow.pop(address, None)
                 action = FunctionAction.ON if new_value else FunctionAction.OFF
-                telegram = commands.cmd_function_single(
-                    address, function, action, threshold=self.threshold
-                )
+                telegram = cmd_function_single(address, function, action, threshold=self.threshold)
                 reply = self.exchange(telegram, timeout=self.timing.li_ack_normal)
                 self._expect_ack(reply)
                 return new_value
