@@ -9263,12 +9263,18 @@ Expected: FAIL - `ImportError: cannot import name 'find_xpressnet_port' from 'ra
 """The only module in railctl that owns a file descriptor. No protocol logic here.
 
 No pyserial: its POSIX backend is os.open + termios.tcsetattr + select, and
-57600 8-N-1 is a POSIX-standard rate whose Darwin constant is the literal value
-(termios.B57600 == 57600). The device is USB CDC-ACM, so the rate is forwarded
-as SET_LINE_CODING to a fixed-rate virtual UART and is essentially cosmetic; we
-set it because Lenz 23151 section 1.1 specifies it. Portability note: on Linux
-the speed constants are small indices, so a Linux port needs a lookup table.
-This is the only platform assumption in railctl.
+57600 8-N-1 is a POSIX-standard rate. The device is USB CDC-ACM, so the rate is
+forwarded as SET_LINE_CODING to a fixed-rate virtual UART and is essentially
+cosmetic; we set it because Lenz 23151 section 1.1 specifies it.
+
+The rate goes through `getattr(termios, f"B{rate}")` rather than straight into
+the termios list. On Darwin the constant IS the literal value (B57600 == 57600)
+so the lookup changes nothing, but on Linux the speed constants are small
+indices and passing 57600 makes tcsetattr fail with EINVAL. railctl is macOS
+only, yet CI runs on Linux, and the pty test for read()'s end-of-file handling
+opens a real terminal through this method - so the literal made that test fail
+on every CI run while passing locally. A capability the tests cannot reach on
+the machine that runs them is a capability nobody is measuring.
 
 Flags that are load-bearing: /dev/cu.* never /dev/tty.* (call-out, does not
 block on DCD); O_NOCTTY (a line BREAK would otherwise deliver SIGINT); lflag 0
@@ -9339,7 +9345,7 @@ class SerialTransport:
             cc = list(termios.tcgetattr(fd)[6])
             cc[termios.VMIN] = 0
             cc[termios.VTIME] = 0
-            rate = self._config.baudrate
+            rate = getattr(termios, f"B{self._config.baudrate}", self._config.baudrate)
             cflag = termios.CS8 | termios.CREAD | termios.CLOCAL
             termios.tcsetattr(fd, termios.TCSANOW, [0, 0, cflag, 0, rate, rate, cc])
             if (termios.tcgetattr(fd)[2] & termios.CSIZE) != termios.CS8:
@@ -9399,7 +9405,11 @@ class SerialTransport:
             # select() said readable, then os.read() returned nothing: that is
             # end of file, not an idle port. Returning b"" here would read as
             # silence one layer up and the real fault would only surface on the
-            # next write.
+            # next write. Needs hardware validation: some macOS USB serial
+            # drivers have been reported to briefly mark the descriptor
+            # readable with zero bytes available around the device going to
+            # sleep or waking up. If this ever misfires on a port that is
+            # actually still alive, that is the scenario to look for first.
             raise TransportError(f"{self._config.port} closed while reading")
         return data
 ```
@@ -9619,7 +9629,7 @@ Run:
 .venv/bin/python -c "import ast,pathlib; s=pathlib.Path('src/railctl/transport/serial_posix.py').read_text(); print(len([l for l in s.splitlines() if l.strip() and not l.strip().startswith('#')]) - len(ast.get_docstring(ast.parse(s)).splitlines()) - 1)"
 ```
 
-Expected: `94` for the file Step 3 writes. **Fail the step above 95.** If it climbs past that,
+Expected: `93` for the file Step 3 writes. **Fail the step above 95.** If it climbs past that,
 protocol logic has leaked into the one module coverage does not watch - move it into `Link`
 or the envelope. Nothing currently in the file is removable: it is `open`, `close`, `read`,
 `write`, `flush_input`, three properties, the context manager and the `SerialConfig`
@@ -9627,7 +9637,15 @@ dataclass, with no branch that is not an error path.
 
 > Corrected after review: the figure was `88` before review findings added a
 > `termios.error` handler to `open()` and an end-of-file check to `read()`,
-> which moved the count to 94, still under the 95 ceiling.
+> which moved the count to 94, and then to 93 when the baud-rate lookup landed
+> (see the note under Step 3). Both are under the 95 ceiling.
+>
+> The count moved by one for a reason worth knowing before you chase it: this
+> command subtracts `len(get_docstring().splitlines())`, which counts the blank
+> lines INSIDE the docstring, while the first term never counted them. So a
+> docstring that gains a blank line makes the reported code count fall by one
+> without a line of code changing. The instrument drifts; the ceiling is what
+> matters, not the exact figure.
 
 - [ ] **Step 7: Verify the `hardware` marker is registered - do not register it again**
 

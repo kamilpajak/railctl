@@ -2,12 +2,18 @@
 """The only module in railctl that owns a file descriptor. No protocol logic here.
 
 No pyserial: its POSIX backend is os.open + termios.tcsetattr + select, and
-57600 8-N-1 is a POSIX-standard rate whose Darwin constant is the literal value
-(termios.B57600 == 57600). The device is USB CDC-ACM, so the rate is forwarded
-as SET_LINE_CODING to a fixed-rate virtual UART and is essentially cosmetic; we
-set it because Lenz 23151 section 1.1 specifies it. Portability note: on Linux
-the speed constants are small indices, so a Linux port needs a lookup table.
-This is the only platform assumption in railctl.
+57600 8-N-1 is a POSIX-standard rate. The device is USB CDC-ACM, so the rate is
+forwarded as SET_LINE_CODING to a fixed-rate virtual UART and is essentially
+cosmetic; we set it because Lenz 23151 section 1.1 specifies it.
+
+The rate goes through `getattr(termios, f"B{rate}")` rather than straight into
+the termios list. On Darwin the constant IS the literal value (B57600 == 57600)
+so the lookup changes nothing, but on Linux the speed constants are small
+indices and passing 57600 makes tcsetattr fail with EINVAL. railctl is macOS
+only, yet CI runs on Linux, and the pty test for read()'s end-of-file handling
+opens a real terminal through this method - so the literal made that test fail
+on every CI run while passing locally. A capability the tests cannot reach on
+the machine that runs them is a capability nobody is measuring.
 
 Flags that are load-bearing: /dev/cu.* never /dev/tty.* (call-out, does not
 block on DCD); O_NOCTTY (a line BREAK would otherwise deliver SIGINT); lflag 0
@@ -78,7 +84,7 @@ class SerialTransport:
             cc = list(termios.tcgetattr(fd)[6])
             cc[termios.VMIN] = 0
             cc[termios.VTIME] = 0
-            rate = self._config.baudrate
+            rate = getattr(termios, f"B{self._config.baudrate}", self._config.baudrate)
             cflag = termios.CS8 | termios.CREAD | termios.CLOCAL
             termios.tcsetattr(fd, termios.TCSANOW, [0, 0, cflag, 0, rate, rate, cc])
             if (termios.tcgetattr(fd)[2] & termios.CSIZE) != termios.CS8:
