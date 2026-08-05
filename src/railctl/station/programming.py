@@ -230,7 +230,11 @@ class CvProgrammer:
     def __init__(self, station: Station) -> None:
         self._station = station
         self._pages: dict[PageKey, tuple[CvPage, float]] = {}
-        self._verified_pages: set[PageKey] = set()
+        # Keyed by (address, mode), like `_pages`, but the value records
+        # WHICH page was verified there, not just that some page once was -
+        # a second, different page selected under the same key must verify
+        # again, not ride on the first page's read-back.
+        self._verified_pages: dict[PageKey, CvPage] = {}
 
     def reads_available(self, mode: ProgMode) -> bool:
         """Whether ANY read path is confirmed working for `mode`.
@@ -353,18 +357,29 @@ class CvProgrammer:
         """
         self._write_and_confirm(cv, value, address=address, mode=mode)
 
-    def ensure_page(
-        self, address: int | None, mode: ProgMode, cv: int, page: CvPage | None
-    ) -> None:
-        if cv not in INDEXED_CV_RANGE:
-            return
-        if page is None:
+    def _require_page(self, cv: int, page: CvPage | None) -> None:
+        """`ensure_page`'s validation, with no wire I/O, split out so a
+        caller can fail fast - having sent nothing - ahead of dispatch, while
+        the actual CV31/CV32 write stays wherever it is safe to run it. Both
+        `cv_read` and `pom_read` call this before either touches the wire;
+        `pom_read` alone goes on to call `ensure_page` itself, after its own
+        track-power and address checks (see that method's docstring for why
+        selecting must not run any earlier).
+        """
+        if cv in INDEXED_CV_RANGE and page is None:
             raise IndexPageRequiredError(
                 f"CV{cv} is behind a ZIMO index page (CV31/CV32); pass --page "
                 f"or a CvSpec that carries one",
                 cv=cv,
             )
-        self.select_page(page, address=address, mode=mode, force=False)
+
+    def ensure_page(
+        self, address: int | None, mode: ProgMode, cv: int, page: CvPage | None
+    ) -> None:
+        if cv not in INDEXED_CV_RANGE:
+            return
+        self._require_page(cv, page)  # raises when `page` is None; never returns in that case
+        self.select_page(page, address=address, mode=mode, force=False)  # type: ignore[arg-type]
 
     def select_page(
         self,
@@ -392,7 +407,7 @@ class CvProgrammer:
         except RailctlError:
             self._station.invalidate_caches()
             raise
-        first_selection = key not in self._verified_pages
+        first_selection = self._verified_pages.get(key) != page
         if first_selection:
             if self.reads_available(resolved_mode):
                 read31 = self.cv_read(31, address=address, mode=resolved_mode)
@@ -403,7 +418,7 @@ class CvProgrammer:
                         f"{page}, read back {(read31.value, read32.value)}",
                         cv=31,
                     )
-                self._verified_pages.add(key)
+                self._verified_pages[key] = page
             else:
                 self._station.emit("page.unverified", {"page": page, "mode": resolved_mode})
         self._pages[key] = (page, now)
@@ -503,18 +518,32 @@ class CvProgrammer:
         command station retries the decoder handshake internally. One
         failing read here is exactly one telegram plus its polls.
 
-        Takes `page` for signature symmetry with `pom_read`/`cv_read`, but
-        never calls `ensure_page` with it: `SERVICE_EXT` and `Z21_16BIT`
-        both carry CV257..1024 addressing in the opcode itself
-        (`xbus.cv.ext_cv_fields`, the 16-bit field), so a service-mode read
-        never needs the ZIMO CV31/CV32 index page POM's one-byte wire format
-        requires above CV256. Gating on `IndexPageRequiredError` here would
-        block a CV265 read this station can already answer directly -
-        `test_a_read_in_an_exercised_band_emits_no_note` and
+        Takes `page` for signature symmetry with `pom_read`/`cv_read`. An
+        indexed CV never NEEDS a page selected in service mode: `SERVICE_EXT`
+        and `Z21_16BIT` both carry CV257..1024 addressing directly in the
+        opcode itself (`xbus.cv.ext_cv_fields`, the 16-bit field), unlike POM,
+        whose CV31/CV32 index page selects which decoder-side CV257..512
+        window a one-byte-addressed opcode reaches - a wire-format property
+        of POM's own opcode, not of what the decoder can hold. Gating on
+        `IndexPageRequiredError` here would block a CV265 read this station
+        can already answer directly - `test_a_read_in_an_exercised_band_emits_no_note`
+        and
         `test_paged_cv_value_above_max_cv_direct_raises_decoder_not_responding_not_cv_out_of_range`
         (Task 5) both call this method for CV265 with no page and expect it
         to succeed.
+
+        A page IS still meaningful in service mode when the operator wants
+        one particular ZIMO index page selected before reading, and this
+        method does not yet select it: `select_page` over SERVICE routes
+        through `_write_and_confirm`'s SERVICE branch, whose
+        `service_write_telegram`/`_track_power` are added by Task 6b, not
+        this one. Rather than silently drop a `page` this method cannot
+        honour yet, a non-`None` page emits `page.not_selected` so a caller
+        relying on paging in service mode finds out immediately, instead of
+        reading whatever page the decoder already had selected.
         """
+        if page is not None:
+            self._station.emit("page.not_selected", {"cv": cv, "page": page, "mode": "service"})
         telegram, encoding, page_index = self.service_read_telegram(cv)
         power_before = self._station.status().track_power
         start = self._station.now()
@@ -639,18 +668,20 @@ class CvProgrammer:
         """Read one CV, choosing POM or service mode through `resolve_mode`.
 
         `address` matters only on the POM path; service mode is addressed
-        by track and never sends one, and never needs `ensure_page` either
-        - see `service_read`'s own docstring for why the ZIMO CV31/CV32
-        index page is a POM-only concern. On the POM path, `ensure_page`
-        runs here too, ahead of the dispatch, so an indexed-CV read raises
-        `IndexPageRequiredError` (or selects the page) before `pom_read` is
-        ever reached - `pom_read` also calls `ensure_page` itself for a
-        caller that reaches it directly, and a page already selected here
-        makes that second call a same-key cache hit, not a repeat write.
+        by track and never sends one. On the POM path this only validates -
+        `self._require_page(cv, page)` raises `IndexPageRequiredError` having
+        sent nothing when an indexed CV has no page - and leaves the actual
+        selection to `pom_read` itself, which runs it after its own
+        track-power and address checks. Selecting here, ahead of those
+        checks, would write and cache CV31/CV32 before knowing whether the
+        track that write went out on was even powered.
+
+        Service mode does not select a page for `page` at all yet - see
+        `service_read`'s own docstring for the current status.
         """
         resolved_mode = resolve_mode(mode, self._station.capabilities, operation="read")
         if resolved_mode is ProgMode.POM:
-            self.ensure_page(self._station.resolve_address(address), ProgMode.POM, cv, page)
+            self._require_page(cv, page)
             return self.pom_read(cv, address=address, page=page)
         return self.service_read(cv, page=page)
 
@@ -843,12 +874,16 @@ class CvProgrammer:
                 hint="put the loco on the programming track and use `--mode service`",
                 cv=cv,
             )
-        # Resolved and ensure_page'd before anything hits the wire: an
-        # indexed CV with no page must raise IndexPageRequiredError having
-        # sent nothing, and page selection's own writes (if any) belong
-        # ahead of the drain/status-check pair below, not after it.
+        # Resolved and validated (never selected) before anything hits the
+        # wire: an indexed CV with no page must raise IndexPageRequiredError
+        # having sent nothing. Selecting the page itself - the CV31/CV32
+        # writes `ensure_page` below issues - is deliberately NOT here: it
+        # comes after the track-power and address checks, because those
+        # writes go out on the same track a POM read does, and a page
+        # selected (and then cached as selected) against a track that turns
+        # out to be unpowered is a page the decoder never actually received.
         resolved = self._station.resolve_address(address)
-        self.ensure_page(resolved, ProgMode.POM, cv, page)
+        self._require_page(cv, page)
         # Built before the track-power check below, not after: `status()`
         # calls `self._station.exchange(...)`, whose own `Link.request()`
         # drains the port before writing anything (link.py) - a stale CV
@@ -869,6 +904,9 @@ class CvProgrammer:
                 f"POM read of CV{cv} needs a locomotive address: pass address= "
                 f"or set a default address"
             )
+        # Only now - track powered, address resolved - is it safe to select
+        # and cache a page.
+        self.ensure_page(resolved, ProgMode.POM, cv, page)
 
         timing = self._station.timing
         saw_no_ack = False

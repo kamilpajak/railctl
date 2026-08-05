@@ -3,17 +3,25 @@ from __future__ import annotations
 
 import pytest
 
-from railctl.errors import CvVerifyError, IndexPageRequiredError, UnsupportedCommandError
+from railctl.errors import (
+    CvVerifyError,
+    IndexPageRequiredError,
+    TrackPowerError,
+    UnsupportedCommandError,
+)
 from railctl.station.capabilities import Capabilities
 from railctl.station.types import CvResult, ProgMode
 from railctl.xbus.codec import encode
-from railctl.xbus.commands import cmd_pom_write_byte
+from railctl.xbus.commands import cmd_pom_read_byte, cmd_pom_write_byte, cmd_station_status
 from railctl.xbus.dialect import CvEncoding
 
 ADDRESS = 3
 THRESHOLD = 100
 
 ACK = encode(0x01, 0x04)
+STATUS_REQUEST = cmd_station_status()
+STATUS_POWER_ON = encode(0x62, 0x22, 0x00)
+STATUS_POWER_OFF = encode(0x62, 0x22, 0x01)
 
 
 def make_capabilities(**overrides: object) -> Capabilities:
@@ -159,6 +167,65 @@ def test_select_page_raises_cv_verify_error_when_the_page_did_not_stick(bench, m
     assert "did not stick" in str(caught.value)
 
 
+def test_select_page_verifies_a_different_page_selected_under_the_same_key(bench, monkeypatch):
+    """`_verified_pages` has to remember WHICH page it verified, not merely
+    that some page once was, under this `(address, mode)` key - otherwise a
+    second, different page selected under the same key skips the read-back
+    and reports itself trustworthy on faith. `cv_read_many` (Task 6c) calls
+    `select_page(page, force=True)` at the head of every group; if only the
+    first group's page were ever verified, every later group's page would
+    silently go unchecked.
+    """
+    programmer = bench.station.programmer
+    bench.station.learn(pom_read=True)
+    current: dict[int, int] = {}
+    read_calls: list[int] = []
+
+    def fake_cv_read(cv, *, address, mode, page=None):
+        read_calls.append(cv)
+        return make_cv_result(cv=cv, value=current[cv], mode=mode)
+
+    monkeypatch.setattr(programmer, "cv_read", fake_cv_read)
+
+    bench.expect(cmd_pom_write_byte(ADDRESS, 31, 10, threshold=THRESHOLD), reply=ACK)
+    bench.expect(cmd_pom_write_byte(ADDRESS, 32, 2, threshold=THRESHOLD), reply=ACK)
+    current.update({31: 10, 32: 2})
+    programmer.select_page((10, 2), address=ADDRESS, mode=ProgMode.POM)
+    assert read_calls == [31, 32]
+
+    read_calls.clear()
+    bench.expect(cmd_pom_write_byte(ADDRESS, 31, 16, threshold=THRESHOLD), reply=ACK)
+    bench.expect(cmd_pom_write_byte(ADDRESS, 32, 0, threshold=THRESHOLD), reply=ACK)
+    current.update({31: 16, 32: 0})
+    programmer.select_page((16, 0), address=ADDRESS, mode=ProgMode.POM)
+    assert read_calls == [31, 32]
+
+
+def test_select_page_reverifies_the_same_page_after_invalidate_caches(bench, monkeypatch):
+    programmer = bench.station.programmer
+    bench.station.learn(pom_read=True)
+    read_calls: list[int] = []
+
+    def fake_cv_read(cv, *, address, mode, page=None):
+        read_calls.append(cv)
+        return make_cv_result(cv=cv, value={31: 10, 32: 2}[cv], mode=mode)
+
+    monkeypatch.setattr(programmer, "cv_read", fake_cv_read)
+
+    bench.expect(cmd_pom_write_byte(ADDRESS, 31, 10, threshold=THRESHOLD), reply=ACK)
+    bench.expect(cmd_pom_write_byte(ADDRESS, 32, 2, threshold=THRESHOLD), reply=ACK)
+    programmer.select_page((10, 2), address=ADDRESS, mode=ProgMode.POM)
+    assert read_calls == [31, 32]
+
+    bench.station.invalidate_caches()
+
+    read_calls.clear()
+    bench.expect(cmd_pom_write_byte(ADDRESS, 31, 10, threshold=THRESHOLD), reply=ACK)
+    bench.expect(cmd_pom_write_byte(ADDRESS, 32, 2, threshold=THRESHOLD), reply=ACK)
+    programmer.select_page((10, 2), address=ADDRESS, mode=ProgMode.POM)
+    assert read_calls == [31, 32]
+
+
 def test_select_page_emits_unverified_when_reads_are_not_available(bench):
     programmer = bench.station.programmer
     bench.station.learn(pom_read=False)
@@ -223,18 +290,61 @@ def test_reading_an_indexed_cv_without_a_page_raises_before_any_telegram(bench):
 
 
 def test_reading_an_indexed_cv_with_a_page_selects_it_first(bench, monkeypatch):
+    """`cv_read` only validates that a page was given; the actual selection
+    happens inside `pom_read`, once its own track-power and address checks
+    have passed - so this drives a real (unmocked) `pom_read` and only
+    stubs `select_page` itself, rather than replacing `pom_read` wholesale,
+    which would hide whether selection ever actually ran on this path.
+    """
     programmer = bench.station.programmer
+    bench.station.learn(pom_read=True, pom_echo_zero_based=True)
     select_calls = []
     monkeypatch.setattr(
         programmer,
         "select_page",
         lambda page, *, address, mode, force: select_calls.append((page, address, mode, force)),
     )
-    monkeypatch.setattr(
-        programmer,
-        "pom_read",
-        lambda cv, *, address, page=None: make_cv_result(cv=cv, value=7),
-    )
+    bench.expect(STATUS_REQUEST, reply=STATUS_POWER_ON)
+    pom265 = cmd_pom_read_byte(ADDRESS, 265, threshold=THRESHOLD)
+    bench.expect(pom265, reply=encode(0x63, 0x15, 8, 7))  # CV265, zero-based echo byte 8
+
     result = programmer.cv_read(265, address=ADDRESS, mode=ProgMode.POM, page=(10, 2))
+
     assert select_calls == [((10, 2), ADDRESS, ProgMode.POM, False)]
     assert result.value == 7
+
+
+def test_pom_read_never_selects_a_page_when_the_track_is_unpowered(bench):
+    """Reproduces the review finding directly: page selection must not run -
+    and so must not get cached as selected - ahead of the track-power check.
+    The buggy order sent the two CV31/CV32 write telegrams and cached the
+    page as selected before ever checking `status().track_power`, so a
+    later read within the TTL would trust a page the decoder never actually
+    received. Scripting only `STATUS_REQUEST` means a page-select write
+    attempted first fails immediately as an unscripted request, rather than
+    silently succeeding.
+    """
+    programmer = bench.station.programmer
+    bench.expect(STATUS_REQUEST, reply=STATUS_POWER_OFF)
+
+    with pytest.raises(TrackPowerError):
+        programmer.pom_read(265, address=ADDRESS, page=(10, 2))
+
+    assert bench.sent == [STATUS_REQUEST]
+    assert programmer._pages == {}
+
+
+def test_cv_read_never_selects_a_page_when_the_track_is_unpowered(bench):
+    """The same hazard, driven through `cv_read` rather than `pom_read`
+    directly - `cv_read`'s own call site used to select the page ahead of
+    `pom_read` being reached at all, so fixing `pom_read` alone would not
+    have closed this path.
+    """
+    programmer = bench.station.programmer
+    bench.expect(STATUS_REQUEST, reply=STATUS_POWER_OFF)
+
+    with pytest.raises(TrackPowerError):
+        programmer.cv_read(265, address=ADDRESS, mode=ProgMode.POM, page=(10, 2))
+
+    assert bench.sent == [STATUS_REQUEST]
+    assert programmer._pages == {}
