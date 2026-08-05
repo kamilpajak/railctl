@@ -26,6 +26,7 @@ import pytest
 
 from railctl.xbus.codec import encode
 from railctl.xbus.replies import (
+    EXTENDED_LOCO_INFO_HEADERS,
     HEADER_61_REPLIES,
     REASON_CHECKSUM,
     REASON_EMPTY,
@@ -310,6 +311,24 @@ def test_an_e4_command_echoed_back_is_not_read_as_a_locomotive_info_reply():
     """
     assert isinstance(parse(tg("E4 F8 00 03 40 5F")), Other)
     assert isinstance(parse(tg("E4 13 00 03 82 76")), Other)  # a drive command
+
+
+def test_an_e5_or_e2_header_is_named_in_extended_loco_info_headers():
+    """E5 and E2 are the two extended loco-info forms spec line 704 calls
+    out - this module does not decode them (there is no dataclass for
+    either), it only names them so Station.exchange, one layer up, can
+    turn the resulting Other into UnsupportedFeatureError instead of a
+    bare RailctlError."""
+    assert EXTENDED_LOCO_INFO_HEADERS == frozenset({0xE5, 0xE2})
+    # Each header's own low nibble sets how many data bytes encode() wants:
+    # 0xE5 & 0x0F == 5, 0xE2 & 0x0F == 2. The data bytes' values do not
+    # matter, only the header does - so a mismatched byte count here would
+    # raise XBusEncodeError before parse() is ever reached.
+    for header in EXTENDED_LOCO_INFO_HEADERS:
+        data = (0,) * (header & 0x0F)
+        reply = parse(encode(header, *data))
+        assert isinstance(reply, Other)
+        assert reply.telegram[0] == header
 
 
 def test_the_f13_to_f28_state_reply_is_parsed_so_the_station_never_blind_clears():

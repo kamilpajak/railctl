@@ -21,7 +21,7 @@ own length guard, and none has one.
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import Literal
+from typing import Final, Literal
 
 from railctl.errors import ProtocolError, XBusChecksumError
 from railctl.xbus import codec
@@ -313,6 +313,15 @@ REASON_CHECKSUM: Reason = "checksum"
 REASON_LENGTH: Reason = "length"
 REASON_EMPTY: Reason = "empty"
 REASON_UNKNOWN_FORM: Reason = "unknown_form"
+
+# Spec line 704: E5 and E2 are extended loco-info reply forms this module
+# does not decode - there is no dataclass for either, so they fall through
+# to Other(telegram, reason=REASON_UNKNOWN_FORM) like any other unlisted
+# header. Naming them here lets Station.exchange (station/facade.py) treat
+# that specific Other as "a feature we have not probed for" rather than
+# "a reply form nobody has ever seen" - the two have different remedies,
+# and collapsing them back into one throws that distinction away.
+EXTENDED_LOCO_INFO_HEADERS: Final[frozenset[int]] = frozenset({0xE5, 0xE2})
 
 
 @dataclass(frozen=True, slots=True)
