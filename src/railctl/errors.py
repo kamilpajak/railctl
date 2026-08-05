@@ -31,9 +31,16 @@ from typing import Final
 class RailctlError(Exception):
     """Base for everything this package raises on purpose."""
 
-    def __init__(self, message: str, *, hint: str | None = None) -> None:
+    def __init__(
+        self,
+        message: str,
+        *,
+        hint: str | None = None,
+        details: dict[str, object] | None = None,
+    ) -> None:
         super().__init__(message)
         self.hint = hint
+        self.details = details or {}
 
 
 class TransportError(RailctlError):
@@ -120,8 +127,15 @@ class TrackPowerError(StationError):
 class ProgrammingError(StationError):
     """Base for CV operations. Carries the human (1-based) CV number when known."""
 
-    def __init__(self, message: str, *, hint: str | None = None, cv: int | None = None) -> None:
-        super().__init__(message, hint=hint)
+    def __init__(
+        self,
+        message: str,
+        *,
+        hint: str | None = None,
+        cv: int | None = None,
+        details: dict[str, object] | None = None,
+    ) -> None:
+        super().__init__(message, hint=hint, details=details)
         self.cv = cv
 
 
