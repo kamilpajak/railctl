@@ -28,6 +28,26 @@ def test_power_drive_stop_power_off_restores_the_track_power_it_found():
     plan's Task 2 wires straight to `cmd_emergency_stop_loco` without going
     through the band-warning machinery `drive` and `loco_info` share - a
     safety broadcast has to work even when address validation would not.
+
+    WHAT THIS TEST CANNOT PROVE, and no version of it ever will: that the
+    locomotive moved. It passed on 2026-08-05 with the locomotive sitting on
+    the PROGRAMMING track, where it did not turn a wheel - the motor only
+    buzzed, because that output is current limited (750 mA per the YD7010
+    manual) and will not turn a sound decoder's motor. Note what that buzz
+    proves: the drive telegram DID reach the decoder there. The two runs
+    differed in whether the locomotive moved, and `loco_info` answered
+    `speed=30` in both, because it reads the command station's own refresh
+    buffer - the station reports back what we put there and the decoder has no
+    say in the answer. Nothing on this hardware closes the loop: POM read
+    returns nothing (docs/probe-results.md R1), and the telemetry stream's
+    `TC` reads 0 mA for a decoder that is demonstrably powered and responding.
+
+    So a green run means the command path reaches the station and the station
+    answers as the protocol says it should. Movement is verified by a human
+    watching the wheels, and by nothing else. That happened on 2026-08-05:
+    the wheels turned at step 30 and stopped abruptly on the emergency stop -
+    abruptly being the tell that this is the emergency path and not a braked
+    `drive(0)`, which would decelerate on the decoder's CV4 ramp.
     """
     station = Station.open()
     try:
