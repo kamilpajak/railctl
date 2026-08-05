@@ -308,6 +308,32 @@ def _check_d7(station: Station) -> Check:
     return Check("D7", CHECK_TITLES["D7"], "unknown", detail)
 
 
+def _check_d8(station: Station, *, d4_noack: bool, d5_passed: bool) -> Check:
+    if not (d4_noack and d5_passed):
+        detail = "runs only after D4 answers 61 13 with D5 already confirmed"
+        return Check("D8", CHECK_TITLES["D8"], "skip", detail)
+    cv29, cv28 = RAILCOM_CVS
+    try:
+        result_29 = _service_probe(
+            station, cmd_service_direct_read(cv29), cv29, CvEncoding.SERVICE_DIRECT
+        )
+        result_28 = _service_probe(
+            station, cmd_service_direct_read(cv28), cv28, CvEncoding.SERVICE_DIRECT
+        )
+    except RailctlError as exc:
+        return Check("D8", CHECK_TITLES["D8"], "fail", str(exc))
+    if isinstance(result_29, CvValue) and isinstance(result_28, CvValue):
+        bit3 = "set" if result_29.value & 0x08 else "clear"
+        channel = result_28.value & 0x03
+        detail = (
+            f"CV{cv29}={result_29.value} (bit 3 {bit3}), CV{cv28}={result_28.value} "
+            f"(bits 0-1 = {channel:02b}) - RailCom needs CV{cv29} bit 3 set and a "
+            f"valid CV{cv28} channel selection"
+        )
+        return Check("D8", CHECK_TITLES["D8"], "ok", detail)
+    return Check("D8", CHECK_TITLES["D8"], "unknown", "CV29/CV28 not readable in service mode")
+
+
 def run_probe(
     station: Station,
     *,
@@ -323,12 +349,9 @@ def run_probe(
     checks.append(d3_check)
 
     resolved_address = _resolved_address(station, address)
-    # `_d4_noack` (whether this run's D4 saw 61 13) is not consumed here yet -
-    # task-7c's D8 reads it to decide whether it may run at all. Capturing the
-    # tuple now, once, avoids reshaping every call site a second time later.
-    _d4_noack = False
+    d4_noack = False
     if track_powered and resolved_address is not None:
-        d4_check, _d4_noack = _check_d4(station, address=resolved_address)
+        d4_check, d4_noack = _check_d4(station, address=resolved_address)
     elif not track_powered:
         d4_check = Check(
             "D4", CHECK_TITLES["D4"], "unknown", "track power is off; re-run with --power-on"
@@ -345,7 +368,8 @@ def run_probe(
             checks.append(_check_d5(station))
             checks.append(_check_d6(station))
             checks.append(_check_d7(station))
-            checks.append(Check("D8", CHECK_TITLES["D8"], "skip", _PLACEHOLDER_DETAIL))
+            d5_passed = station.capabilities.service_direct_cv is True
+            checks.append(_check_d8(station, d4_noack=d4_noack, d5_passed=d5_passed))
         finally:
             station.programmer.exit_service_mode(restore_power=power_before)
     else:

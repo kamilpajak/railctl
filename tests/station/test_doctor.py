@@ -535,3 +535,53 @@ def test_d7_one_band_noack_leaves_service_ext_cv_unknown_not_false(doctor_bench)
     d7 = report.check("D7")
     assert d7.status == "unknown"
     assert str(EXT_HIGH_PROBE_CV) in d7.detail
+
+
+def test_d8_does_not_run_when_d4_was_silent_not_noack(doctor_bench):
+    """Pinned: D8 runs only after D4 answers 61 13, never after D4's silence
+    branch (a different, unrelated capability judgment)."""
+    pom_telegram = cmd_pom_read_byte(50, PROBE_CV, threshold=doctor_bench.station.threshold)
+    doctor_bench.transport.on_write.set(pom_telegram, GENERIC_ACK)
+    # D4 sees total silence (no 61 13 ever) - falls into the "silence" branch.
+    # queue_once_for, not queue_once: D4 polls the identical 21 10 telegram
+    # first and would otherwise steal this on its very first (silent) poll -
+    # and CV8's reply would match D4's own POM matcher too, turning D4's
+    # intended silence into a false success before D4 ever exhausts its
+    # attempts.
+    doctor_bench.transport.on_write.queue_once_for(
+        cmd_service_direct_read(PROBE_CV), cv_reply(0x14, PROBE_CV, PROBE_CV_VALUE)
+    )  # D5's own poll answer, so D5 passes and only D4's branch is under test
+    report = run_probe(doctor_bench.station, address=50, now_utc=lambda: "2026-08-05T00:00:00Z")
+    assert report.capabilities.pom_read is False  # D4's silence override, not NoAck
+    assert report.check("D8").status == "skip"
+
+
+def test_d8_runs_after_d4_noack_and_d5_pass_and_reports_cv29_cv28(doctor_bench):
+    pom_telegram = cmd_pom_read_byte(50, PROBE_CV, threshold=doctor_bench.station.threshold)
+    doctor_bench.transport.on_write.set(pom_telegram, GENERIC_ACK)
+    for _ in range(3):
+        # D4 is always the first check to poll, so it drains these 3 in order
+        # regardless of what runs after it - a plain queue_once is safe here.
+        doctor_bench.transport.on_write.queue_once(cmd_service_result_request(), NOACK_REPLY)
+    # D5 (service direct on CV8) must PASS for D8 to run. Also safe unscoped:
+    # D5 is next in line once D4's 3 NoAcks are spent, and nothing before it
+    # can steal a 4th item that was never queued for it under a different key.
+    doctor_bench.transport.on_write.queue_once(
+        cmd_service_result_request(), cv_reply(0x14, PROBE_CV, PROBE_CV_VALUE)
+    )
+    # D8 itself: CV29 then CV28. queue_once_for, not queue_once - D6 and D7
+    # poll the identical 21 10 telegram before D8 does, and each mismatch
+    # they see (neither replies below matches CV1 or CV257/CV8's band) makes
+    # them poll again rather than stop, draining a plain queue before D8 ever
+    # gets a turn.
+    doctor_bench.transport.on_write.queue_once_for(
+        cmd_service_direct_read(29), cv_reply(0x14, 29, 0x08)
+    )
+    doctor_bench.transport.on_write.queue_once_for(
+        cmd_service_direct_read(28), cv_reply(0x14, 28, 0x03)
+    )
+    report = run_probe(doctor_bench.station, address=50, now_utc=lambda: "2026-08-05T00:00:00Z")
+    d8 = report.check("D8")
+    assert d8.status == "ok"
+    assert "CV29" in d8.detail and "CV28" in d8.detail
+    assert "bit 3" in d8.detail
