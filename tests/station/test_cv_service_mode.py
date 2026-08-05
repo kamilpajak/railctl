@@ -509,6 +509,31 @@ def test_paged_cv_value_above_cv8_with_a_mismatched_register_raises_without_regi
     assert "register" not in str(caught.value)
 
 
+def test_paged_cv_value_above_max_cv_direct_raises_decoder_not_responding_not_cv_out_of_range(
+    bench_factory, monkeypatch
+):
+    """CV265 sits above the direct-mode range (1..255, `MAX_CV_DIRECT`), so
+    `echo_candidates(SERVICE_DIRECT, 265)` would itself raise
+    `CvOutOfRangeError` if it were ever called for this CV. A `63 10` paged
+    reply is a real station answer, not an invalid CV number - the operator's
+    CV265 was fine, the station just fell back to register mode - so this
+    must still raise `DecoderNotRespondingError` (exit 13), never let the
+    direct-mode range check's own `CvOutOfRangeError` (exit 15) escape and
+    blame the CV number for what was a station-side fallback."""
+    capabilities = make_capabilities(service_ext_cv=True)
+    bench = bench_factory(capabilities=capabilities)
+    _script_read_and_clean_exit(bench, cmd_service_ext_read(265))
+    monkeypatch.setattr(
+        bench.station.programmer,
+        "await_result",
+        lambda matcher, **kw: PagedCvValue(raw_register=9, value=200),
+    )
+
+    with pytest.raises(DecoderNotRespondingError) as caught:
+        bench.station.programmer.service_read(265)
+    assert "register" not in str(caught.value)
+
+
 def test_a_successful_read_reports_service_mode_the_encoding_and_no_verification(
     bench_factory, monkeypatch
 ):
