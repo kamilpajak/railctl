@@ -26,7 +26,7 @@ from railctl.errors import (
 from railctl.station.programming import CvMatcher
 from railctl.station.timing import TIMING
 from railctl.station.types import Check, DoctorReport
-from railctl.xbus.commands import cmd_service_direct_read
+from railctl.xbus.commands import cmd_service_direct_read, cmd_z21_cv_read
 from railctl.xbus.cv import CvEncoding
 from railctl.xbus.replies import (
     UNSUPPORTED,
@@ -258,6 +258,26 @@ def _check_d5(station: Station) -> Check:
     return Check("D5", CHECK_TITLES["D5"], "unknown", "no result within the service-mode budget")
 
 
+def _check_d6(station: Station) -> Check:
+    z21_probe_cv = 1  # spec's own literal example: 23 11 00 00
+    try:
+        outcome = _service_probe(
+            station, cmd_z21_cv_read(z21_probe_cv), z21_probe_cv, CvEncoding.Z21_16BIT
+        )
+    except RailctlError as exc:
+        return Check("D6", CHECK_TITLES["D6"], "fail", str(exc))
+    if isinstance(outcome, Unsupported):
+        station.record(z21_cv_opcodes=False)
+        return Check("D6", CHECK_TITLES["D6"], "ok", "Z21 CV opcode 23 11 unsupported (61 82)")
+    if isinstance(outcome, CvValue):
+        station.record(z21_cv_opcodes=True)
+        detail = f"Z21 CV opcode confirmed (CV{z21_probe_cv}={outcome.value})"
+        return Check("D6", CHECK_TITLES["D6"], "ok", detail)
+    if isinstance(outcome, NoAck):
+        return Check("D6", CHECK_TITLES["D6"], "unknown", "decoder answered 61 13")
+    return Check("D6", CHECK_TITLES["D6"], "unknown", "no result within the service-mode budget")
+
+
 def run_probe(
     station: Station,
     *,
@@ -293,7 +313,8 @@ def run_probe(
         power_before = station.status().track_power
         try:
             checks.append(_check_d5(station))
-            for check_id in ("D6", "D7", "D8"):
+            checks.append(_check_d6(station))
+            for check_id in ("D7", "D8"):
                 checks.append(Check(check_id, CHECK_TITLES[check_id], "skip", _PLACEHOLDER_DETAIL))
         finally:
             station.programmer.exit_service_mode(restore_power=power_before)
