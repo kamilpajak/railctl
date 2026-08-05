@@ -1226,3 +1226,101 @@ def test_facade_select_page_and_cv_read_many_delegate(bench, monkeypatch):
         ("select_page", (10, 2), ADDRESS, ProgMode.AUTO, True),
         ("cv_read_many", (CvSpec(cv=8),), ADDRESS, ProgMode.AUTO, None),
     ]
+
+
+# -- coverage gaps left by Tasks 6/6b, closed here per this task's own gate --
+
+
+def test_write_and_confirm_requires_an_address_under_pom(bench):
+    """`raw_cv_write` (Task 6) is the one caller that can reach
+    `_write_and_confirm`'s own POM address guard with no earlier check ahead
+    of it - `cv_write` and `pom_write` both validate the address themselves
+    before ever calling in. Sends nothing: the guard raises before any wire
+    I/O.
+    """
+    programmer = bench.station.programmer
+    with pytest.raises(ValueError, match="locomotive address"):
+        programmer.raw_cv_write(31, 10, address=None, mode=ProgMode.POM)
+
+
+def test_select_page_skips_reverification_when_the_same_page_is_reselected_with_force(
+    bench, monkeypatch
+):
+    """`cv_read_many` selects with `force=True` at the head of every group
+    (Task 6c); once a page has been verified once under a key,
+    `_verified_pages` is what lets reselecting the SAME page skip paying for
+    a second read-back.
+    """
+    programmer = bench.station.programmer
+    bench.station.learn(pom_read=True)
+    read_calls: list[int] = []
+
+    def fake_cv_read(cv, *, address, mode, page=None):
+        read_calls.append(cv)
+        return make_cv_result(cv=cv, value={31: 10, 32: 2}[cv], mode=mode)
+
+    monkeypatch.setattr(programmer, "cv_read", fake_cv_read)
+    bench.expect(cmd_pom_write_byte(ADDRESS, 31, 10, threshold=THRESHOLD), reply=ACK)
+    bench.expect(cmd_pom_write_byte(ADDRESS, 32, 2, threshold=THRESHOLD), reply=ACK)
+    programmer.select_page((10, 2), address=ADDRESS, mode=ProgMode.POM)
+    assert read_calls == [31, 32]
+
+    bench.expect(cmd_pom_write_byte(ADDRESS, 31, 10, threshold=THRESHOLD), reply=ACK)
+    bench.expect(cmd_pom_write_byte(ADDRESS, 32, 2, threshold=THRESHOLD), reply=ACK)
+    programmer.select_page((10, 2), address=ADDRESS, mode=ProgMode.POM, force=True)
+    assert read_calls == [31, 32]
+
+
+def test_cv_read_many_deselects_the_current_page_when_a_later_read_carries_none(bench, monkeypatch):
+    """The sort key `spec.page or (0, 0)` puts every unpaged CV ahead of a
+    positive page, so a real batch never walks backwards from a page to
+    `None`. A page equal to `(0, 0)` is the one payload that still can:
+    both it and an unpaged spec share the sort key, so cv order alone can
+    put the unpaged one second - this is what exercises `current_page`
+    actually being reset to `None` rather than merely being set once.
+    """
+    programmer = bench.station.programmer
+    calls: list[tuple[object, ...]] = []
+    monkeypatch.setattr(
+        programmer,
+        "select_page",
+        lambda page, *, address, mode, force: calls.append(("select", page, force)),
+    )
+    monkeypatch.setattr(
+        programmer,
+        "cv_read",
+        lambda cv, *, address, mode, page=None: (
+            calls.append(("read", cv)),
+            make_cv_result(cv=cv, value=cv, mode=mode),
+        )[1],
+    )
+    specs = [CvSpec(cv=5, page=(0, 0)), CvSpec(cv=9, page=None)]
+    outcomes = programmer.cv_read_many(specs, address=ADDRESS, mode=ProgMode.POM)
+    assert [o.spec.cv for o in outcomes] == [5, 9]
+    assert calls == [
+        ("select", (0, 0), True),
+        ("read", 5),
+        ("read", 9),
+    ]
+
+
+def test_pom_write_to_cv29_lets_a_decoder_not_responding_error_propagate_when_pom_read_is_true(
+    bench, monkeypatch
+):
+    """`pom_write`'s own docstring: "A known-working capability failing once
+    is a real fault ..., not grounds to claim POM verification is
+    unsupported." CV29 always re-probes the pre-write value even when
+    `pom_read` is already `True` (to detect a bit-5 flip) - this is the one
+    case where that probe can fail with `pom_read` already established, and
+    the failure must reach the caller unchanged, not get reworded as
+    `PomReadUnsupportedError`.
+    """
+    programmer = bench.station.programmer
+    bench.station.learn(pom_read=True)
+
+    def fake_pom_read(cv, *, address, page=None):
+        raise DecoderNotRespondingError("no ack", cv=cv)
+
+    monkeypatch.setattr(programmer, "pom_read", fake_pom_read)
+    with pytest.raises(DecoderNotRespondingError):
+        programmer.pom_write(29, 6, address=ADDRESS, verify=True)
