@@ -134,6 +134,21 @@ _SILENCE_NOTE: Final[str] = (
 
 
 def _check_d4(station: Station, *, address: int) -> tuple[Check, bool]:
+    # D4 always measures. A capability this check itself wrote from silence -
+    # or a `61 82` `pom_read=False` learned outside the doctor - must not
+    # short-circuit `CvProgrammer.pom_read` (programming.py:1044) before this
+    # run's own probe ever reaches the wire: that is precisely the stale
+    # verdict this check exists to refresh, and programming.py's own message
+    # promises "`railctl doctor` re-probes and overwrites it". Clearing
+    # `pom_echo_zero_based` too, since `pom_read` only re-learns it while it
+    # is `None` (programming.py:1138).
+    cleared_notes = tuple(note for note in station.capabilities.notes if note != _SILENCE_NOTE)
+    station.record(
+        pom_read=None,
+        pom_result_channel=None,
+        pom_echo_zero_based=None,
+        notes=cleared_notes,
+    )
     try:
         result = station.programmer.pom_read(PROBE_CV, address=address)
     except PomReadUnsupportedError:
@@ -149,6 +164,12 @@ def _check_d4(station: Station, *, address: int) -> tuple[Check, bool]:
         capabilities = station.capabilities.with_note(_SILENCE_NOTE)
         station.record(notes=capabilities.notes)
         return Check("D4", CHECK_TITLES["D4"], "ok", _SILENCE_NOTE), False
+    except RailctlError as exc:
+        # A short circuit, a track-power drop mid-read, or a link fault - none
+        # of these is a verdict about the capability, so nothing is recorded:
+        # unknown, never False. Caught last, and separately from the three
+        # ProgrammingError subclasses above, so this never shadows them.
+        return Check("D4", CHECK_TITLES["D4"], "unknown", str(exc)), False
     if result.value == PROBE_CV_VALUE:
         detail = f"POM read confirmed (CV{PROBE_CV}={result.value})"
     else:

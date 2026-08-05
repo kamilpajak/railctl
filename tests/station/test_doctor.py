@@ -304,3 +304,63 @@ def test_d4_is_skipped_with_no_address_even_if_the_track_is_powered(doctor_bench
     report = run_probe(doctor_bench.station, now_utc=lambda: "2026-08-05T00:00:00Z")
     assert report.check("D4").status == "skip"
     assert report.capabilities.pom_read is None
+
+
+def test_d4_ignores_a_stale_pom_read_false_verdict_and_re_measures(bench_factory):
+    """`CvProgrammer.pom_read` short-circuits on `capabilities.pom_read is
+    False` before it ever builds a telegram (programming.py:1044) - that is
+    the ordinary runtime-learning behaviour, correct for every OTHER caller.
+    D4 is the one caller that must not inherit it: it exists to re-probe and
+    overwrite whatever a previous run (or an ordinary cv_read that hit a 61
+    82 mid-session) recorded, so it clears pom_read/pom_result_channel/
+    pom_echo_zero_based before calling in. `telegram in bench.sent` is the
+    assertion that actually distinguishes this from the stale verdict simply
+    being echoed back without ever touching the wire."""
+    bench = bench_factory(default_address=None, pom_read=False)
+    bench.transport.on_write = Responder(bench)
+    telegram = cmd_pom_read_byte(50, PROBE_CV, threshold=bench.station.threshold)
+    bench.transport.on_write.set(telegram, GENERIC_ACK)
+    bench.transport.on_write.queue_once(
+        cmd_service_result_request(), cv_reply(0x14, 7, PROBE_CV_VALUE)
+    )
+    report = run_probe(bench.station, address=50, now_utc=lambda: "2026-08-05T00:00:00Z")
+    assert report.check("D4").status == "ok"
+    assert report.capabilities.pom_read is True
+    assert telegram in bench.sent
+
+
+def test_d4_re_measures_a_stale_false_verdict_even_when_it_confirms_unsupported(bench_factory):
+    """Companion to the test above, with the opposite outcome: this run
+    measures unsupported again rather than flipping to supported. Without
+    the clearing fix `pom_read is False` is trivially true either way -
+    it was already the stale value - so `telegram in bench.sent` is the one
+    assertion that tells "measured again" apart from "never asked"."""
+    bench = bench_factory(default_address=None, pom_read=False)
+    bench.transport.on_write = Responder(bench)
+    telegram = cmd_pom_read_byte(50, PROBE_CV, threshold=bench.station.threshold)
+    bench.transport.on_write.set(telegram, UNSUPPORTED_REPLY)
+    report = run_probe(bench.station, address=50, now_utc=lambda: "2026-08-05T00:00:00Z")
+    assert report.check("D4").status == "ok"
+    assert report.capabilities.pom_read is False
+    assert telegram in bench.sent
+
+
+def test_d4_short_circuit_is_unknown_and_the_report_still_reaches_d12(doctor_bench):
+    """`station.programmer.pom_read` can raise a `ProgrammingError` subclass
+    that is none of the three named ones - a short circuit reading CV8 over
+    POM, here. `_check_d4`'s `except RailctlError` catch-all is what keeps
+    the probe alive for it: D4 reads 'unknown' with nothing recorded (a
+    short circuit is not a verdict about the capability), and every later
+    check still runs. `report.check("D12")` existing is what actually pins
+    that the report survived - without the catch-all this would propagate
+    out of run_probe entirely and the test would fail on an uncaught
+    ShortCircuitError instead of an assertion."""
+    telegram = cmd_pom_read_byte(50, PROBE_CV, threshold=doctor_bench.station.threshold)
+    doctor_bench.transport.on_write.set(telegram, GENERIC_ACK)
+    doctor_bench.transport.on_write.queue_once(cmd_service_result_request(), encode(0x61, 0x12))
+    report = run_probe(doctor_bench.station, address=50, now_utc=lambda: "2026-08-05T00:00:00Z")
+    d4 = report.check("D4")
+    assert d4.status == "unknown"
+    assert "short circuit" in d4.detail.lower()
+    assert report.capabilities.pom_read is None
+    assert report.check("D12") is not None
