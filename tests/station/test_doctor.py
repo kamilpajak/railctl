@@ -36,6 +36,7 @@ from railctl.xbus.codec import encode
 from railctl.xbus.commands import (
     DB_Z21_WRITE,
     REQ_4_DATA,
+    cmd_loco_info,
     cmd_pom_read_byte,
     cmd_service_direct_read,
     cmd_service_ext_read,
@@ -46,6 +47,7 @@ from railctl.xbus.commands import (
     cmd_track_power_on,
     cmd_z21_cv_read,
 )
+from railctl.xbus.dialect import XPRESSNET, Z21
 
 if TYPE_CHECKING:
     from tests.station.conftest import Bench
@@ -706,3 +708,50 @@ def test_d9_with_no_established_read_path_reports_family_unknown_never_ms(doctor
     assert "unknown" in d9.detail
     assert "ms" not in d9.detail.lower().replace("unknown", "")
     assert d9.status == "skip"
+
+
+def test_d10_is_unknown_when_the_track_is_unpowered_without_power_on(doctor_bench):
+    """Distinct from the no-address skip below - spec line 855, 'D4 and D10
+    are skipped as unknown'. An operator who forgot --power-on must not read
+    this as 'nothing to probe', but as 'this genuinely could not be
+    established'."""
+    doctor_bench.transport.on_write.set(cmd_station_status(), STATUS_REPLY_UNPOWERED)
+    report = run_probe(doctor_bench.station, address=105, now_utc=lambda: "2026-08-05T00:00:00Z")
+    assert report.check("D10").status == "unknown"
+    assert report.capabilities.loco_address_threshold is None
+
+
+def test_d10_is_skipped_with_no_address_in_the_divergence_band(doctor_bench):
+    report = run_probe(doctor_bench.station, now_utc=lambda: "2026-08-05T00:00:00Z")
+    assert report.check("D10").status == "skip"
+    assert report.capabilities.loco_address_threshold is None
+
+
+def test_d10_identical_replies_leave_the_threshold_unresolved(doctor_bench):
+    doctor_bench.transport.on_write.set(
+        cmd_loco_info(105, threshold=XPRESSNET.long_address_threshold), loco_info_reply()
+    )
+    doctor_bench.transport.on_write.set(
+        cmd_loco_info(105, threshold=Z21.long_address_threshold), loco_info_reply()
+    )
+    report = run_probe(doctor_bench.station, address=105, now_utc=lambda: "2026-08-05T00:00:00Z")
+    assert report.capabilities.loco_address_threshold is None
+    assert report.check("D10").status == "ok"
+
+
+def test_d10_only_the_z21_form_answers_records_threshold_128(doctor_bench):
+    """The rejected form gets a bare `01 04 05` generic ack, not a `LocoInfo` -
+    never `01 09 08`: that specific interface status is pinned elsewhere
+    (`test_power_and_status.py::test_exchange_maps_interface_status_09_to_value_error`)
+    as `station.exchange` raising a bare `ValueError` ("a railctl bug, not a
+    station limit"), which `_check_d10` does not catch and must not swallow as
+    if it were a capability signal - that would contradict the invariant the
+    other test already pins."""
+    doctor_bench.transport.on_write.set(
+        cmd_loco_info(105, threshold=XPRESSNET.long_address_threshold), GENERIC_ACK
+    )
+    doctor_bench.transport.on_write.set(
+        cmd_loco_info(105, threshold=Z21.long_address_threshold), loco_info_reply()
+    )
+    report = run_probe(doctor_bench.station, address=105, now_utc=lambda: "2026-08-05T00:00:00Z")
+    assert report.capabilities.loco_address_threshold == 128
