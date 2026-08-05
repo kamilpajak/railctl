@@ -14,7 +14,7 @@ from __future__ import annotations
 
 from collections.abc import Callable
 from datetime import UTC, datetime
-from typing import TYPE_CHECKING, Final
+from typing import TYPE_CHECKING, Final, Literal
 
 from railctl.errors import (
     DecoderNoAckError,
@@ -46,6 +46,7 @@ from railctl.xbus.dialect import DIVERGENCE_BAND, XPRESSNET, Z21
 from railctl.xbus.replies import (
     UNSUPPORTED,
     CvValue,
+    GenericAck,
     LocoInfo,
     NoAck,
     Reply,
@@ -382,6 +383,41 @@ def _check_d9(station: Station) -> Check:
     return Check("D9", CHECK_TITLES["D9"], status, f"decoder family: {family}; {rendered}")
 
 
+AddressFormOutcome = Literal["accepted", "rejected", "ambiguous"]
+
+
+def _classify_address_form(
+    station: Station, telegram: bytes, *, timeout: float
+) -> AddressFormOutcome:
+    """One address-form probe for D10.
+
+    "rejected" covers the two replies that DEFINITIVELY say this address form is
+    wrong: `Unsupported` (61 82), and the bare `ValueError` `station.exchange`
+    raises for interface status 0x09 (facade.py, `INTERFACE_STATUS_USAGE`) - the
+    discriminator the brief names for a rejected address form. Both are caught
+    here, not left to escape and abort the whole probe.
+
+    Any other `RailctlError` is not caught: it is a real fault (a damaged
+    cable, an interface problem), not a verdict about this address form, and
+    must reach `_check_d10`'s own `except RailctlError` as a `"fail"`, not be
+    silently absorbed into "rejected" or "ambiguous".
+
+    "ambiguous" is everything else that is not a `LocoInfo` - a bare
+    `GenericAck`, a `TRANSIENT_REPLIES` member, or any other reply type. None
+    of those says the address form was rejected, only that this particular
+    exchange did not measure it either way, so `_check_d10` must never treat
+    "ambiguous" the same as "rejected" when deciding whether to write
+    `loco_address_threshold`.
+    """
+    try:
+        reply = station.exchange(telegram, timeout=timeout)
+    except UnsupportedCommandError:
+        return "rejected"
+    except ValueError:
+        return "rejected"
+    return "accepted" if isinstance(reply, LocoInfo) else "ambiguous"
+
+
 def _check_d10(station: Station, *, address: int | None, track_powered: bool) -> Check:
     if not track_powered:
         detail = "track power is off; re-run with --power-on to verify D10"
@@ -391,27 +427,39 @@ def _check_d10(station: Station, *, address: int | None, track_powered: bool) ->
         detail = "no address in 100..127 given; pass --address in that range"
         return Check("D10", CHECK_TITLES["D10"], "skip", detail)
     try:
-        xpressnet_reply = station.exchange(
+        xpressnet_outcome = _classify_address_form(
+            station,
             cmd_loco_info(resolved, threshold=XPRESSNET.long_address_threshold),
             timeout=TIMING.li_ack_normal,
         )
-        z21_reply = station.exchange(
+        z21_outcome = _classify_address_form(
+            station,
             cmd_loco_info(resolved, threshold=Z21.long_address_threshold),
             timeout=TIMING.li_ack_normal,
         )
     except RailctlError as exc:
         return Check("D10", CHECK_TITLES["D10"], "fail", str(exc))
-    xpressnet_ok, z21_ok = isinstance(xpressnet_reply, LocoInfo), isinstance(z21_reply, LocoInfo)
-    if xpressnet_ok == z21_ok:
+    if xpressnet_outcome == "accepted" and z21_outcome == "rejected":
+        station.record(loco_address_threshold=XPRESSNET.long_address_threshold)
+        detail = f"address {resolved} answers only the XpressNet (long from 100) form"
+        return Check("D10", CHECK_TITLES["D10"], "ok", detail)
+    if z21_outcome == "accepted" and xpressnet_outcome == "rejected":
+        station.record(loco_address_threshold=Z21.long_address_threshold)
+        detail = f"address {resolved} answers only the Z21 (long from 128) form"
+        return Check("D10", CHECK_TITLES["D10"], "ok", detail)
+    if xpressnet_outcome == "accepted" and z21_outcome == "accepted":
         detail = (
             f"address {resolved} answers identically under both encodings; threshold unresolved"
         )
         return Check("D10", CHECK_TITLES["D10"], "ok", detail)
-    threshold = XPRESSNET.long_address_threshold if xpressnet_ok else Z21.long_address_threshold
-    station.record(loco_address_threshold=threshold)
-    form = "XpressNet (long from 100)" if xpressnet_ok else "Z21 (long from 128)"
-    detail = f"address {resolved} answers only the {form} form"
-    return Check("D10", CHECK_TITLES["D10"], "ok", detail)
+    if xpressnet_outcome == "rejected" and z21_outcome == "rejected":
+        detail = f"address {resolved} is rejected under both encodings; threshold unresolved"
+        return Check("D10", CHECK_TITLES["D10"], "ok", detail)
+    detail = (
+        f"address {resolved} gave no conclusive answer under one or both encodings "
+        "(neither a loco-info reply nor a definite rejection); threshold unresolved"
+    )
+    return Check("D10", CHECK_TITLES["D10"], "unknown", detail)
 
 
 def _check_d11(station: Station, *, address: int | None) -> Check:
@@ -436,8 +484,16 @@ def _check_d11(station: Station, *, address: int | None) -> Check:
     if isinstance(g4, Unsupported) or isinstance(g5, Unsupported):
         station.record(function_groups_4_5=False)
         return Check("D11", CHECK_TITLES["D11"], "ok", "function groups 4/5 unsupported (61 82)")
-    station.record(function_groups_4_5=True)
-    return Check("D11", CHECK_TITLES["D11"], "ok", "function groups 4/5 accepted (F13-F28 off)")
+    if isinstance(g4, GenericAck) and isinstance(g5, GenericAck):
+        station.record(function_groups_4_5=True)
+        return Check("D11", CHECK_TITLES["D11"], "ok", "function groups 4/5 accepted (F13-F28 off)")
+    # Neither a real ack nor 61 82 for at least one of the two groups - a
+    # TRANSIENT_REPLIES member (StationBusy, ShortCircuit, ...) or any other
+    # unexpected reply. None of those says anything about whether the opcode
+    # is implemented (replies.py's own docstring on TRANSIENT_REPLIES), so
+    # nothing is recorded: unknown, never a guess in either direction.
+    detail = "function groups 4/5 gave no conclusive answer (neither an ack nor 61 82)"
+    return Check("D11", CHECK_TITLES["D11"], "unknown", detail)
 
 
 def _check_d12(station: Station, *, address: int | None) -> Check:
@@ -458,8 +514,13 @@ def _check_d12(station: Station, *, address: int | None) -> Check:
         return Check(
             "D12", CHECK_TITLES["D12"], "ok", "single-function command unsupported (61 82)"
         )
-    station.record(single_function_cmd=True)
-    return Check("D12", CHECK_TITLES["D12"], "ok", "single-function command accepted (F0 off)")
+    if isinstance(reply, GenericAck):
+        station.record(single_function_cmd=True)
+        return Check("D12", CHECK_TITLES["D12"], "ok", "single-function command accepted (F0 off)")
+    # Neither a real ack nor 61 82 - a TRANSIENT_REPLIES member or any other
+    # unexpected reply. Nothing is recorded: unknown, never a guess.
+    detail = "single-function command gave no conclusive answer (neither an ack nor 61 82)"
+    return Check("D12", CHECK_TITLES["D12"], "unknown", detail)
 
 
 def run_probe(

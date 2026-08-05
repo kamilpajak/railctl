@@ -743,14 +743,75 @@ def test_d10_identical_replies_leave_the_threshold_unresolved(doctor_bench):
     assert report.check("D10").status == "ok"
 
 
+def test_d10_only_the_xpressnet_form_answers_records_threshold_100(doctor_bench):
+    """Mirror of the Z21-only case below: the XpressNet form (long addresses
+    from 100) is the one that answers, the Z21 form is rejected."""
+    doctor_bench.transport.on_write.set(
+        cmd_loco_info(105, threshold=XPRESSNET.long_address_threshold), loco_info_reply()
+    )
+    doctor_bench.transport.on_write.set(
+        cmd_loco_info(105, threshold=Z21.long_address_threshold), UNSUPPORTED_REPLY
+    )
+    report = run_probe(doctor_bench.station, address=105, now_utc=lambda: "2026-08-05T00:00:00Z")
+    assert report.capabilities.loco_address_threshold == XPRESSNET.long_address_threshold
+    assert report.check("D10").status == "ok"
+
+
 def test_d10_only_the_z21_form_answers_records_threshold_128(doctor_bench):
-    """The rejected form gets a bare `01 04 05` generic ack, not a `LocoInfo` -
-    never `01 09 08`: that specific interface status is pinned elsewhere
-    (`test_power_and_status.py::test_exchange_maps_interface_status_09_to_value_error`)
-    as `station.exchange` raising a bare `ValueError` ("a railctl bug, not a
-    station limit"), which `_check_d10` does not catch and must not swallow as
-    if it were a capability signal - that would contradict the invariant the
-    other test already pins."""
+    """The rejected form gets `01 09 08` - the interface status `station.exchange`
+    maps to a bare `ValueError` (`test_power_and_status.py::
+    test_exchange_maps_interface_status_09_to_value_error`, facade.py), and the
+    brief itself names this exact reply as the discriminator for a rejected
+    address form. `_check_d10` must catch that `ValueError` and treat it as
+    this form being rejected, not let it escape and abort the whole probe."""
+    doctor_bench.transport.on_write.set(
+        cmd_loco_info(105, threshold=XPRESSNET.long_address_threshold), encode(0x01, 0x09)
+    )
+    doctor_bench.transport.on_write.set(
+        cmd_loco_info(105, threshold=Z21.long_address_threshold), loco_info_reply()
+    )
+    report = run_probe(doctor_bench.station, address=105, now_utc=lambda: "2026-08-05T00:00:00Z")
+    assert report.capabilities.loco_address_threshold == 128
+    assert report.check("D10").status == "ok"
+
+
+def test_d10_unsupported_reply_is_a_rejected_form_too(doctor_bench):
+    """`61 82` also identifies a rejected address form, distinctly from `01 09
+    08` - both collapse to "rejected" so either can pair with a `LocoInfo` on
+    the other encoding to resolve the threshold."""
+    doctor_bench.transport.on_write.set(
+        cmd_loco_info(105, threshold=XPRESSNET.long_address_threshold), UNSUPPORTED_REPLY
+    )
+    doctor_bench.transport.on_write.set(
+        cmd_loco_info(105, threshold=Z21.long_address_threshold), loco_info_reply()
+    )
+    report = run_probe(doctor_bench.station, address=105, now_utc=lambda: "2026-08-05T00:00:00Z")
+    assert report.capabilities.loco_address_threshold == 128
+    assert report.check("D10").status == "ok"
+
+
+def test_d10_rejected_under_both_encodings_leaves_the_threshold_unresolved(doctor_bench):
+    """An address rejected by both forms is just as unresolved as one accepted
+    by both - neither tells us which encoding the station expects for
+    addresses IN the divergence band, only that this specific address is
+    invalid one way or another under both."""
+    doctor_bench.transport.on_write.set(
+        cmd_loco_info(105, threshold=XPRESSNET.long_address_threshold), UNSUPPORTED_REPLY
+    )
+    doctor_bench.transport.on_write.set(
+        cmd_loco_info(105, threshold=Z21.long_address_threshold), encode(0x01, 0x09)
+    )
+    report = run_probe(doctor_bench.station, address=105, now_utc=lambda: "2026-08-05T00:00:00Z")
+    assert report.capabilities.loco_address_threshold is None
+    assert report.check("D10").status == "ok"
+
+
+def test_d10_ambiguous_reply_on_one_form_leaves_threshold_unresolved(doctor_bench):
+    """A bare `01 04 05` generic ack is NOT a rejection of the address form -
+    unlike `61 82` and `01 09 08`, it says nothing about which encoding this
+    station expects. Recording a threshold from it would be the same mistake
+    D11/D12 make with `TRANSIENT_REPLIES`: writing a verdict from a reply that
+    never measured the thing being asked."""
     doctor_bench.transport.on_write.set(
         cmd_loco_info(105, threshold=XPRESSNET.long_address_threshold), GENERIC_ACK
     )
@@ -758,7 +819,8 @@ def test_d10_only_the_z21_form_answers_records_threshold_128(doctor_bench):
         cmd_loco_info(105, threshold=Z21.long_address_threshold), loco_info_reply()
     )
     report = run_probe(doctor_bench.station, address=105, now_utc=lambda: "2026-08-05T00:00:00Z")
-    assert report.capabilities.loco_address_threshold == 128
+    assert report.capabilities.loco_address_threshold is None
+    assert report.check("D10").status == "unknown"
 
 
 def test_d11_sends_all_zero_bits_on_groups_4_and_5(doctor_bench):
@@ -781,12 +843,46 @@ def test_d11_unsupported_records_false(doctor_bench):
     assert report.capabilities.function_groups_4_5 is False
 
 
+def test_d11_transient_reply_leaves_capability_unknown(doctor_bench):
+    """`61 81` (STATION_BUSY) says nothing about whether the opcode is
+    implemented (`TRANSIENT_REPLIES`, replies.py) - it must not be recorded as
+    either `True` or `False`."""
+    doctor_bench.transport.on_write.set(
+        cmd_function_group(50, FunctionGroup.G4, 0, threshold=doctor_bench.station.threshold),
+        encode(0x61, 0x81),
+    )
+    report = run_probe(doctor_bench.station, address=50, now_utc=lambda: "2026-08-05T00:00:00Z")
+    assert report.capabilities.function_groups_4_5 is None
+    assert report.check("D11").status == "unknown"
+
+
 def test_d12_sends_the_f0_off_single_function_telegram(doctor_bench):
     report = run_probe(doctor_bench.station, address=50, now_utc=lambda: "2026-08-05T00:00:00Z")
     threshold = doctor_bench.station.threshold
     expected = cmd_function_single(50, 0, FunctionAction.OFF, threshold=threshold)
     assert expected in doctor_bench.sent
     assert report.capabilities.single_function_cmd is True
+
+
+def test_d12_unsupported_records_false(doctor_bench):
+    doctor_bench.transport.on_write.set(
+        cmd_function_single(50, 0, FunctionAction.OFF, threshold=doctor_bench.station.threshold),
+        UNSUPPORTED_REPLY,
+    )
+    report = run_probe(doctor_bench.station, address=50, now_utc=lambda: "2026-08-05T00:00:00Z")
+    assert report.capabilities.single_function_cmd is False
+
+
+def test_d12_transient_reply_leaves_capability_unknown(doctor_bench):
+    """`61 81` (STATION_BUSY) says nothing about whether the opcode is
+    implemented - it must not be recorded as either `True` or `False`."""
+    doctor_bench.transport.on_write.set(
+        cmd_function_single(50, 0, FunctionAction.OFF, threshold=doctor_bench.station.threshold),
+        encode(0x61, 0x81),
+    )
+    report = run_probe(doctor_bench.station, address=50, now_utc=lambda: "2026-08-05T00:00:00Z")
+    assert report.capabilities.single_function_cmd is None
+    assert report.check("D12").status == "unknown"
 
 
 def test_d11_and_d12_are_skipped_with_no_address(doctor_bench):
