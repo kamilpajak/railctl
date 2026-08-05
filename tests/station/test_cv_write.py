@@ -1175,3 +1175,54 @@ def test_cv_read_many_calls_on_progress_once_per_spec_and_captures_failures(benc
     assert [o.error is None for o in outcomes] == [True, False, True]
     assert isinstance(outcomes[1].error, DecoderNotRespondingError)
     assert [(index, total) for index, total, _outcome in progress] == [(0, 3), (1, 3), (2, 3)]
+
+
+# -- facade delegation --------------------------------------------------------------
+
+
+class _ProgrammerStub:
+    def __init__(self) -> None:
+        self.calls: list[tuple[object, ...]] = []
+
+    def cv_write(self, cv, value, *, address, mode, page, verify):
+        self.calls.append(("cv_write", cv, value, address, mode, page, verify))
+        return make_cv_result(cv=cv, value=value, operation="write", verified=verify)
+
+    def cv_read_many(self, specs, *, address, mode, on_progress):
+        self.calls.append(("cv_read_many", tuple(specs), address, mode, on_progress))
+        return []
+
+    def select_page(self, page, *, address, mode, force):
+        self.calls.append(("select_page", page, address, mode, force))
+
+
+def test_facade_cv_write_substitutes_the_default_address_and_delegates(bench, monkeypatch):
+    """`bench_factory`'s default `default_address` is `ADDRESS` (3); substituting
+    the whole `programmer` collaborator on a real, already-open `bench.station`
+    is how Task 2's own rule ("monkeypatch the single method on
+    `bench.station.programmer`") extends to a test whose whole point is the
+    facade method's own delegation, not any one `CvProgrammer` method - there is
+    no smaller surface to patch here.
+    """
+    stub = _ProgrammerStub()
+    monkeypatch.setattr(bench.station, "programmer", stub)
+    bench.station.cv_write(5, 10)
+    assert stub.calls == [("cv_write", 5, 10, ADDRESS, ProgMode.AUTO, None, True)]
+
+
+def test_facade_cv_write_keeps_an_explicit_address(bench, monkeypatch):
+    stub = _ProgrammerStub()
+    monkeypatch.setattr(bench.station, "programmer", stub)
+    bench.station.cv_write(5, 10, address=99)
+    assert stub.calls == [("cv_write", 5, 10, 99, ProgMode.AUTO, None, True)]
+
+
+def test_facade_select_page_and_cv_read_many_delegate(bench, monkeypatch):
+    stub = _ProgrammerStub()
+    monkeypatch.setattr(bench.station, "programmer", stub)
+    bench.station.select_page((10, 2), force=True)
+    bench.station.cv_read_many([CvSpec(cv=8)])
+    assert stub.calls == [
+        ("select_page", (10, 2), ADDRESS, ProgMode.AUTO, True),
+        ("cv_read_many", (CvSpec(cv=8),), ADDRESS, ProgMode.AUTO, None),
+    ]
