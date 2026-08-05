@@ -14,19 +14,23 @@ from typing import TYPE_CHECKING, Final, Literal
 
 from railctl.errors import (
     CvOutOfRangeError,
+    CvVerifyError,
     DecoderNoAckError,
     DecoderNotRespondingError,
+    IndexPageRequiredError,
     LinkTimeout,
     PomReadUnsupportedError,
+    RailctlError,
     ShortCircuitError,
     StationBusyError,
     TrackPowerError,
     UnsupportedCommandError,
 )
 from railctl.station.capabilities import Capabilities
-from railctl.station.types import CvPage, CvResult, ProgMode
+from railctl.station.types import INDEXED_CV_RANGE, CvPage, CvResult, ProgMode
 from railctl.xbus.commands import (
     cmd_pom_read_byte,
+    cmd_pom_write_byte,
     cmd_service_direct_read,
     cmd_service_ext_read,
     cmd_service_result_request,
@@ -54,6 +58,7 @@ from railctl.xbus.replies import (
     Ready,
     Reply,
     ShortCircuit,
+    StationBusy,
     TrackShortCircuit,
     parse,
 )
@@ -259,6 +264,150 @@ class CvProgrammer:
         self._pages.clear()
         self._verified_pages.clear()
 
+    def _raise_for_write_reply(self, reply: Reply, cv: int) -> None:
+        """Maps the `61 xx` replies a write can get back, once `station.exchange`
+        has already turned `61 82` into `UnsupportedCommandError` and every
+        `InterfaceStatus`/damaged-reply case into its own exception. Everything
+        that reaches this method is one of `station.exchange`'s pass-through
+        forms - `GenericAck` (POM's `01 04 05`) and anything not named below
+        fall through as accepted, exactly as the LI documentation says the
+        generic ack means only "handed to the command station".
+        """
+        if isinstance(reply, ShortCircuit):
+            raise ShortCircuitError(f"short circuit on the programming track writing CV{cv}", cv=cv)
+        if isinstance(reply, TrackShortCircuit):
+            raise ShortCircuitError(f"short circuit on the main track writing CV{cv}", cv=cv)
+        if isinstance(reply, (Busy, StationBusy)):
+            raise StationBusyError(f"station busy while writing CV{cv}", cv=cv)
+
+    def _write_and_confirm(
+        self, cv: int, value: int, *, address: int | None, mode: ProgMode
+    ) -> CvEncoding:
+        """Puts one CV write on the wire and confirms the station accepted it.
+
+        POM: the interface ack IS the confirmation - there is no other channel
+        (module docstring: "neither the PC nor the interface can determine
+        whether a command reached the track"). Service (Task 6b): the same
+        wait loop `service_read` uses, with `ready_means_done=True`, because
+        after a WRITE `61 11` means the write finished, not "no result
+        waiting" (spec line 780).
+
+        Returns the encoding actually used, so a caller building a `CvResult`
+        does not have to re-derive it.
+        """
+        if mode is ProgMode.POM:
+            if address is None:
+                raise ValueError("POM CV write needs a locomotive address")
+            telegram = cmd_pom_write_byte(address, cv, value, threshold=self._station.threshold)
+            reply = self._station.exchange(telegram, timeout=self._station.timing.li_ack_normal)
+            self._raise_for_write_reply(reply, cv)
+            self._station.pause(self._station.timing.pom_write_settle)
+            return CvEncoding.POM_ZERO_BASED
+        telegram, encoding, page_index = self.service_write_telegram(cv, value)
+        power_before = self._track_power()
+        try:
+            reply = self._station.exchange(
+                telegram, timeout=self._station.timing.li_ack_programming
+            )
+            self._raise_for_write_reply(reply, cv)
+            matcher = CvMatcher(
+                encoding,
+                cv,
+                page_index=page_index if encoding is CvEncoding.SERVICE_EXT else None,
+            )
+            outcome = self.await_result(
+                matcher,
+                timeout=self._station.timing.service_result,
+                first_delay=self._station.timing.service_first_poll_delay,
+                interval=self._station.timing.service_poll_interval,
+                exchange_timeout=self._station.timing.li_ack_programming,
+                allow_poll=True,
+                ready_means_done=True,
+                context="service",
+            )
+            if isinstance(outcome, NoAck):
+                raise DecoderNoAckError(
+                    f"CV{cv} service-mode write: decoder did not acknowledge",
+                    hint=(
+                        "decoder did not acknowledge; sound decoders often fail "
+                        "on a 750 mA programming track - use POM instead"
+                    ),
+                    cv=cv,
+                )
+            if isinstance(outcome, ShortCircuit):
+                raise ShortCircuitError(
+                    f"short circuit on the programming track writing CV{cv}", cv=cv
+                )
+        finally:
+            self.exit_service_mode(restore_power=power_before)
+        return encoding
+
+    def raw_cv_write(self, cv: int, value: int, *, address: int | None, mode: ProgMode) -> None:
+        """CV31 and CV32 route through here, never through `ensure_page`.
+
+        Both sit outside `INDEXED_CV_RANGE`, so even a buggy call back into
+        `ensure_page` would return immediately rather than loop - but going
+        through it at all would be backwards: this IS the mechanism
+        `select_page` uses to change the page, not something `ensure_page`
+        should gate.
+        """
+        self._write_and_confirm(cv, value, address=address, mode=mode)
+
+    def ensure_page(
+        self, address: int | None, mode: ProgMode, cv: int, page: CvPage | None
+    ) -> None:
+        if cv not in INDEXED_CV_RANGE:
+            return
+        if page is None:
+            raise IndexPageRequiredError(
+                f"CV{cv} is behind a ZIMO index page (CV31/CV32); pass --page "
+                f"or a CvSpec that carries one",
+                cv=cv,
+            )
+        self.select_page(page, address=address, mode=mode, force=False)
+
+    def select_page(
+        self,
+        page: CvPage,
+        *,
+        address: int | None = None,
+        mode: ProgMode = ProgMode.AUTO,
+        force: bool = False,
+    ) -> None:
+        resolved_mode = resolve_mode(mode, self._station.capabilities, operation="write")
+        key = PageKey(address=address, mode=resolved_mode)
+        cached = self._pages.get(key)
+        now = self._station.now()
+        if (
+            not force
+            and cached is not None
+            and cached[0] == page
+            and (now - cached[1]) < self._station.timing.page_cache_ttl
+        ):
+            return
+        cv31, cv32 = page
+        try:
+            self.raw_cv_write(31, cv31, address=address, mode=resolved_mode)
+            self.raw_cv_write(32, cv32, address=address, mode=resolved_mode)
+        except RailctlError:
+            self._station.invalidate_caches()
+            raise
+        first_selection = key not in self._verified_pages
+        if first_selection:
+            if self.reads_available(resolved_mode):
+                read31 = self.cv_read(31, address=address, mode=resolved_mode)
+                read32 = self.cv_read(32, address=address, mode=resolved_mode)
+                if (read31.value, read32.value) != page:
+                    raise CvVerifyError(
+                        f"CV31/CV32 index page selection did not stick: wrote "
+                        f"{page}, read back {(read31.value, read32.value)}",
+                        cv=31,
+                    )
+                self._verified_pages.add(key)
+            else:
+                self._station.emit("page.unverified", {"page": page, "mode": resolved_mode})
+        self._pages[key] = (page, now)
+
     def service_read_telegram(self, cv: int) -> tuple[bytes, CvEncoding, int]:
         """Choose the wire encoding for a service-mode CV read.
 
@@ -341,7 +490,7 @@ class CvProgrammer:
         finally:
             self._station.invalidate_caches()
 
-    def service_read(self, cv: int) -> CvResult:
+    def service_read(self, cv: int, *, page: CvPage | None = None) -> CvResult:
         """Read one CV over the programming track in service mode.
 
         Service mode is addressed by TRACK, not by locomotive: there is no
@@ -354,9 +503,17 @@ class CvProgrammer:
         command station retries the decoder handshake internally. One
         failing read here is exactly one telegram plus its polls.
 
-        Takes no `page` keyword yet - Task 6 adds it, together with
-        `ensure_page`'s call at the top of this method, in the step that
-        implements `ensure_page` (1.5).
+        Takes `page` for signature symmetry with `pom_read`/`cv_read`, but
+        never calls `ensure_page` with it: `SERVICE_EXT` and `Z21_16BIT`
+        both carry CV257..1024 addressing in the opcode itself
+        (`xbus.cv.ext_cv_fields`, the 16-bit field), so a service-mode read
+        never needs the ZIMO CV31/CV32 index page POM's one-byte wire format
+        requires above CV256. Gating on `IndexPageRequiredError` here would
+        block a CV265 read this station can already answer directly -
+        `test_a_read_in_an_exercised_band_emits_no_note` and
+        `test_paged_cv_value_above_max_cv_direct_raises_decoder_not_responding_not_cv_out_of_range`
+        (Task 5) both call this method for CV265 with no page and expect it
+        to succeed.
         """
         telegram, encoding, page_index = self.service_read_telegram(cv)
         power_before = self._station.status().track_power
@@ -482,14 +639,20 @@ class CvProgrammer:
         """Read one CV, choosing POM or service mode through `resolve_mode`.
 
         `address` matters only on the POM path; service mode is addressed
-        by track and never sends one. `page` is accepted for signature
-        symmetry with the write side - selecting the CV257..512 index page
-        is `ensure_page`'s job, added in Task 6, not this one.
+        by track and never sends one, and never needs `ensure_page` either
+        - see `service_read`'s own docstring for why the ZIMO CV31/CV32
+        index page is a POM-only concern. On the POM path, `ensure_page`
+        runs here too, ahead of the dispatch, so an indexed-CV read raises
+        `IndexPageRequiredError` (or selects the page) before `pom_read` is
+        ever reached - `pom_read` also calls `ensure_page` itself for a
+        caller that reaches it directly, and a page already selected here
+        makes that second call a same-key cache hit, not a repeat write.
         """
-        resolved = resolve_mode(mode, self._station.capabilities, operation="read")
-        if resolved is ProgMode.POM:
-            return self.pom_read(cv, address=address)
-        return self.service_read(cv)
+        resolved_mode = resolve_mode(mode, self._station.capabilities, operation="read")
+        if resolved_mode is ProgMode.POM:
+            self.ensure_page(self._station.resolve_address(address), ProgMode.POM, cv, page)
+            return self.pom_read(cv, address=address, page=page)
+        return self.service_read(cv, page=page)
 
     def _learn_result_channel(
         self, context: Literal["pom", "service"], channel: ResultChannelSeen
@@ -660,7 +823,9 @@ class CvProgrammer:
                     {"cv": matcher.cv, "raw_cv": reply.raw_cv, "encoding": matcher.encoding.name},
                 )
 
-    def pom_read(self, cv: int, *, address: int | None = None) -> CvResult:
+    def pom_read(
+        self, cv: int, *, address: int | None = None, page: CvPage | None = None
+    ) -> CvResult:
         started = self._station.now()
         capabilities = self._station.capabilities
         if capabilities.pom_read is False:
@@ -678,6 +843,12 @@ class CvProgrammer:
                 hint="put the loco on the programming track and use `--mode service`",
                 cv=cv,
             )
+        # Resolved and ensure_page'd before anything hits the wire: an
+        # indexed CV with no page must raise IndexPageRequiredError having
+        # sent nothing, and page selection's own writes (if any) belong
+        # ahead of the drain/status-check pair below, not after it.
+        resolved = self._station.resolve_address(address)
+        self.ensure_page(resolved, ProgMode.POM, cv, page)
         # Built before the track-power check below, not after: `status()`
         # calls `self._station.exchange(...)`, whose own `Link.request()`
         # drains the port before writing anything (link.py) - a stale CV
@@ -693,7 +864,6 @@ class CvProgrammer:
                 "POM needs the main track powered; run `railctl power on`",
                 hint="run `railctl power on`",
             )
-        resolved = self._station.resolve_address(address)
         if resolved is None:
             raise ValueError(
                 f"POM read of CV{cv} needs a locomotive address: pass address= "
