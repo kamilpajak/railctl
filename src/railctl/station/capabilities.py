@@ -37,6 +37,18 @@ from railctl.errors import RailctlError
 
 ResultChannel = Literal["broadcast", "poll", "none"]
 
+# HOW a `pom_read=False` was reached, because the two ways are not the same
+# fact and the value alone cannot tell them apart:
+#   "unsupported" - the station answered `61 82`. A real negative answer.
+#   "silence"     - nothing came back at all after every attempt. `False` is
+#                   recorded so AUTO stops retrying for seconds on end, but
+#                   nobody refused anything, and pointing the doctor at an
+#                   address with no decoder on it produces this too.
+# A reader that must not act on a guess reads this field, not `pom_read`.
+# The parallel is DNS negative caching (RFC 2308): an authoritative NXDOMAIN
+# may be cached, a timeout may not be cached as one.
+PomReadProvenance = Literal["unsupported", "silence"]
+
 CAPABILITIES_VERSION: Final[int] = 1
 UNKNOWN_IDENTITY: Final[str] = "unknown"
 
@@ -46,7 +58,13 @@ UNKNOWN_IDENTITY: Final[str] = "unknown"
 # enforce this; it is the facade's job, and this set is what the facade
 # checks against before calling `with_learned`.
 LEARNABLE_FIELDS: Final[frozenset[str]] = frozenset(
-    {"pom_read", "pom_result_channel", "pom_echo_zero_based", "service_direct_cv"}
+    {
+        "pom_read",
+        "pom_read_provenance",
+        "pom_result_channel",
+        "pom_echo_zero_based",
+        "service_direct_cv",
+    }
 )
 
 _BOOL_FIELDS: Final[frozenset[str]] = frozenset(
@@ -63,6 +81,7 @@ _BOOL_FIELDS: Final[frozenset[str]] = frozenset(
 _INT_FIELDS: Final[frozenset[str]] = frozenset({"command_station_id", "loco_address_threshold"})
 _STR_FIELDS: Final[frozenset[str]] = frozenset({"xpressnet_version", "probed_at"})
 _RESULT_CHANNELS: Final[frozenset[str]] = frozenset({"broadcast", "poll", "none"})
+_POM_READ_PROVENANCES: Final[frozenset[str]] = frozenset({"unsupported", "silence"})
 
 _DELETE_AND_RERUN_HINT: Final[str] = "delete {path} and run `railctl doctor` again"
 
@@ -82,6 +101,7 @@ class Capabilities:
     xpressnet_version: str | None = None
     command_station_id: int | None = None
     pom_read: bool | None = None
+    pom_read_provenance: PomReadProvenance | None = None
     pom_result_channel: ResultChannel | None = None
     pom_echo_zero_based: bool | None = None
     loco_address_threshold: int | None = None
@@ -169,6 +189,15 @@ class Capabilities:
                     f"{sorted(_RESULT_CHANNELS)} or null, got {value!r}",
                 )
             kwargs["pom_result_channel"] = value
+        if "pom_read_provenance" in entry:
+            value = entry["pom_read_provenance"]
+            if value is not None and value not in _POM_READ_PROVENANCES:
+                raise _malformed(
+                    path,
+                    f"{path}: {identity!r}.pom_read_provenance must be one of "
+                    f"{sorted(_POM_READ_PROVENANCES)} or null, got {value!r}",
+                )
+            kwargs["pom_read_provenance"] = value
         if "notes" in entry:
             kwargs["notes"] = cls._notes_from(entry["notes"], identity, path)
         return kwargs

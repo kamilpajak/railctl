@@ -280,6 +280,7 @@ def test_d4_unsupported_sets_pom_read_false_with_no_silence_note(doctor_bench):
     doctor_bench.transport.on_write.set(telegram, UNSUPPORTED_REPLY)
     report = run_probe(doctor_bench.station, address=50, now_utc=lambda: "2026-08-05T00:00:00Z")
     assert report.capabilities.pom_read is False
+    assert report.capabilities.pom_read_provenance == "unsupported"
     assert report.capabilities.notes == ()
     assert report.check("D4").status == "ok"
 
@@ -308,6 +309,10 @@ def test_d4_total_silence_sets_pom_read_false_with_a_silence_note(doctor_bench):
     report = run_probe(doctor_bench.station, address=50, now_utc=lambda: "2026-08-05T00:00:00Z")
     assert report.capabilities.pom_read is False
     assert report.capabilities.pom_result_channel == "none"
+    # The note is no longer the ONLY place the difference lives: the two ways
+    # of reaching False are now distinguishable by type. A reader that must
+    # not act on a guess checks this field instead of parsing prose.
+    assert report.capabilities.pom_read_provenance == "silence"
     d4 = report.check("D4")
     note = next(n for n in report.capabilities.notes if "silence" in n.lower())
     assert "silence" in note.lower()
@@ -354,6 +359,9 @@ def test_d4_ignores_a_stale_pom_read_false_verdict_and_re_measures(bench_factory
     report = run_probe(bench.station, address=50, now_utc=lambda: "2026-08-05T00:00:00Z")
     assert report.check("D4").status == "ok"
     assert report.capabilities.pom_read is True
+    # A stale provenance must not outlive the verdict it explained. POM read
+    # now works, so nothing is left claiming it was refused or went silent.
+    assert report.capabilities.pom_read_provenance is None
     assert telegram in bench.sent
 
 
