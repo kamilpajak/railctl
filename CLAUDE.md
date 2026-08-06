@@ -61,28 +61,6 @@ throws away every uncommitted change in that file, not only the mutation you jus
 brand-new fix this way deletes the fix. Commit first, then mutate, then restore — or the restore is
 the thing that breaks the build.
 
-## Checking CI
-
-Read the run's conclusion, not a shell exit status:
-
-```
-gh run view <id> --json conclusion --jq '.conclusion'
-gh pr checks <n>
-```
-
-**Never pipe `gh run watch --exit-status` into `tail` or `head`.** A pipeline exits with the status of its last command, so the pipe returns 0 whatever the run did — and a red build gets reported as green. This has happened here; a whole milestone merged with `main` red underneath it.
-
-The same trap applies to any check where the interesting result is on stdout and the verdict is in the exit status.
-
-**A CI run belongs to a commit, not to a position in a list.** `gh run list --limit 1` right after a push often returns the run for the PREVIOUS commit, because the new one has not been created yet. Watch that run and GitHub cancels it the moment the newer one appears — `--exit-status` then returns non-zero with conclusion `cancelled`, which reads as a failure and is not one. Before believing any verdict, check the run belongs to you:
-
-```
-gh run view <id> --json conclusion,headSha --jq '.conclusion + "  " + .headSha'
-git rev-parse HEAD
-```
-
-Both lines must agree. And do not push while a run you care about is in flight; the push cancels it and you start over.
-
 ## Hardware
 
 The probe and the tools must **never write a decoder CV** unless the change explicitly asks for it, and a write must be read back to be believed — a station echo proves the station produced a value, not that the decoder kept it.
