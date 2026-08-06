@@ -18,6 +18,10 @@
 | F13–F28 state readable | **yes**, `E3 09` → `E3 52 D1 D2` | closes the blind-clear side effect |
 | Start mode | **automatic** — locos resume last speed on power-up | status bit 2 |
 | Status byte bits 0 and 1 | **swapped vs Lenz** — bit 0 emergency stop, bit 1 emergency off | `62 22 05` after `80 80` |
+| Service mode, all three encodings | **work** — direct, Z21 and extended | doctor D5/D6/D7, 2026-08-06 |
+| Decoder identity | ZIMO **MS**: `CV1=3 CV7=5 CV8=145 CV250=6 CV28=3 CV29=14` | doctor D9, 2026-08-06 |
+| RailCom **in the decoder** | **enabled** — `CV29` bit 3 set, `CV28=3` | doctor D8, 2026-08-06 |
+| Broadcasts | `61 00`, `61 01`, `81 00` arrive **unsolicited**, three times each | `Station.events()`, 2026-08-06 |
 
 The speed step question was one of the five left open in the design. It is answered:
 this locomotive runs 128 steps.
@@ -34,7 +38,12 @@ states the YD7010 manual defines: green steady = voltage on, green **flashing** 
 | `21 81` | `62 22 04` | none | green steady | **on** |
 | `80 80` | `62 22 05` | bit 0 | green **flashing** | **on** |
 | `21 80` | `62 22 06` | bit 1 | red | **off** |
-| (plug-in, or `80 80` then `21 80`) | `62 22 07` | both | red | off |
+| `80 80` then `21 80` | `62 22 07` | both | red | off |
+
+The state after plugging the USB in is **not a constant**. An earlier note here implied `62 22 07`
+was the power-up value; measured on 2026-08-06, the station comes back in whatever state it was
+left in — unplugged at `62 22 06`, it reappeared at `62 22 06`. The earlier `0x07` was a latched
+emergency stop from before the disconnection, not a power-up default.
 
 So **bit 0 is emergency stop and bit 1 is emergency off** — the order the German 23151 manual
 gives, not the one in Lenz 2.1.7.
@@ -80,6 +89,74 @@ disagrees, and should know that was checked rather than missed.
 `21 80` and `21 81` are both answered with the generic ack `01 04 05`, never `61 00` / `61 01`.
 Those arrive as unsolicited broadcasts instead. The fast path in `Station._settle_power` therefore
 never fires here, and both calls always pay `power_settle` plus a status round trip.
+
+## Session of 2026-08-06 — what the bench added
+
+Run through `Station` and `doctor`, not through the M1 probe script, so this is the first time
+most of these paths reached real hardware.
+
+### RailCom is enabled in the decoder — the missing piece is the detector
+
+D8 read `CV29 = 14`, so bit 3 is set, and `CV28 = 3`, a valid channel selection. The decoder is
+configured for RailCom and always was. This removes the last competing explanation for the silent
+POM read: it is not decoder configuration, and it is not the decoder being asleep. It is that
+nothing receives what the decoder transmits, exactly as the standards reading predicted.
+
+Consequence for the code: the doctor's silence note ends with "Fix RailCom on the decoder and
+re-run the doctor", which now sends the user to the one place that is already correct.
+
+### POM read: silence is the rule, with one unexplained exception
+
+28 controlled POM reads in this session, all silent, each costing **6.7 s** — three internal
+attempts. That figure is the concrete cost behind the plan's "AUTO would retry POM for several
+seconds forever"; it was assumed until now.
+
+One doctor run returned `61 13` (no acknowledgement) instead. Four hypotheses were tested and all
+four failed to reproduce it:
+
+| hypothesis | attempts | result |
+| --- | --- | --- |
+| intermittent / random | 15 | silence |
+| first read after the track is energised (1 s gap) | 6 | silence |
+| cold decoder start (30 s with the track dark) | 4 | silence |
+| freshly re-seated wheels after lifting the locomotive | 3 | silence |
+
+It is recorded as a single observation with no explanation. Do not repair this gap with a story:
+three explanations were proposed during the session and the measurement refuted each one.
+
+What it does settle is the design question. `pom_read = false` from silence is well supported for
+this hardware — but one contrary observation exists, so it is not certain, which is precisely what
+`pom_read_provenance = "silence"` is for.
+
+### The telemetry stream is not an instrument for track power
+
+Interface 5 carries a `TV` field that looks like track voltage. Sampled with the track live
+(`62 22 04`) and dead (`62 22 06`), it read **15.1 V in both**, alongside `TC 0mA` for a decoder
+that is demonstrably drawing current and answering. Whatever `TV` measures, it is not the state of
+the track output.
+
+Recorded because the negative result is the useful part: anyone who sees `TV` in the output will
+try this, and issue #13 needs an instrument independent of the status byte. This is not one. The
+front-panel LED, read by a person, remains the only one.
+
+### Faults found in this tool, not in the station
+
+- The doctor can start a locomotive moving, including on the programming track, where it then
+  fails its own service-mode measurements (#14).
+- Nothing the doctor measures is persisted, so a later process finds every encoding "unknown" and
+  is told to run the doctor (#15).
+- `CvOutOfRangeError` is raised when no encoding has been probed, naming the wrong cause (#16).
+
+### Confirmed by watching the locomotive
+
+`80 80` sent to a locomotive running at step 30 stopped the wheels **instantly**, with the green
+Track Out LED flashing throughout — the manual's "emergency stop has been triggered (track voltage
+ON)". The status byte read `62 22 05` for ten seconds. This was predicted before the panel was
+read, not explained afterwards, and it is the fifth independent confirmation of the bit order.
+
+In the same moment `loco_info` reported `speed=30, emergency_stopped=False` for a locomotive that
+was standing still under a global emergency stop. The per-locomotive view does not reflect the
+station-wide state.
 
 ## R1 — POM CV read: NOT established
 
