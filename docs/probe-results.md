@@ -221,8 +221,17 @@ station-wide state.
 > read is silent) more simply than the RailCom-detector inference further down, and it was missed
 > for two days because the investigation started at the hardware instead of at the document.
 >
-> The verdict does not change: `pom_read` stays **unknown**, never `false`. A capability the
-> protocol does not define is not a capability the station refused.
+> A capability the protocol does not define is not a capability the station refused. That reasoning
+> still stands, and it is why the value written here is not an ordinary `false`.
+>
+> **Superseded in part, 2026-08-06.** This paragraph originally read "`pom_read` stays **unknown**,
+> never `false`", and that is no longer what the code does. Doctor D4 records `pom_read = false`
+> after total silence, as the one deliberate exception in the codebase, because leaving it `None`
+> makes every `AUTO` operation retry POM — measured at **6.7 s per call** — on every call, forever.
+> The exception carries its own provenance: `pom_read_provenance` is `"unsupported"` for a real
+> `61 82` and `"silence"` for this case, so the distinction the sentence was protecting survives in
+> the type rather than in prose. Anything that must not act on a guess reads the provenance, not
+> `pom_read`.
 
 The station **acknowledges** the request and returns **no result at all**.
 
