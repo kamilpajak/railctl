@@ -139,6 +139,59 @@ Recorded because the negative result is the useful part: anyone who sees `TV` in
 try this, and issue #13 needs an instrument independent of the status byte. This is not one. The
 front-panel LED, read by a person, remains the only one.
 
+### The programming-track output latches off after an overload, and nothing reports it
+
+Driving a locomotive on the programming track knocks that output offline until the load is
+physically removed. No status bit, no telemetry field and no front-panel LED shows it. Established
+by a controlled sequence with one variable, reproduced three times.
+
+```
+baseline           service read CV8 = 145, repeatedly
+drive step 30      sent to the locomotive ON the programming track
+                   (first occurrence: it moved for ~1 s and stopped by itself)
+after              service read -> 61 13, three times in a row
+```
+
+What the station said while the fault was present: status byte `62 22 04` — **identical** to before,
+telemetry `TC 0mA TV 15.1V` — identical, green Track Out LED steady, red LED off. Every indicator
+we have describes the **main** output; there is none for the programming output.
+
+### How it was pinned down
+
+The decisive step was realising the decoder had no power at all, rather than a broken
+acknowledgement:
+
+1. Cutting main track power for 3 s and then 15 s did **not** clear the fault.
+2. With the fault present, `function_set(3, 0, True)` produced **no light**, though the same
+   locomotive had been driven from this output minutes earlier — so operating commands do reach it
+   normally, and now nothing did.
+3. The locomotive was lifted and put back, with **no command sent**. The light came on by itself,
+   because the station still held `F0 = true` and the decoder finally had power to act on it.
+4. Service reads worked again immediately: `CV8 = 145`.
+
+Removing the load is what clears it. That is the behaviour a current-limited programming output is
+designed to have — it refuses to keep driving into what looks like a fault — and it is invisible to
+every channel this tool can read.
+
+### What this rules out
+
+**Not a decoder state.** ZIMO's own figures settle it: stay-alive discharge is 1.2 s to 3.1 s at
+75 mA (MS manual, technical data), so the decoder was fully unpowered long before the 15 s test
+ended and would have restarted. And a decoder holding a latched motor cut-out would still light its
+functions; this one lit nothing.
+
+**Not contact resistance.** The locomotive was not touched between the working read and the failing
+one. An earlier reading of this session blamed contact, on the grounds that lifting the locomotive
+fixed it — but lifting removes the load as well, and the load is what matters.
+
+### Why it matters here
+
+This is what `doctor --power-on` walked into. With the station in automatic start mode and a stored
+speed for the address, D3 energised the track, the locomotive drove on the programming track, the
+programming output latched off, and every service-mode check then failed and would have been
+recorded as "this station cannot do service mode". See #14 — the movement is the trigger, but the
+latched output is the mechanism, and it explains why the run could not be rescued by retrying.
+
 ### Faults found in this tool, not in the station
 
 - The doctor can start a locomotive moving, including on the programming track, where it then
