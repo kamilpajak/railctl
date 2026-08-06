@@ -62,6 +62,19 @@ power already off. It found it on, took the "leave as found" branch, and the pow
 never executed on hardware. The test now calls it unconditionally and restores the found state
 afterwards.
 
+### What another implementation does
+
+JMRI decodes this byte in the **Lenz order** — `java/src/jmri/jmrix/lenz/XNetPowerManager.java`
+reads bit 0 as emergency off and bit 1 as emergency stop — with no per-station override anywhere.
+On this hardware that inverts both states: at `62 22 06`, where the red LED says the track is
+dead, JMRI would report `IDLE`, its state meaning "track power is ON, but all locomotives are
+stopped"; at `62 22 05`, where the track is live, it would report `OFF`.
+
+That is not evidence against the measurement — JMRI follows the same specification we followed,
+and nothing suggests anyone has run it against a YD7010. It is worth recording for the opposite
+reason: a reader who checks our claim against the best-known open implementation will find it
+disagrees, and should know that was checked rather than missed.
+
 ### Second finding from the same run
 
 `21 80` and `21 81` are both answered with the generic ack `01 04 05`, never `61 00` / `61 01`.
