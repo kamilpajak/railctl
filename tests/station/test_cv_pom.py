@@ -477,6 +477,12 @@ def test_unsupported_to_the_pom_telegram_raises_and_learns_pom_read_false(bench)
     with pytest.raises(PomReadUnsupportedError):
         bench.station.programmer.pom_read(8, address=3)
     assert bench.station.capabilities.pom_read is False
+    # This is the OTHER path to `pom_read=False`, the one that does not go
+    # through the doctor, and it is the one that earns the verdict honestly:
+    # a real 61 82. Without the provenance written here, a mid-session refusal
+    # would be indistinguishable from D4's silence-derived False. Dropping the
+    # provenance argument from `learn()` used to leave every test green.
+    assert bench.station.capabilities.pom_read_provenance == "unsupported"
 
 
 def test_no_ack_seen_on_any_attempt_raises_decoder_no_ack_and_leaves_pom_read_unknown(bench):
