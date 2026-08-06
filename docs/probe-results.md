@@ -292,6 +292,8 @@ locomotive standing on the main track, that is a real hazard accepted in exchang
 The gate also makes every fresh process pay for a full probe before it may read one CV, because
 capabilities are not persisted (issue #15).
 
+The gate itself is issue #20.
+
 Left open: why the station's relay switches at all, and what the 0.6 V / 0.0 V pair physically
 represents. Neither affects any decision about this code.
 
