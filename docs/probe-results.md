@@ -173,6 +173,12 @@ Removing the load is what clears it. That is the behaviour a current-limited pro
 designed to have — it refuses to keep driving into what looks like a fault — and it is invisible to
 every channel this tool can read.
 
+Stated precisely: removing the load **is** a way out, and cutting main track power is **not**. Both
+were tested. What was not tested is whether anything else clears it — a full power cycle of the
+command station itself, or some vendor command outside XpressNet. So read this as "the one recovery
+we found", not "the only one that exists". The internal mechanism holding the latch is likewise not
+established; what is established is the behaviour and which of the two interventions works.
+
 ### What this rules out
 
 **Not a decoder state.** ZIMO's own figures settle it: stay-alive discharge is 1.2 s to 3.1 s at

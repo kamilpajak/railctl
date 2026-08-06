@@ -322,7 +322,15 @@ def test_d4_total_silence_sets_pom_read_false_with_a_silence_note(doctor_bench):
     # configured and always was; an earlier version of this note told the user to
     # fix the one thing that was already correct. Nothing pinned that advice, so
     # it was free to be wrong.
+    # Two words, because one is not enough: "check the decoder's RailCom detector
+    # settings" would satisfy `"detector" in note` while sending the reader back to
+    # the component that was already correct. Requiring "cutout" as well pins the
+    # load-bearing half of the claim - that the station's own cutout does not
+    # deliver a result - which no message can carry while still blaming the decoder.
+    # Neither word freezes the wording; both are technical terms that cannot be
+    # dropped without changing the meaning.
     assert "detector" in note.lower()
+    assert "cutout" in note.lower()
     assert note in d4.detail
 
 
