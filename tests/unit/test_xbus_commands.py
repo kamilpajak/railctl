@@ -13,6 +13,7 @@ from railctl.xbus.commands import (
     FUNCTION_BITS,
     GROUP_FUNCTIONS,
     MAX_FUNCTION,
+    FunctionAction,
     FunctionGroup,
     pack_function_bits,
 )
@@ -94,6 +95,7 @@ from railctl.xbus.commands import (  # noqa: E402
     cmd_emergency_stop_all,
     cmd_emergency_stop_loco,
     cmd_function_group,
+    cmd_function_single,
     cmd_function_state_13_28,
     cmd_loco_info,
     cmd_pom_read_byte,
@@ -140,6 +142,7 @@ def hexbytes(text: str) -> bytes:
         (cmd_function_group(3, FunctionGroup.G3, 0x01, threshold=XN), "E4 22 00 03 01 C4"),
         (cmd_function_group(3, FunctionGroup.G4, 0x01, threshold=XN), "E4 23 00 03 01 C5"),
         (cmd_function_group(3, FunctionGroup.G5, 0x01, threshold=XN), "E4 28 00 03 01 CE"),
+        (cmd_function_single(3, 0, FunctionAction.ON, threshold=XN), "E4 F8 00 03 40 5F"),
         (cmd_loco_info(3, threshold=XN), "E3 00 00 03 E0"),
         (cmd_loco_info(1234, threshold=XN), "E3 00 C4 D2 F5"),
         (cmd_function_state_13_28(3, threshold=XN), "E3 09 00 03 E9"),
@@ -209,6 +212,23 @@ def test_the_emergency_stop_for_one_loco_is_the_dedicated_92_instruction():
     assert cmd_emergency_stop_loco(3, threshold=XN)[0] == 0x92
 
 
+def test_function_single_refuses_a_function_index_above_28():
+    with pytest.raises(ValueError, match="out of range"):
+        cmd_function_single(3, 29, FunctionAction.ON, threshold=XN)
+
+
+def test_function_single_refuses_an_action_outside_the_enum():
+    with pytest.raises(ValueError, match="not a valid FunctionAction"):
+        cmd_function_single(3, 0, 3, threshold=XN)  # type: ignore[arg-type]
+
+
+def test_function_single_toggle_on_f28_packs_the_action_into_the_top_two_bits():
+    """TT sits in bits 7-6 and NNNNNN in bits 5-0: TOGGLE (0b10) on F28
+    (0b011100) is 0b10011100, not two encodings that happen to collide."""
+    telegram = cmd_function_single(3, 28, FunctionAction.TOGGLE, threshold=XN)
+    assert telegram[4] == 0b10011100
+
+
 from railctl.xbus.commands import TimeoutClass, timeout_class  # noqa: E402
 
 
@@ -244,6 +264,7 @@ def test_service_mode_telegrams_get_the_long_budget(telegram: bytes):
         cmd_emergency_stop_loco(3, threshold=XN),
         cmd_drive_128(3, 1, Direction.FORWARD, threshold=XN),
         cmd_function_group(3, FunctionGroup.G1, 0x10, threshold=XN),
+        cmd_function_single(3, 0, FunctionAction.ON, threshold=XN),
         cmd_loco_info(3, threshold=XN),
         cmd_function_state_13_28(3, threshold=XN),
         cmd_pom_read_byte(3, 8, threshold=XN),

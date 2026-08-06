@@ -21,7 +21,7 @@ own length guard, and none has one.
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import Literal
+from typing import Final, Literal
 
 from railctl.errors import ProtocolError, XBusChecksumError
 from railctl.xbus import codec
@@ -74,8 +74,10 @@ STATION_FAMILIES: dict[int, str] = {
 }
 UNKNOWN_FAMILY = "unknown"
 
-STATUS_EMERGENCY_OFF = 0x01
-STATUS_EMERGENCY_STOP = 0x02
+# MEASURED, not taken from the spec - the two documents disagree and the
+# hardware settled it. See StationStatus's docstring and docs/probe-results.md R2.
+STATUS_EMERGENCY_STOP = 0x01
+STATUS_EMERGENCY_OFF = 0x02
 STATUS_AUTO_START = 0x04
 STATUS_SERVICE_MODE = 0x08
 STATUS_POWERING_UP = 0x40
@@ -132,11 +134,30 @@ class StationVersion:
 
 @dataclass(frozen=True, slots=True)
 class StationStatus:
-    """62 22 S. Bit meanings are the Lenz XpressNet ones (section 2.1.7).
+    """62 22 S. Bits 0 and 1 are the MEASURED meanings, not the Lenz ones.
 
-    The German 23151 manual swaps bits 0 and 1, and neither document defines any
-    bit as "short circuit". `raw` is always preserved so the interpretation can
-    be revised without touching the parser.
+    Lenz XpressNet 2.1.7 makes bit 0 emergency off and bit 1 emergency stop; the
+    German 23151 manual swaps them. Both readings fit the states this station
+    spends most of its time in (`0x04` powered, `0x07` on power-up), so only a
+    state that separates them decides it. That state is `80 80`, and the Lenz
+    spec is what makes it decisive: 2.2.4 says "The DCC track power remains
+    switched on". Measured 2026-08-05 on the YD7010, against the front-panel
+    Track Out LED:
+
+        21 81 -> 62 22 04   powered                    green steady
+        80 80 -> 62 22 05   bit 0, track still powered green FLASHING
+        21 80 -> 62 22 06   bit 1, track dead          red
+
+    So bit 0 is emergency stop and bit 1 is emergency off on this hardware - the
+    23151 order. Following Lenz here is not a cosmetic error: it makes
+    `track_power` report a dead track as powered, which made `power_off()` raise
+    on every successful call and would have let the doctor run D4 and D10 on an
+    unpowered track. Neither document defines any bit as "short circuit".
+
+    If a future station turns out to use the Lenz order, this is a per-station
+    fact and belongs in capabilities, not in a second guess here. `raw` is always
+    preserved, so that revision never has to touch the parser - which is what
+    made this one a two-line change.
     """
 
     raw: int
@@ -313,6 +334,15 @@ REASON_CHECKSUM: Reason = "checksum"
 REASON_LENGTH: Reason = "length"
 REASON_EMPTY: Reason = "empty"
 REASON_UNKNOWN_FORM: Reason = "unknown_form"
+
+# Spec line 704: E5 and E2 are extended loco-info reply forms this module
+# does not decode - there is no dataclass for either, so they fall through
+# to Other(telegram, reason=REASON_UNKNOWN_FORM) like any other unlisted
+# header. Naming them here lets Station.exchange (station/facade.py) treat
+# that specific Other as "a feature we have not probed for" rather than
+# "a reply form nobody has ever seen" - the two have different remedies,
+# and collapsing them back into one throws that distinction away.
+EXTENDED_LOCO_INFO_HEADERS: Final[frozenset[int]] = frozenset({0xE5, 0xE2})
 
 
 @dataclass(frozen=True, slots=True)

@@ -4,7 +4,7 @@
 - Port: `/dev/cu.usbmodem7010A00011943` (LI-USB `FF FE` framing required)
 - Decoder: ZIMO MS450P22, address 3. **On the main track** for the R1 / POM section; moved
   to the **programming track** for the R2 / R4 service-mode section below.
-- Run: 2026-08-04
+- Run: 2026-08-04; power-state section added 2026-08-05
 
 ## Settled
 
@@ -17,11 +17,82 @@
 | Speed step mode | **128** | ident byte `0000 B100` |
 | F13–F28 state readable | **yes**, `E3 09` → `E3 52 D1 D2` | closes the blind-clear side effect |
 | Start mode | **automatic** — locos resume last speed on power-up | status bit 2 |
+| Status byte bits 0 and 1 | **swapped vs Lenz** — bit 0 emergency stop, bit 1 emergency off | `62 22 05` after `80 80` |
 
 The speed step question was one of the five left open in the design. It is answered:
 this locomotive runs 128 steps.
 
+## Status byte: bits 0 and 1 are the reverse of the Lenz spec — SETTLED 2026-08-05
+
+The `62 22 S` status byte does not follow Lenz XpressNet 2.1.7 on this station. Measured with
+the locomotive on the rollers and the owner reading the front-panel Track Out LED, whose three
+states the YD7010 manual defines: green steady = voltage on, green **flashing** = emergency stop
+*"(track voltage ON)"*, red steady = voltage off.
+
+| sent | reply | bit set | LED | track voltage |
+| --- | --- | --- | --- | --- |
+| `21 81` | `62 22 04` | none | green steady | **on** |
+| `80 80` | `62 22 05` | bit 0 | green **flashing** | **on** |
+| `21 80` | `62 22 06` | bit 1 | red | **off** |
+| (plug-in, or `80 80` then `21 80`) | `62 22 07` | both | red | off |
+
+So **bit 0 is emergency stop and bit 1 is emergency off** — the order the German 23151 manual
+gives, not the one in Lenz 2.1.7.
+
+### Why the earlier runs could not have caught it
+
+The two states this bench sits in almost all the time are `0x04` and `0x07`. Neither
+distinguishes the orders: `0x04` has neither bit and `0x07` has both. Only a state with exactly
+one of them decides, and the way to reach one on purpose is `80 80` — which the Lenz spec itself
+makes decisive, because 2.2.4 states *"The DCC track power remains switched on"*. The command
+whose effect the spec pins down is the one worth sending when two documents disagree.
+
+### What it broke
+
+`track_power` was `not emergency_off`, so `0x06` read as **powered**. Consequences:
+
+- `power_off()` cut the voltage and then always raised `TrackPowerError`. The command worked;
+  the check did not.
+- Doctor D3 would have read a dead track as "already on", skipped the power-up, and run D4 (POM
+  read) and D10 (address band) on an unpowered track — and the doctor is what writes
+  `capabilities.json`.
+
+Three M5 acceptance runs missed it because the test only called `power_off()` when it found the
+power already off. It found it on, took the "leave as found" branch, and the power-off path had
+never executed on hardware. The test now calls it unconditionally and restores the found state
+afterwards.
+
+### What another implementation does
+
+JMRI decodes this byte in the **Lenz order** — `java/src/jmri/jmrix/lenz/XNetPowerManager.java`
+reads bit 0 as emergency off and bit 1 as emergency stop — with no per-station override anywhere.
+On this hardware that inverts both states: at `62 22 06`, where the red LED says the track is
+dead, JMRI would report `IDLE`, its state meaning "track power is ON, but all locomotives are
+stopped"; at `62 22 05`, where the track is live, it would report `OFF`.
+
+That is not evidence against the measurement — JMRI follows the same specification we followed,
+and nothing suggests anyone has run it against a YD7010. It is worth recording for the opposite
+reason: a reader who checks our claim against the best-known open implementation will find it
+disagrees, and should know that was checked rather than missed.
+
+### Second finding from the same run
+
+`21 80` and `21 81` are both answered with the generic ack `01 04 05`, never `61 00` / `61 01`.
+Those arrive as unsolicited broadcasts instead. The fast path in `Station._settle_power` therefore
+never fires here, and both calls always pay `power_settle` plus a status round trip.
+
 ## R1 — POM CV read: NOT established
+
+> **Added 2026-08-05, from the specification rather than the bench, and it outranks every
+> hypothesis below.** The XpressNet specification marks POM CV **read** as a *(future feature)*
+> and specifies only byte-mode and bit-mode POM **writes**. So a station that acknowledges the
+> request and then says nothing is not necessarily broken or incomplete — it is answering a
+> request the protocol never finished defining. This explains the measured asymmetry (write works,
+> read is silent) more simply than the RailCom-detector inference further down, and it was missed
+> for two days because the investigation started at the hardware instead of at the document.
+>
+> The verdict does not change: `pom_read` stays **unknown**, never `false`. A capability the
+> protocol does not define is not a capability the station refused.
 
 The station **acknowledges** the request and returns **no result at all**.
 
