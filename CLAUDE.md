@@ -74,6 +74,14 @@ gh pr checks <n>
 
 The same trap applies to any check where the interesting result is on stdout and the verdict is in the exit status.
 
+**A non-zero `gh run watch` does not mean the run failed.** It has returned 1 for a run that was still `in_progress` with every job `pending` — nothing had failed, the watch just gave up. Treat its exit status as a hint and the run's own `status` and `conclusion` as the answer. When `watch` misbehaves, poll instead:
+
+```
+gh run view <id> --json status,conclusion,headSha --jq '"\(.status) \(.conclusion) \(.headSha)"'
+```
+
+Only `completed` plus `success` plus a `headSha` equal to yours is green. Anything else is "not yet", not "broken".
+
 **A CI run belongs to a commit, not to a position in a list.** `gh run list --limit 1` right after a push often returns the run for the PREVIOUS commit, because the new one has not been created yet. Watch that run and GitHub cancels it the moment the newer one appears — `--exit-status` then returns non-zero with conclusion `cancelled`, which reads as a failure and is not one. Before believing any verdict, check the run belongs to you:
 
 ```
