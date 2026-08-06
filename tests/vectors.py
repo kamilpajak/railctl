@@ -21,7 +21,9 @@ from collections.abc import Callable
 from dataclasses import dataclass
 
 from railctl.xbus.commands import (
+    FunctionAction,
     cmd_drive_128,
+    cmd_function_single,
     cmd_pom_read_byte,
     cmd_service_direct_read,
     cmd_service_ext_read,
@@ -181,6 +183,12 @@ ENCODE_VECTORS: tuple[EncodeVector, ...] = (
         lambda: cmd_z21_cv_read(29),
         _b("23 11 00 1C 2E"),
         "16-bit zero-based",
+    ),
+    EncodeVector(
+        "function_single(3, F0, ON)",
+        lambda: cmd_function_single(3, 0, FunctionAction.ON, threshold=XPRESSNET_THRESHOLD),
+        _b("E4 F8 00 03 40 5F"),
+        "measured: lit the headlight of loco 3 (docs/probe-results.md, D12)",
     ),
 )
 

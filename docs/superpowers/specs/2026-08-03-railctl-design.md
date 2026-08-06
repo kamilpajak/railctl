@@ -920,6 +920,7 @@ Events via `on_event(name, payload)`:
 | `cv.stale_result` | `cv`, `raw_cv`, `encoding` | a result belonging to an earlier request arrived |
 | `cv.write_unverified` | `cv`, `value`, `reason` | a blind write completed with no read-back |
 | `page.unverified` | `page`, `mode` | a page was selected but could not be read back |
+| `page.not_selected` | `cv`, `page`, `mode` | a caller-supplied page could not be honoured (service-mode reads cannot select one yet) |
 | `loco.in_use_by_other` | `address` | another device controls this locomotive |
 | `address.band_unverified` | `address`, `threshold` | address is in 100..127 and D10 has not run |
 
@@ -1310,7 +1311,7 @@ Every `--format=json` command prints exactly this on stdout:
 }
 ```
 
-`schema` is per command (`railctl/cv-read/v1`, `railctl/backup/v1`, `railctl/doctor/v1`, `railctl/schema/v1`, …). Within a major version only optional fields may be added; a removed or retyped field is `v2`. `ok` means the command did what it was asked; scripts branch on `exit_code`. `link`/`station` are omitted when no link was opened. `warnings` entries are `{"name": "cv.stale_result", "message": "...", "details": {...}}` using the fixed event names `cv.stale_result`, `cv.write_unverified`, `page.unverified`, `loco.in_use_by_other`, `address.band_unverified`.
+`schema` is per command (`railctl/cv-read/v1`, `railctl/backup/v1`, `railctl/doctor/v1`, `railctl/schema/v1`, …). Within a major version only optional fields may be added; a removed or retyped field is `v2`. `ok` means the command did what it was asked; scripts branch on `exit_code`. `link`/`station` are omitted when no link was opened. `warnings` entries are `{"name": "cv.stale_result", "message": "...", "details": {...}}` using the fixed event names `cv.stale_result`, `cv.write_unverified`, `page.unverified`, `page.not_selected`, `loco.in_use_by_other`, `address.band_unverified`.
 
 **Errors** are one JSON object on **stderr**, in every format mode:
 

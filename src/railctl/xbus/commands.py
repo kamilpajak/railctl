@@ -29,6 +29,7 @@ from __future__ import annotations
 
 import enum
 from collections.abc import Mapping
+from typing import Final
 
 from railctl.xbus.address import encode_loco_address
 from railctl.xbus.codec import encode
@@ -82,6 +83,8 @@ MAX_BIT_INDEX = 7
 MIN_BYTE_VALUE = 0
 MAX_BYTE_VALUE = 255
 MAX_FUNCTION = 28
+DB_FUNCTION_SINGLE: Final[int] = 0xF8
+FUNCTION_ACTION_SHIFT: Final[int] = 6
 
 
 class FunctionGroup(enum.IntEnum):
@@ -214,6 +217,45 @@ def cmd_function_group(address: int, group: FunctionGroup, bits: int, *, thresho
     _check_byte("function bits", bits)
     high, low = encode_loco_address(address, long_threshold=threshold)
     return encode(OP_LOCO_DRIVE, int(group), high, low, bits)
+
+
+class FunctionAction(enum.IntEnum):
+    """The TT bits of E4 F8's payload.
+
+    TOGGLE exists on the wire and is never sent by station/facade.py: a
+    toggle whose prior state is unknown would return a guess, not a fact,
+    and that is the one thing this project's whole error model exists to
+    keep out of a return value. See the design decision recorded there.
+    """
+
+    OFF = 0b00
+    ON = 0b01
+    TOGGLE = 0b10
+
+
+def cmd_function_single(
+    address: int, function: int, action: FunctionAction, *, threshold: int
+) -> bytes:
+    """E4 F8 AdrMSB AdrLSB TTNNNNNN X - one function, one telegram.
+
+    Measured 2026-08-04 (docs/probe-results.md, D12): E4 F8 00 03 40 5F lit
+    the headlight of loco 3. This is a Z21 extension, not classic XpressNet
+    V2 - the station is probed for it (single_function_cmd) rather than
+    assumed to have it just because it reports command station id 0x12.
+
+    `FunctionAction(action)` validates the action: an int that is not 0, 1
+    or 2 raises ValueError from the enum constructor itself
+    ("3 is not a valid FunctionAction"), so this function does not spell
+    the range out by hand a second time.
+    """
+    if not 0 <= function <= MAX_FUNCTION:
+        raise ValueError(f"function {function} out of range 0..{MAX_FUNCTION}")
+    action = FunctionAction(action)
+    high, low = encode_loco_address(address, long_threshold=threshold)
+    payload = _check_byte(
+        "function single payload", (int(action) << FUNCTION_ACTION_SHIFT) | function
+    )
+    return encode(OP_LOCO_DRIVE, DB_FUNCTION_SINGLE, high, low, payload)
 
 
 def cmd_loco_info(address: int, *, threshold: int) -> bytes:
