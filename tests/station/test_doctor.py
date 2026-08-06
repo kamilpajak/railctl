@@ -317,6 +317,12 @@ def test_d4_total_silence_sets_pom_read_false_with_a_silence_note(doctor_bench):
     note = next(n for n in report.capabilities.notes if "silence" in n.lower())
     assert "silence" in note.lower()
     assert "re-run" in note.lower() and "doctor" in note.lower()
+    # The note must send the reader to the DETECTOR, not to the decoder. Measured
+    # 2026-08-06: this decoder has CV29 bit 3 set and CV28=3, so RailCom is
+    # configured and always was; an earlier version of this note told the user to
+    # fix the one thing that was already correct. Nothing pinned that advice, so
+    # it was free to be wrong.
+    assert "detector" in note.lower()
     assert note in d4.detail
 
 

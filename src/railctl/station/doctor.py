@@ -157,7 +157,9 @@ _SILENCE_NOTE: Final[str] = (
     "POM read produced no result at all (neither 61 13 nor 61 82) after "
     f"{TIMING.pom_read_attempts} attempts; recorded as unsupported from silence "
     "rather than left unknown, or every AUTO operation would retry POM for "
-    "several seconds forever. Fix RailCom on the decoder and re-run the doctor."
+    f"{TIMING.pom_read_attempts * 2.2:.0f}s on every call. A POM read result needs a RailCom "
+    "DETECTOR on the layout - the command station's cutout alone does not deliver one - so check "
+    "for that before suspecting the decoder, and re-run the doctor once one is fitted."
 )
 
 
