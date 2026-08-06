@@ -18,6 +18,10 @@
 | F13–F28 state readable | **yes**, `E3 09` → `E3 52 D1 D2` | closes the blind-clear side effect |
 | Start mode | **automatic** — locos resume last speed on power-up | status bit 2 |
 | Status byte bits 0 and 1 | **swapped vs Lenz** — bit 0 emergency stop, bit 1 emergency off | `62 22 05` after `80 80` |
+| Service mode, all three encodings | **work** — direct, Z21 and extended | doctor D5/D6/D7, 2026-08-06 |
+| Decoder identity | ZIMO **MS**: `CV1=3 CV7=5 CV8=145 CV250=6 CV28=3 CV29=14` | doctor D9, 2026-08-06 |
+| RailCom **in the decoder** | **enabled** — `CV29` bit 3 set, `CV28=3` | doctor D8, 2026-08-06 |
+| Broadcasts | `61 00`, `61 01`, `81 00` arrive **unsolicited**, three times each | `Station.events()`, 2026-08-06 |
 
 The speed step question was one of the five left open in the design. It is answered:
 this locomotive runs 128 steps.
@@ -34,7 +38,12 @@ states the YD7010 manual defines: green steady = voltage on, green **flashing** 
 | `21 81` | `62 22 04` | none | green steady | **on** |
 | `80 80` | `62 22 05` | bit 0 | green **flashing** | **on** |
 | `21 80` | `62 22 06` | bit 1 | red | **off** |
-| (plug-in, or `80 80` then `21 80`) | `62 22 07` | both | red | off |
+| `80 80` then `21 80` | `62 22 07` | both | red | off |
+
+The state after plugging the USB in is **not a constant**. An earlier note here implied `62 22 07`
+was the power-up value; measured on 2026-08-06, the station comes back in whatever state it was
+left in — unplugged at `62 22 06`, it reappeared at `62 22 06`. The earlier `0x07` was a latched
+emergency stop from before the disconnection, not a power-up default.
 
 So **bit 0 is emergency stop and bit 1 is emergency off** — the order the German 23151 manual
 gives, not the one in Lenz 2.1.7.
@@ -81,6 +90,133 @@ disagrees, and should know that was checked rather than missed.
 Those arrive as unsolicited broadcasts instead. The fast path in `Station._settle_power` therefore
 never fires here, and both calls always pay `power_settle` plus a status round trip.
 
+## Session of 2026-08-06 — what the bench added
+
+Run through `Station` and `doctor`, not through the M1 probe script, so this is the first time
+most of these paths reached real hardware.
+
+### RailCom is enabled in the decoder — the missing piece is the detector
+
+D8 read `CV29 = 14`, so bit 3 is set, and `CV28 = 3`, a valid channel selection. The decoder is
+configured for RailCom and always was. This removes the last competing explanation for the silent
+POM read: it is not decoder configuration, and it is not the decoder being asleep. It is that
+nothing receives what the decoder transmits, exactly as the standards reading predicted.
+
+Consequence for the code: the doctor's silence note ends with "Fix RailCom on the decoder and
+re-run the doctor", which now sends the user to the one place that is already correct.
+
+### POM read: silence is the rule, with one unexplained exception
+
+28 controlled POM reads in this session, all silent, each costing **6.7 s** — three internal
+attempts. That figure is the concrete cost behind the plan's "AUTO would retry POM for several
+seconds forever"; it was assumed until now.
+
+One doctor run returned `61 13` (no acknowledgement) instead. Four hypotheses were tested and all
+four failed to reproduce it:
+
+| hypothesis | attempts | result |
+| --- | --- | --- |
+| intermittent / random | 15 | silence |
+| first read after the track is energised (1 s gap) | 6 | silence |
+| cold decoder start (30 s with the track dark) | 4 | silence |
+| freshly re-seated wheels after lifting the locomotive | 3 | silence |
+
+It is recorded as a single observation with no explanation. Do not repair this gap with a story:
+three explanations were proposed during the session and the measurement refuted each one.
+
+What it does settle is the design question. `pom_read = false` from silence is well supported for
+this hardware — but one contrary observation exists, so it is not certain, which is precisely what
+`pom_read_provenance = "silence"` is for.
+
+### The telemetry stream is not an instrument for track power
+
+Interface 5 carries a `TV` field that looks like track voltage. Sampled with the track live
+(`62 22 04`) and dead (`62 22 06`), it read **15.1 V in both**, alongside `TC 0mA` for a decoder
+that is demonstrably drawing current and answering. Whatever `TV` measures, it is not the state of
+the track output.
+
+Recorded because the negative result is the useful part: anyone who sees `TV` in the output will
+try this, and issue #13 needs an instrument independent of the status byte. This is not one. The
+front-panel LED, read by a person, remains the only one.
+
+### The programming-track output latches off after an overload, and nothing reports it
+
+Driving a locomotive on the programming track knocks that output offline until the load is
+physically removed. No status bit, no telemetry field and no front-panel LED shows it. Established
+by a controlled sequence with one variable, reproduced three times.
+
+```
+baseline           service read CV8 = 145, repeatedly
+drive step 30      sent to the locomotive ON the programming track
+                   (first occurrence: it moved for ~1 s and stopped by itself)
+after              service read -> 61 13, three times in a row
+```
+
+What the station said while the fault was present: status byte `62 22 04` — **identical** to before,
+telemetry `TC 0mA TV 15.1V` — identical, green Track Out LED steady, red LED off. Every indicator
+we have describes the **main** output; there is none for the programming output.
+
+### How it was pinned down
+
+The decisive step was realising the decoder had no power at all, rather than a broken
+acknowledgement:
+
+1. Cutting main track power for 3 s and then 15 s did **not** clear the fault.
+2. With the fault present, `function_set(3, 0, True)` produced **no light**, though the same
+   locomotive had been driven from this output minutes earlier — so operating commands do reach it
+   normally, and now nothing did.
+3. The locomotive was lifted and put back, with **no command sent**. The light came on by itself,
+   because the station still held `F0 = true` and the decoder finally had power to act on it.
+4. Service reads worked again immediately: `CV8 = 145`.
+
+Removing the load is what clears it. That is the behaviour a current-limited programming output is
+designed to have — it refuses to keep driving into what looks like a fault — and it is invisible to
+every channel this tool can read.
+
+Stated precisely: removing the load **is** a way out, and cutting main track power is **not**. Both
+were tested. What was not tested is whether anything else clears it — a full power cycle of the
+command station itself, or some vendor command outside XpressNet. So read this as "the one recovery
+we found", not "the only one that exists". The internal mechanism holding the latch is likewise not
+established; what is established is the behaviour and which of the two interventions works.
+
+### What this rules out
+
+**Not a decoder state.** ZIMO's own figures settle it: stay-alive discharge is 1.2 s to 3.1 s at
+75 mA (MS manual, technical data), so the decoder was fully unpowered long before the 15 s test
+ended and would have restarted. And a decoder holding a latched motor cut-out would still light its
+functions; this one lit nothing.
+
+**Not contact resistance.** The locomotive was not touched between the working read and the failing
+one. An earlier reading of this session blamed contact, on the grounds that lifting the locomotive
+fixed it — but lifting removes the load as well, and the load is what matters.
+
+### Why it matters here
+
+This is what `doctor --power-on` walked into. With the station in automatic start mode and a stored
+speed for the address, D3 energised the track, the locomotive drove on the programming track, the
+programming output latched off, and every service-mode check then failed and would have been
+recorded as "this station cannot do service mode". See #14 — the movement is the trigger, but the
+latched output is the mechanism, and it explains why the run could not be rescued by retrying.
+
+### Faults found in this tool, not in the station
+
+- The doctor can start a locomotive moving, including on the programming track, where it then
+  fails its own service-mode measurements (#14).
+- Nothing the doctor measures is persisted, so a later process finds every encoding "unknown" and
+  is told to run the doctor (#15).
+- `CvOutOfRangeError` is raised when no encoding has been probed, naming the wrong cause (#16).
+
+### Confirmed by watching the locomotive
+
+`80 80` sent to a locomotive running at step 30 stopped the wheels **instantly**, with the green
+Track Out LED flashing throughout — the manual's "emergency stop has been triggered (track voltage
+ON)". The status byte read `62 22 05` for ten seconds. This was predicted before the panel was
+read, not explained afterwards, and it is the fifth independent confirmation of the bit order.
+
+In the same moment `loco_info` reported `speed=30, emergency_stopped=False` for a locomotive that
+was standing still under a global emergency stop. The per-locomotive view does not reflect the
+station-wide state.
+
 ## R1 — POM CV read: NOT established
 
 > **Added 2026-08-05, from the specification rather than the bench, and it outranks every
@@ -91,8 +227,17 @@ never fires here, and both calls always pay `power_settle` plus a status round t
 > read is silent) more simply than the RailCom-detector inference further down, and it was missed
 > for two days because the investigation started at the hardware instead of at the document.
 >
-> The verdict does not change: `pom_read` stays **unknown**, never `false`. A capability the
-> protocol does not define is not a capability the station refused.
+> A capability the protocol does not define is not a capability the station refused. That reasoning
+> still stands, and it is why the value written here is not an ordinary `false`.
+>
+> **Superseded in part, 2026-08-06.** This paragraph originally read "`pom_read` stays **unknown**,
+> never `false`", and that is no longer what the code does. Doctor D4 records `pom_read = false`
+> after total silence, as the one deliberate exception in the codebase, because leaving it `None`
+> makes every `AUTO` operation retry POM — measured at **6.7 s per call** — on every call, forever.
+> The exception carries its own provenance: `pom_read_provenance` is `"unsupported"` for a real
+> `61 82` and `"silence"` for this case, so the distinction the sentence was protecting survives in
+> the type rather than in prose. Anything that must not act on a guess reads the provenance, not
+> `pom_read`.
 
 The station **acknowledges** the request and returns **no result at all**.
 
