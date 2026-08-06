@@ -228,13 +228,20 @@ In the same moment `loco_info` reported `speed=30, emergency_stopped=False` for 
 was standing still under a global emergency stop. The per-locomotive view does not reflect the
 station-wide state.
 
-## Service mode neither needs track power nor disturbs it — SETTLED 2026-08-06
+## Service mode needs no track power — SETTLED 2026-08-06
 
 `doctor.py` refuses to run D5–D8 unless the main track is powered, and the comment on that gate
 gives two reasons: that entering service mode cuts main power, and that leaving it re-energises
-the main track even when the operator never authorised power. **Both are contradicted by
-measurement on this station.** Neither had ever been measured; both were reasoning written into a
-comment and then read back out as fact.
+the main track even when the operator never authorised power. Neither had ever been measured;
+both were reasoning written into a comment and then read back out as fact.
+
+The two halves now stand on different footing, and the difference matters:
+
+- **Settled.** A service-mode read works with the main track unpowered. Positive, reproduced,
+  and independent of any instrument — the CV value came back.
+- **Strongly supported, not settled.** Service mode does not disturb the main track. This is a
+  negative established by a person watching a meter, so it can only rule out disturbances longer
+  than that meter resolves. See the limits below.
 
 ### The instrument, validated first
 
@@ -254,36 +261,64 @@ Three settings decide whether it answers or misleads:
 - **Presence/absence only.** DCC runs at 5–8 kHz and a typical meter is calibrated for a 50 Hz
   sine, so the number is not the track voltage. The 16 V against 0.6 V is what carries meaning.
 
+**What the validation does and does not buy.** It establishes that this meter separates the two
+states the station was commanded into, which is all a presence detector has to do. It assumes
+nothing about the status byte being right — the byte is the thing under suspicion elsewhere in
+this file — because both readings were taken while the station was told what to do, not asked.
+Its temporal resolution was **not characterised**: a handheld meter typically refreshes a few
+times a second, so a disturbance shorter than that is invisible to it and stays `unknown` here.
+
 ### What was measured
 
 | Question | Result | Evidence |
 | --- | --- | --- |
 | Does a service read work with the main track unpowered? | **Yes** | `CV8=145`, 4 reads out of 4 |
-| Does service mode cut a powered main track? | **No** | 16 service operations over two runs, meter never left 16 V |
+| Does service mode cut a powered main track, for the duration of a read? | **No** | 13 operations watching the meter, then 3 more listening for relays; 16 V throughout both |
 | Does leaving service mode energise an unpowered main track? | **No** | 16 V never appeared in any of the 4 reads |
 | Does a relay switch during service mode? | **Yes, twice per read** | 6 audible clicks for 3 reads, in both power states |
+
+**Method, because it decides what the negatives are worth.** The exit window was widened for the
+last two questions: `service_exit_settle` was raised from its default 0.10 s to 1.5 s, so the gap
+between resume-operations and the power-off that follows it was 15 times longer than in normal
+operation. No telegram was added or removed. This makes the test **more** sensitive, not less —
+a station that was going to energise the track had far longer to show it — but the default
+0.10 s case was never watched directly, and a pulse confined to that shorter window remains
+untested.
+
+The two power-on runs asked the operator for different things: the first for the meter, the
+second mainly for relay clicks with the meter reported alongside. Both reported 16 V unbroken.
+Request and reply bytes were not captured for any of these reads; the evidence is the returned
+value and the operator's reading.
 
 The relay clicks in **both** power states, so it tracks service-mode entry and exit, not the power
 commands. An earlier run appeared to contradict this; it did not — that run asked the operator to
 *watch* the meter, and nobody was listening for clicks.
 
 With the track unpowered, the meter alternates between 0.6 V and 0.0 V in step with the relay.
-Both readings are "no track voltage": the track is empty and the meter's input is high impedance,
-so this is leakage following the relay position, not a state of the track. It does not survive
-the next `power_on`, which restores 16 V from either reading. Separating the two would need a
-load or a scope, and no conclusion here rests on the difference.
+Both readings are "no track voltage". The likeliest reading is leakage following the relay
+position — the track is empty and the meter's input is high impedance — but that is an
+interpretation, not a measurement, and a real switching of the output cannot be ruled out from
+these numbers. Separating the two would need a load or a scope. Either way the pair does not
+survive the next `power_on`, which restores 16 V from both, and no conclusion here rests on the
+difference.
 
 ### What another implementation does
 
-JMRI does not model any of it (`java/src/jmri/jmrix/lenz/`):
+In the `java/src/jmri/jmrix/lenz/` path — the one an XpressNet station goes through — JMRI does
+not model any of it:
 
 - `XNetTrafficController.enterProgMode()` returns **null**, with the comment "This method has to
   be available, even though it doesn't do anything on Lenz". Nothing is sent to enter service
   mode; the station enters it on the first programming command.
 - `enterNormalMode()` returns `XNetMessage.getExitProgModeMsg()`, which is a bare
   `CS_REQUEST` + `RESUME_OPS` (`21 81`). No power state is saved and none is restored.
-- `XNetProgrammer.java` contains **no reference to a PowerManager**. There is no gate on track
-  power anywhere in the programming path.
+- `XNetProgrammer.java` contains **no reference to a PowerManager**. Across `jmrix/lenz/`,
+  `PowerManager` appears in four files — `XNetInitializationManager`, `XNetSystemConnectionMemo`,
+  `XNetPowerManager` itself and `hornbyelite/EliteAdapter` — and in no programmer.
+
+Scope of that check: the XpressNet connection code only. JMRI's generic programming layer
+(`jmrit/symbolicprog`) was not examined, so this says nothing about whether some higher level
+warns a user about track power before programming.
 
 ### What this costs us today
 
