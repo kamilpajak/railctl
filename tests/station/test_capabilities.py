@@ -193,9 +193,17 @@ def test_load_ignores_an_unrecognised_key_in_a_link_entry(tmp_path: Path):
         {"command_station_id": "12"},
         {"xpressnet_version": 4},
         {"pom_result_channel": "maybe"},
+        {"pom_read_provenance": "probably"},
         {"notes": 7},
     ],
-    ids=["bool-field", "int-field", "str-field", "result-channel-enum", "notes-wrong-type"],
+    ids=[
+        "bool-field",
+        "int-field",
+        "str-field",
+        "result-channel-enum",
+        "provenance-enum",
+        "notes-wrong-type",
+    ],
 )
 def test_load_raises_on_a_recognised_field_with_the_wrong_type(
     tmp_path: Path, entry: dict[str, object]

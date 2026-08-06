@@ -173,6 +173,7 @@ def _check_d4(station: Station, *, address: int) -> tuple[Check, bool]:
     cleared_notes = tuple(note for note in station.capabilities.notes if note != _SILENCE_NOTE)
     station.record(
         pom_read=None,
+        pom_read_provenance=None,
         pom_result_channel=None,
         pom_echo_zero_based=None,
         notes=cleared_notes,
@@ -180,6 +181,10 @@ def _check_d4(station: Station, *, address: int) -> tuple[Check, bool]:
     try:
         result = station.programmer.pom_read(PROBE_CV, address=address)
     except PomReadUnsupportedError:
+        # `pom_read=False` is written by pom_read() itself, one layer down, on
+        # the 61 82 that entitles it. Recorded here too, so both ways of
+        # reaching False carry how they got there.
+        station.record(pom_read_provenance="unsupported")
         return Check("D4", CHECK_TITLES["D4"], "ok", "POM read unsupported (61 82)"), False
     except DecoderNoAckError:
         detail = (
@@ -188,7 +193,7 @@ def _check_d4(station: Station, *, address: int) -> tuple[Check, bool]:
         )
         return Check("D4", CHECK_TITLES["D4"], "unknown", detail), True
     except DecoderNotRespondingError:
-        station.record(pom_read=False, pom_result_channel="none")
+        station.record(pom_read=False, pom_read_provenance="silence", pom_result_channel="none")
         capabilities = station.capabilities.with_note(_SILENCE_NOTE)
         station.record(notes=capabilities.notes)
         return Check("D4", CHECK_TITLES["D4"], "ok", _SILENCE_NOTE), False

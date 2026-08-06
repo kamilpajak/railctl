@@ -12,7 +12,11 @@ Three outcomes stay distinguishable end to end — in the dataclass, in the JSON
 - **false** — the station said so. Only a `61 82` *Unsupported* reply earns this.
 - **unknown** — no answer, an unparsed answer, or never tried.
 
-Silence is `unknown`. On this hardware a POM CV read returns nothing at all, and that is why `pom_read` is `null` rather than `false` — see `docs/probe-results.md`, section R1, and the one deliberate exception the doctor makes, which records its own provenance.
+Silence is `unknown`. On this hardware a POM CV read returns nothing at all — see `docs/probe-results.md`, section R1.
+
+The doctor makes **one** deliberate exception, and it is the only place in the codebase where `false` may follow anything but a `61 82`: D4 records `pom_read = false` after total silence, because leaving it `null` makes every `AUTO` operation retry POM for seconds on end, forever. That exception carries its own provenance — **`pom_read_provenance` is `"unsupported"` or `"silence"`**, so the difference lives in the type and not in a prose note. Anything that must not act on a guess reads that field, not `pom_read`.
+
+The parallel is DNS negative caching (RFC 2308): an authoritative `NXDOMAIN` may be cached, a timeout may not be cached as one. `61 82` is authoritative; silence is a timeout. Wherever `pom_read` becomes `false` — the doctor's D4, or `CvProgrammer.pom_read` on a `61 82` mid-session — the provenance is written in the same call.
 
 When you touch a parser, an error path or a capability field, ask which of the three a caller will see, and whether a defect in your own code could produce the wrong one.
 

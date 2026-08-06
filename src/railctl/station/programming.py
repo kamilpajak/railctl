@@ -1105,7 +1105,7 @@ class CvProgrammer:
                 # that entitles this method to write `pom_read=False`: three
                 # silent attempts stay `None` (see the bottom of this loop),
                 # never `False`.
-                self._station.learn(pom_read=False)
+                self._station.learn(pom_read=False, pom_read_provenance="unsupported")
                 raise PomReadUnsupportedError(
                     f"the command station answered `61 82` to a POM read of CV{cv}",
                     hint="put the loco on the programming track and use `--mode service`",
