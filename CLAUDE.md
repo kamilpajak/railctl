@@ -74,6 +74,15 @@ gh pr checks <n>
 
 The same trap applies to any check where the interesting result is on stdout and the verdict is in the exit status.
 
+**A CI run belongs to a commit, not to a position in a list.** `gh run list --limit 1` right after a push often returns the run for the PREVIOUS commit, because the new one has not been created yet. Watch that run and GitHub cancels it the moment the newer one appears — `--exit-status` then returns non-zero with conclusion `cancelled`, which reads as a failure and is not one. Before believing any verdict, check the run belongs to you:
+
+```
+gh run view <id> --json conclusion,headSha --jq '.conclusion + "  " + .headSha'
+git rev-parse HEAD
+```
+
+Both lines must agree. And do not push while a run you care about is in flight; the push cancels it and you start over.
+
 ## Hardware
 
 The probe and the tools must **never write a decoder CV** unless the change explicitly asks for it, and a write must be read back to be believed — a station echo proves the station produced a value, not that the decoder kept it.
