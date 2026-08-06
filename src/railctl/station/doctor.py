@@ -414,7 +414,12 @@ def _check_d9(station: Station, *, use_programming_track: bool) -> Check:
     )
     detail = f"decoder family: {family}; {rendered}"
     if read_count:
-        return Check("D9", CHECK_TITLES["D9"], "ok", detail)
+        # A partial read is still "ok" - identity was established - but the
+        # reasons the other CVs failed are worth carrying. `CV28=?` says WHICH
+        # one did not answer; without this it never says why, and "the decoder
+        # ignored it" and "the link faulted" look identical in the report.
+        partial = f"; some reads failed ({reasons})" if reasons else ""
+        return Check("D9", CHECK_TITLES["D9"], "ok", f"{detail}{partial}")
     if not reasons:
         attempted = "no read path was attempted: POM read is not proven"
         if not use_programming_track:

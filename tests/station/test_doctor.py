@@ -733,6 +733,36 @@ def test_d9_with_no_established_read_path_reports_family_unknown_never_ms(doctor
     assert "every read failed" in d9.detail
 
 
+def test_d9_names_the_failure_reasons_when_only_some_identity_cvs_are_read(
+    doctor_bench, monkeypatch
+):
+    """A partial read stays "ok" - identity WAS established - but the report
+    must still say why the rest did not answer.
+
+    The rendered values already carry `CV28=?` for each CV that failed, so
+    WHICH ones failed was never in doubt. What was missing is why: a decoder
+    that ignores a CV and a link that faulted produce the same `?`.
+
+    `_best_effort_read` is substituted rather than scripted on the wire.
+    Driving nine identity CVs to a specific mix of successes and failures
+    through the service-mode result machinery would make the test about that
+    machinery, and the branch under test is the formatting decision in
+    `_check_d9`, which sits above it.
+    """
+    reads = {7: (145, None), 8: (145, None)}
+
+    def fake_read(_station, cv, *, use_programming_track):
+        return reads.get(cv, (None, "DecoderNotRespondingError"))
+
+    monkeypatch.setattr(doctor_module, "_best_effort_read", fake_read)
+    check = doctor_module._check_d9(doctor_bench.station, use_programming_track=True)
+    assert check.status == "ok"
+    assert "CV7=145" in check.detail
+    assert "CV28=?" in check.detail
+    assert "some reads failed" in check.detail
+    assert "DecoderNotRespondingError" in check.detail
+
+
 def test_d9_skips_the_programming_track_when_it_is_disabled(doctor_bench):
     """`--no-programming-track` must stop D9 too, not only D5-D8.
 
