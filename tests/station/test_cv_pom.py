@@ -506,6 +506,33 @@ def test_no_ack_seen_on_any_attempt_raises_decoder_no_ack_and_leaves_pom_read_un
     assert bench.station.capabilities.pom_read is None
 
 
+def test_a_successful_read_clears_a_provenance_that_no_longer_explains_anything(bench_factory):
+    """A provenance must not outlive the verdict it explains.
+
+    `pom_read_provenance` says HOW a `pom_read=False` was reached. Once a POM
+    read succeeds, the verdict is `True` and any provenance still on file is
+    describing a fact that no longer exists - a reader would see "we concluded
+    this from silence" attached to a capability that has just been proved.
+
+    Reaching this state needs `pom_read` to be `None` while the provenance is
+    set, because `pom_read()` short-circuits on a `False` verdict before it
+    ever builds a telegram (see `test_pom_read_refuses_and_names_its_
+    capabilities_provenance`). That combination is what a hand-edited
+    `capabilities.json` gives you, and a future path that writes the two
+    fields separately would give it too. The clearing is therefore
+    unconditional in the success path rather than resting on an argument
+    about which combinations are reachable today.
+    """
+    capabilities = Capabilities.unknown("bench").with_learned(pom_read_provenance="silence")
+    bench = bench_factory(capabilities=capabilities)
+    bench.expect(STATUS_REQUEST, reply=STATUS_POWER_ON)
+    pom8 = cmd_pom_read_byte(3, 8, threshold=bench.station.threshold)
+    bench.expect(pom8, reply=cv_value(0x14, 7, ZIMO_CV8))
+    bench.station.programmer.pom_read(8, address=3)
+    assert bench.station.capabilities.pom_read is True
+    assert bench.station.capabilities.pom_read_provenance is None
+
+
 def test_a_successful_read_learns_zero_based_true_from_echo_seven(bench):
     bench.expect(STATUS_REQUEST, reply=STATUS_POWER_ON)
     pom8 = cmd_pom_read_byte(3, 8, threshold=bench.station.threshold)

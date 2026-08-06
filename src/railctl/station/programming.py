@@ -1134,7 +1134,15 @@ class CvProgrammer:
                 )
             )
             if isinstance(outcome, CvValue):
-                learned: dict[str, object] = {"pom_read": True}
+                # The provenance is cleared with the verdict it explained, not
+                # left behind: it says HOW a `False` was reached, and there is
+                # no longer a `False`. Unconditional on purpose. Today a set
+                # provenance almost always implies `pom_read is False`, which
+                # short-circuits above before this line can run - but that
+                # makes the invariant an argument about reachability rather
+                # than a property of the code, and a capabilities file holding
+                # `pom_read: null` beside a provenance reaches it directly.
+                learned: dict[str, object] = {"pom_read": True, "pom_read_provenance": None}
                 if capabilities.pom_echo_zero_based is None:
                     zero_based = matcher.echo_says_zero_based(outcome)
                     if zero_based is not None:
