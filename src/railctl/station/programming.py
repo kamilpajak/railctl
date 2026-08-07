@@ -752,6 +752,17 @@ class CvProgrammer:
                     result = self._read_in_open_session(cv)
                 except BATCH_ENDING_ERRORS as exc:
                     outcomes.append(CvReadOutcome(spec=spec, result=None, error=exc))
+                    # The rest are reported as NOT ATTEMPTED - both fields
+                    # None - which is what `CvReadOutcome`'s own docstring
+                    # reserves that combination for. Copying the batch-ending
+                    # error onto them would claim nine short circuits where
+                    # the station reported one, and dropping them from the
+                    # list would leave a caller unable to tell a CV that was
+                    # never tried from one it forgot to ask about.
+                    outcomes.extend(
+                        CvReadOutcome(spec=CvSpec(cv=skipped), result=None, error=None)
+                        for skipped in cvs[len(outcomes) :]
+                    )
                     break
                 except RailctlError as exc:
                     outcomes.append(CvReadOutcome(spec=spec, result=None, error=exc))

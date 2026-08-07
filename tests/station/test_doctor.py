@@ -761,7 +761,7 @@ def test_d9_with_no_established_read_path_reports_family_unknown_never_ms(doctor
     # "skip" would claim the doctor chose not to look, and a hardware run showed
     # this check reporting exactly that after actually running.
     assert d9.status == "unknown"
-    assert "every read failed" in d9.detail
+    assert "no identity CV was read" in d9.detail
 
 
 def test_d9_names_the_failure_reasons_when_only_some_identity_cvs_are_read(

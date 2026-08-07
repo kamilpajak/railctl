@@ -887,6 +887,13 @@ def test_service_read_many_stops_the_batch_on_a_short_circuit(bench_factory, mon
 
     outcomes = bench.station.programmer.service_read_many([7, 8, 250])
 
-    assert len(outcomes) == 1
     assert isinstance(outcomes[0].error, ShortCircuitError)
+    # The CVs after it are reported as NOT ATTEMPTED - both fields None -
+    # rather than dropped from the list or handed a copy of the short
+    # circuit they never met. `CvReadOutcome`'s docstring reserves that
+    # combination for exactly this case.
+    assert [(o.spec.cv, o.result, o.error) for o in outcomes[1:]] == [
+        (8, None, None),
+        (250, None, None),
+    ]
     assert bench.transport.script_pending == []
