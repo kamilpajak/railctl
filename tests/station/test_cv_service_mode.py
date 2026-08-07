@@ -806,3 +806,56 @@ def test_service_read_many_keeps_the_session_open_after_one_cv_fails(bench_facto
     assert isinstance(outcomes[0].error, DecoderNoAckError)
     assert outcomes[1].result is not None and outcomes[1].result.value == 145
     assert bench.transport.script_pending == []
+
+
+def test_a_second_service_session_waits_out_the_gap(bench_factory, monkeypatch):
+    """A session opened too soon after the previous one closed fails on the
+    real station - every CV in it answers `61 13`, the first one included.
+    Measured 2026-08-07 (issue #22): 0.0 to 1.5 s all failed, 1.75 s and
+    above worked.
+
+    The fake clock is the instrument here, exactly as in the exit-timeout
+    tests above: nothing about the reply changes, only how much time the
+    programmer spends before sending the second read.
+    """
+    bench = bench_factory(capabilities=make_capabilities(z21_cv_opcodes=True))
+    for _ in range(2):
+        _script_read_and_clean_exit(bench, cmd_z21_cv_read(8))
+    monkeypatch.setattr(
+        bench.station.programmer,
+        "await_result",
+        lambda matcher, **kwargs: CvValue(raw_cv=8, value=145, ident=0x14, z21_form=True),
+    )
+
+    bench.station.programmer.service_read(8)
+    after_first = bench.clock.monotonic()
+    bench.station.programmer.service_read(8)
+
+    assert bench.clock.monotonic() - after_first >= TIMING.service_session_gap
+
+
+def test_the_session_gap_is_paid_once_per_session_not_once_per_cv(bench_factory, monkeypatch):
+    """Three CVs in one batch owe one gap between them and the session
+    before, not three. Paying per CV would undo the batching this method
+    exists for and add six seconds to every doctor run for nothing."""
+    bench = bench_factory(capabilities=make_capabilities(z21_cv_opcodes=True))
+    _script_read_and_clean_exit(bench, cmd_z21_cv_read(8))
+    bench.expect(STATUS_REQUEST, reply=STATUS_POWER_ON)
+    for cv in (7, 8, 250):
+        bench.expect(cmd_z21_cv_read(cv), reply=ACK)
+    bench.expect(cmd_track_power_on(), reply=ACK)
+    bench.expect(STATUS_REQUEST, reply=STATUS_POWER_ON)
+    monkeypatch.setattr(
+        bench.station.programmer,
+        "await_result",
+        lambda matcher, **kwargs: CvValue(raw_cv=matcher.cv, value=1, ident=0x14, z21_form=True),
+    )
+
+    bench.station.programmer.service_read(8)
+    after_first = bench.clock.monotonic()
+    bench.station.programmer.service_read_many([7, 8, 250])
+    elapsed = bench.clock.monotonic() - after_first
+
+    assert elapsed >= TIMING.service_session_gap
+    assert elapsed < 2 * TIMING.service_session_gap
+    assert bench.transport.script_pending == []
