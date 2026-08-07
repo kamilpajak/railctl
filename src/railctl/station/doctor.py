@@ -453,7 +453,13 @@ def _check_d9(station: Station, *, use_programming_track: bool) -> Check:
         if not use_programming_track:
             attempted += " and the programming track is disabled"
         return Check("D9", CHECK_TITLES["D9"], "skip", f"{detail}; {attempted}")
-    return Check("D9", CHECK_TITLES["D9"], "unknown", f"{detail}; every read failed ({reasons})")
+    # "no identity CV was read", not "every read failed": a batch cut short by
+    # a short circuit leaves most CVs never attempted, and claiming they failed
+    # is the same error as reporting `skip` for a check that ran. The reasons
+    # list is what carries the causes, and only for the CVs that produced one.
+    return Check(
+        "D9", CHECK_TITLES["D9"], "unknown", f"{detail}; no identity CV was read ({reasons})"
+    )
 
 
 AddressFormOutcome = Literal["accepted", "rejected", "ambiguous"]
