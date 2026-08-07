@@ -897,3 +897,43 @@ def test_service_read_many_stops_the_batch_on_a_short_circuit(bench_factory, mon
         (250, None, None),
     ]
     assert bench.transport.script_pending == []
+
+
+def test_service_read_many_with_no_cvs_opens_no_session(bench_factory):
+    """An empty batch must not open a session it does not need.
+
+    Opening and closing one would stamp `_last_session_end`, and the next
+    real read would then wait out a three-second gap it does not owe. Nothing
+    is scripted here: `FakeTransport` raises on the first unscripted request,
+    so any telegram at all fails the test.
+    """
+    bench = bench_factory(capabilities=make_capabilities(z21_cv_opcodes=True))
+
+    assert bench.station.programmer.service_read_many([]) == []
+    assert bench.sent == []
+
+
+def test_service_read_many_stops_the_batch_on_a_link_timeout(bench_factory, monkeypatch):
+    """A dead link ends the batch on cost, not on certainty.
+
+    A link that times out might in principle recover, unlike a shorted track.
+    But each attempt costs `li_ack_programming` (95 s), so letting nine
+    identity CVs each find out would hang a doctor run for a quarter of an
+    hour to report what the first failure already said.
+    """
+    bench = bench_factory(capabilities=make_capabilities(z21_cv_opcodes=True))
+    bench.expect(STATUS_REQUEST, reply=STATUS_POWER_ON)
+    bench.expect(cmd_z21_cv_read(7), reply=ACK)
+    bench.expect(cmd_track_power_on(), reply=ACK)
+    bench.expect(STATUS_REQUEST, reply=STATUS_POWER_ON)
+
+    def timeout(matcher, **kwargs):
+        raise LinkTimeout("link gone")
+
+    monkeypatch.setattr(bench.station.programmer, "await_result", timeout)
+
+    outcomes = bench.station.programmer.service_read_many([7, 8, 250])
+
+    assert isinstance(outcomes[0].error, LinkTimeout)
+    assert [(o.result, o.error) for o in outcomes[1:]] == [(None, None), (None, None)]
+    assert bench.transport.script_pending == []
