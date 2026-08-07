@@ -859,3 +859,34 @@ def test_the_session_gap_is_paid_once_per_session_not_once_per_cv(bench_factory,
     assert elapsed >= TIMING.service_session_gap
     assert elapsed < 2 * TIMING.service_session_gap
     assert bench.transport.script_pending == []
+
+
+def test_service_read_many_stops_the_batch_on_a_short_circuit(bench_factory, monkeypatch):
+    """A shorted programming track ends the batch; it is not one CV's news.
+
+    Every CV after it would fail for the same reason, so continuing buries
+    the fault under copies of its own consequences and sends telegrams that
+    cannot work. The CVs after the short are absent from the result rather
+    than present and failed - "not attempted" and "attempted and failed" are
+    different facts, which is why `CvReadOutcome` keeps `result` and `error`
+    independent.
+
+    The session still closes exactly once: only one resume-operations
+    exchange is scripted, and `FakeTransport` raises on anything unscripted.
+    """
+    bench = bench_factory(capabilities=make_capabilities(z21_cv_opcodes=True))
+    bench.expect(STATUS_REQUEST, reply=STATUS_POWER_ON)
+    bench.expect(cmd_z21_cv_read(7), reply=ACK)
+    bench.expect(cmd_track_power_on(), reply=ACK)
+    bench.expect(STATUS_REQUEST, reply=STATUS_POWER_ON)
+    monkeypatch.setattr(
+        bench.station.programmer,
+        "await_result",
+        lambda matcher, **kwargs: ShortCircuit(),
+    )
+
+    outcomes = bench.station.programmer.service_read_many([7, 8, 250])
+
+    assert len(outcomes) == 1
+    assert isinstance(outcomes[0].error, ShortCircuitError)
+    assert bench.transport.script_pending == []
