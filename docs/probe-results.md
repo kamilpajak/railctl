@@ -19,7 +19,9 @@
 | Start mode | **automatic** — locos resume last speed on power-up | status bit 2 |
 | Status byte bits 0 and 1 | **swapped vs Lenz** — bit 0 emergency stop, bit 1 emergency off | `62 22 05` after `80 80` |
 | Service mode, all three encodings | **work** — direct, Z21 and extended | doctor D5/D6/D7, 2026-08-06 |
+| Service mode with the track **unpowered** | **works** — the read needs no track power | 4 reads of CV8, 2026-08-06 |
 | Decoder identity | ZIMO **MS**: `CV1=3 CV7=5 CV8=145 CV250=6 CV28=3 CV29=14` | doctor D9, 2026-08-06 |
+| Decoder firmware | **5.15** — `CV7=5` main, `CV65=15` sub-version | service read, 2026-08-06 |
 | RailCom **in the decoder** | **enabled** — `CV29` bit 3 set, `CV28=3` | doctor D8, 2026-08-06 |
 | Broadcasts | `61 00`, `61 01`, `81 00` arrive **unsolicited**, three times each | `Station.events()`, 2026-08-06 |
 
@@ -136,8 +138,17 @@ that is demonstrably drawing current and answering. Whatever `TV` measures, it i
 the track output.
 
 Recorded because the negative result is the useful part: anyone who sees `TV` in the output will
-try this, and issue #13 needs an instrument independent of the status byte. This is not one. The
-front-panel LED, read by a person, remains the only one.
+try this, and issue #13 needs an instrument independent of the status byte. This is not one.
+
+Re-measured later the same day, with the toggle done under observation rather than between two
+runs: `TV` held **15.1 V** across `power_off` → `power_on` → `power_off`, and `TC` held `0 mA`.
+Same verdict, now with the transition itself watched. A second disqualifier surfaced: the `[CS0]`
+line arrives about **once every 5 s**, so even a `TV` that did track the output would step over a
+service-mode window of ~2 s more often than it landed in one.
+
+**A multimeter on the main track supersedes the LED** as the independent instrument — see
+"Service mode neither needs track power nor disturbs it" below for the validation and the
+settings that matter.
 
 ### The programming-track output latches off after an overload, and nothing reports it
 
@@ -216,6 +227,110 @@ read, not explained afterwards, and it is the fifth independent confirmation of 
 In the same moment `loco_info` reported `speed=30, emergency_stopped=False` for a locomotive that
 was standing still under a global emergency stop. The per-locomotive view does not reflect the
 station-wide state.
+
+## Service mode needs no track power — SETTLED 2026-08-06
+
+`doctor.py` refuses to run D5–D8 unless the main track is powered, and the comment on that gate
+gives two reasons: that entering service mode cuts main power, and that leaving it re-energises
+the main track even when the operator never authorised power. Neither had ever been measured;
+both were reasoning written into a comment and then read back out as fact.
+
+The two halves now stand on different footing, and the difference matters:
+
+- **Settled.** A service-mode read works with the main track unpowered. Positive, reproduced,
+  and independent of any instrument — the CV value came back.
+- **Strongly supported, not settled.** Service mode does not disturb the main track. This is a
+  negative established by a person watching a meter, so it can only rule out disturbances longer
+  than that meter resolves. See the limits below.
+
+### The instrument, validated first
+
+A multimeter across the main track rails, on **AC volts**. Validated against a transition whose
+state the station reports, before being used to judge anything:
+
+| Station reports | Meter |
+| --- | --- |
+| `track_power=False` | **0.6 V** |
+| `track_power=True` | **16 V** |
+
+Three settings decide whether it answers or misleads:
+
+- **AC, never DC.** DCC is a symmetric bipolar square wave, so its mean is about zero. On DC the
+  meter reads ~0 V whether the track is live or dead — a confident wrong answer.
+- **Never the current range.** An ammeter across the rails is a short.
+- **Presence/absence only.** DCC runs at 5–8 kHz and a typical meter is calibrated for a 50 Hz
+  sine, so the number is not the track voltage. The 16 V against 0.6 V is what carries meaning.
+
+**What the validation does and does not buy.** It establishes that this meter separates the two
+states the station was commanded into, which is all a presence detector has to do. It assumes
+nothing about the status byte being right — the byte is the thing under suspicion elsewhere in
+this file — because both readings were taken while the station was told what to do, not asked.
+Its temporal resolution was **not characterised**: a handheld meter typically refreshes a few
+times a second, so a disturbance shorter than that is invisible to it and stays `unknown` here.
+
+### What was measured
+
+| Question | Result | Evidence |
+| --- | --- | --- |
+| Does a service read work with the main track unpowered? | **Yes** | `CV8=145`, 4 reads out of 4 |
+| Does service mode cut a powered main track, for the duration of a read? | **No** | 13 operations watching the meter, then 3 more listening for relays; 16 V throughout both |
+| Does leaving service mode energise an unpowered main track? | **No** | 16 V never appeared in any of the 4 reads |
+| Does a relay switch during service mode? | **Yes, twice per read** | 6 audible clicks for 3 reads, in both power states |
+
+**Method, because it decides what the negatives are worth.** The exit window was widened for the
+last two questions: `service_exit_settle` was raised from its default 0.10 s to 1.5 s, so the gap
+between resume-operations and the power-off that follows it was 15 times longer than in normal
+operation. No telegram was added or removed. This makes the test **more** sensitive, not less —
+a station that was going to energise the track had far longer to show it — but the default
+0.10 s case was never watched directly, and a pulse confined to that shorter window remains
+untested.
+
+The two power-on runs asked the operator for different things: the first for the meter, the
+second mainly for relay clicks with the meter reported alongside. Both reported 16 V unbroken.
+Request and reply bytes were not captured for any of these reads; the evidence is the returned
+value and the operator's reading.
+
+The relay clicks in **both** power states, so it tracks service-mode entry and exit, not the power
+commands. An earlier run appeared to contradict this; it did not — that run asked the operator to
+*watch* the meter, and nobody was listening for clicks.
+
+With the track unpowered, the meter alternates between 0.6 V and 0.0 V in step with the relay.
+Both readings are "no track voltage". The likeliest reading is leakage following the relay
+position — the track is empty and the meter's input is high impedance — but that is an
+interpretation, not a measurement, and a real switching of the output cannot be ruled out from
+these numbers. Separating the two would need a load or a scope. Either way the pair does not
+survive the next `power_on`, which restores 16 V from both, and no conclusion here rests on the
+difference.
+
+### What another implementation does
+
+In the `java/src/jmri/jmrix/lenz/` path — the one an XpressNet station goes through — JMRI does
+not model any of it:
+
+- `XNetTrafficController.enterProgMode()` returns **null**, with the comment "This method has to
+  be available, even though it doesn't do anything on Lenz". Nothing is sent to enter service
+  mode; the station enters it on the first programming command.
+- `enterNormalMode()` returns `XNetMessage.getExitProgModeMsg()`, which is a bare
+  `CS_REQUEST` + `RESUME_OPS` (`21 81`). No power state is saved and none is restored.
+- `XNetProgrammer.java` contains **no reference to a PowerManager**. Across `jmrix/lenz/`,
+  `PowerManager` appears in four files — `XNetInitializationManager`, `XNetSystemConnectionMemo`,
+  `XNetPowerManager` itself and `hornbyelite/EliteAdapter` — and in no programmer.
+
+Scope of that check: the XpressNet connection code only. JMRI's generic programming layer
+(`jmrit/symbolicprog`) was not examined, so this says nothing about whether some higher level
+warns a user about track power before programming.
+
+### What this costs us today
+
+Reading `CV65` needed the main track energised for no reason other than our own gate — with a
+locomotive standing on the main track, that is a real hazard accepted in exchange for nothing.
+The gate also makes every fresh process pay for a full probe before it may read one CV, because
+capabilities are not persisted (issue #15).
+
+The gate itself is issue #20.
+
+Left open: why the station's relay switches at all, and what the 0.6 V / 0.0 V pair physically
+represents. Neither affects any decision about this code.
 
 ## R1 — POM CV read: NOT established
 
@@ -369,6 +484,12 @@ Verified with the poll, three rounds each, all correct against known constants:
 | 253 | `23 11 00 FC` | `63 14 FD 4B` | **75** | serial byte, high |
 | 265 | `23 11 01 08` | `63 15 09 00` | **0** | sound project |
 | 266 | `23 11 01 09` | `63 15 0A 40` | **64** | master volume |
+
+`CV7 = 5` and `CV65 = 15` were read the same way on 2026-08-06: ZIMO puts the main software
+version in CV7 and the sub-version in CV65, so this decoder runs firmware **5.15**. A sub-version
+below 100 is a normal release (JMRI, `Zimo_MS_large_v5.xml` and the CV65 tooltip in
+`Zimo_MX69MX690.xml`: 0–99 normal, 100–199 beta, 200+ special). The request and reply bytes were
+not captured in that run.
 
 **CVs above 255 are reachable** — by both routes. `22 19` reaches them through the Lenz
 band scheme, and `23 11` through its 16-bit address; both are answered on the `63 15`
