@@ -952,3 +952,49 @@ def test_service_read_many_stops_the_batch_on_a_link_timeout(bench_factory, monk
     assert isinstance(outcomes[0].error, LinkTimeout)
     assert [(o.result, o.error) for o in outcomes[1:]] == [(None, None), (None, None)]
     assert bench.transport.script_pending == []
+
+
+def test_one_rejected_encoding_does_not_make_the_others_count_as_probed(bench_factory):
+    """`z21_cv_opcodes=False` with the other two still unknown is an UNPROBED
+    station, not a limited one.
+
+    The gate used to be "all three are None", so a single `61 82` recorded
+    against one encoding skipped this branch entirely and produced the
+    out-of-reach message below - which states that direct opcodes work and
+    cover CV1..255, about a capability nobody had measured. Naming a state
+    the station never reported is the defect issue #16 exists to remove; this
+    is the same defect one step further in, and reachable whenever a probe
+    settles one encoding and stops.
+    """
+    capabilities = make_capabilities(
+        z21_cv_opcodes=False, service_direct_cv=None, service_ext_cv=None
+    )
+    bench = bench_factory(capabilities=capabilities)
+
+    with pytest.raises(ServiceEncodingUnknownError) as caught:
+        bench.station.programmer.service_read_telegram(8)
+    assert "doctor" in caught.value.hint
+    assert "service_direct_cv" in str(caught.value)  # names what is still unprobed
+    assert "service_ext_cv" in str(caught.value)
+    assert "z21_cv_opcodes" not in str(caught.value)  # that one WAS answered
+
+
+def test_a_station_that_rejected_every_encoding_is_not_described_as_unprobed(bench_factory):
+    """All three answered `61 82`: nothing is unknown, so running the doctor
+    again changes nothing and the message must not send the operator there.
+
+    Same type as the out-of-reach case on purpose - they share a remedy,
+    which is this file's test for whether two failures deserve one type.
+    Neither is fixed by probing; both are fixed by POM or another CV.
+    """
+    capabilities = make_capabilities(
+        z21_cv_opcodes=False, service_direct_cv=False, service_ext_cv=False
+    )
+    bench = bench_factory(capabilities=capabilities)
+
+    with pytest.raises(CvOutOfRangeError) as caught:
+        bench.station.programmer.service_read_telegram(8)
+    assert "pom" in caught.value.hint.lower()
+    assert "rejected every service-mode opcode" in str(caught.value)
+    assert "doctor" not in str(caught.value)
+    assert not isinstance(caught.value, ServiceEncodingUnknownError)
