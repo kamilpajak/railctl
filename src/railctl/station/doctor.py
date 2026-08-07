@@ -613,6 +613,16 @@ def run_probe(
         # `power_before` still decides what exit_service_mode restores, so
         # an unpowered bench is left unpowered - that part was never in
         # dispute and stays exactly as it was.
+        #
+        # Scope: measured on the YD7010 only. `exit_service_mode` sends
+        # resume-operations unconditionally, and on a station where that
+        # telegram DOES energise a dead track, this batch would briefly power
+        # a layout whose operator declined --power-on. Adding a station means
+        # measuring that. The fix would then be a capability gating the EXIT
+        # path, not this entry gate: gating entry costs the three
+        # capabilities again, and D9 already drives the programming track
+        # through the identical exit with no gate of its own - which is why
+        # this precondition protected nothing even before it was measured.
         power_before = station.status().track_power
         try:
             checks.append(_check_d5(station))
