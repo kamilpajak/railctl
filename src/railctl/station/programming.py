@@ -26,6 +26,7 @@ from railctl.errors import (
     ShortCircuitError,
     StationBusyError,
     TrackPowerError,
+    TransportError,
     UnsupportedCommandError,
 )
 from railctl.station.capabilities import Capabilities
@@ -128,10 +129,20 @@ SERVICE_ENCODING_ORDER: Final[tuple[tuple[str, CvEncoding], ...]] = (
     ("service_ext_cv", CvEncoding.SERVICE_EXT),
 )
 UNEXERCISED_BANDS: Final[frozenset[int]] = frozenset({2, 3})  # 63 16 / 63 17, never answered here
-# Conditions no later CV in a shared service-mode session can survive: the
-# track is shorted, or the station says another operation already owns it.
-# Neither clears itself by trying the next CV.
-BATCH_ENDING_ERRORS: Final[tuple[type[RailctlError], ...]] = (ShortCircuitError, StationBusyError)
+# Conditions no later CV in a shared service-mode session can survive.
+#
+# The first two cannot clear themselves by trying the next CV: a shorted track
+# stays shorted, and a station that owns the bus for another operation still
+# owns it. The last two qualify on cost rather than certainty - a dead link
+# might in principle recover, but finding out costs `li_ack_programming`
+# (95 s) per CV, so a batch of nine identity CVs would hang for a quarter of
+# an hour before reporting what the first failure already said.
+BATCH_ENDING_ERRORS: Final[tuple[type[RailctlError], ...]] = (
+    ShortCircuitError,
+    StationBusyError,
+    LinkTimeout,
+    TransportError,
+)
 _REGISTER_COLLISION_MAX: Final[int] = 8  # registers 1..8 collide with CV1..8
 
 
@@ -743,6 +754,11 @@ class CvProgrammer:
         mode anyway - it only emits `page.not_selected`. Adding a parameter
         that could not be acted on would promise more than this can do.
         """
+        if not cvs:
+            # No session at all rather than an empty one: opening and closing
+            # for nothing would stamp `_last_session_end` and make the NEXT
+            # real read wait out a gap it does not owe.
+            return []
         power_before = self._station.status().track_power
         outcomes: list[CvReadOutcome] = []
         try:

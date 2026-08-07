@@ -21,7 +21,7 @@ from typing import TYPE_CHECKING
 
 import pytest
 
-from railctl.errors import DecoderNoAckError
+from railctl.errors import DecoderNoAckError, StationBusyError
 from railctl.station import doctor as doctor_module
 from railctl.station.capabilities import Capabilities
 from railctl.station.doctor import (
@@ -1289,3 +1289,28 @@ def test_run_probe_verdict_lines_and_exit_code_for_report_are_exported_from_the_
     assert exported_run_probe is run_probe
     assert exported_verdict_lines is verdict_lines
     assert exported_exit_code_for_report is exit_code_for_report
+
+
+def test_d9_reports_fail_when_the_read_batch_raises(doctor_bench, monkeypatch):
+    """Every other check catches `RailctlError` and reports "fail"; D9 did
+    not, and batching made the omission reachable.
+
+    `service_read_many` closes its session in a `finally`, and
+    `exit_service_mode` raises `StationBusyError` when the station will not
+    leave service mode. That used to be caught per CV inside
+    `_best_effort_read`. Unguarded, it escapes `run_probe` entirely - so one
+    check's failure would cost D10, D11, D12 and the whole report, including
+    the capabilities the earlier checks had already established.
+    """
+
+    def raise_busy(_station, *, use_programming_track):
+        raise StationBusyError("the station will not leave service mode")
+
+    monkeypatch.setattr(doctor_module, "_identity_reads", raise_busy)
+    report = run_probe(doctor_bench.station, now_utc=lambda: "2026-08-05T00:00:00Z")
+
+    d9 = report.check("D9")
+    assert d9.status == "fail"
+    assert "service mode" in d9.detail
+    # The run survives: the checks after D9 still ran and the report is whole.
+    assert [check.id for check in report.checks] == list(CHECK_IDS)
