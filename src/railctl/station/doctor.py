@@ -360,30 +360,55 @@ def _check_d8(station: Station, *, d4_noack: bool, d5_passed: bool) -> Check:
     return Check("D8", CHECK_TITLES["D8"], "unknown", "CV29/CV28 not readable in service mode")
 
 
-def _best_effort_read(
-    station: Station, cv: int, *, use_programming_track: bool
-) -> tuple[int | None, str | None]:
-    """Read one CV through whichever path D4-D7 already proved works: POM
-    first if `pom_read` is proven True and an address is resolvable, then a
-    single high-level `service_read` call, which already walks
-    SERVICE_ENCODING_ORDER (Z21, then direct, then extended) internally and
-    raises when none of those is proven. This file does no band or page
-    arithmetic of its own - that stays inside `service_read`, exactly as Rule
-    2 under `station/` requires."""
+def _best_effort_read(station: Station, cv: int) -> tuple[int | None, str | None]:
+    """The POM half of one identity read: a value when `pom_read` is proven
+    True and an address is resolvable, the failure's type name when POM was
+    tried and raised, and `(None, None)` when POM was never eligible.
+
+    Service mode is deliberately NOT here. It used to be, one `service_read`
+    per CV, and that cost eight of nine reads on the bench (issue #22).
+    `_identity_reads` now batches whatever POM did not deliver into a single
+    session, so this function no longer takes `use_programming_track` - it
+    cannot reach the programming track at all."""
     caps = station.capabilities
     address = station.default_address
-    reason: str | None = None
     if caps.pom_read is True and address is not None:
         try:
             return station.programmer.pom_read(cv, address=address).value, None
         except RailctlError as exc:
-            reason = type(exc).__name__
-    if not use_programming_track:
-        return None, reason
-    try:
-        return station.programmer.service_read(cv).value, None
-    except RailctlError as exc:
-        return None, type(exc).__name__
+            return None, type(exc).__name__
+    return None, None
+
+
+def _identity_reads(
+    station: Station, *, use_programming_track: bool
+) -> dict[int, tuple[int | None, str | None]]:
+    """Every identity CV, POM first where it is proven, then ONE service-mode
+    session for whatever POM did not deliver.
+
+    The session count is the reason this exists rather than a loop over
+    `_best_effort_read`. Reopening service mode per CV cost eight of nine
+    reads on the bench (issue #22); `service_read_many` opens it once.
+
+    POM stays per-CV because it needs no session at all - it runs on the
+    operations track - so nothing is gained by batching it and the existing
+    "POM first when proven" order is preserved exactly.
+    """
+    results = {cv: _best_effort_read(station, cv) for cv in IDENTITY_CVS}
+    remaining = [cv for cv, (value, _) in results.items() if value is None]
+    if not use_programming_track or not remaining:
+        return results
+    for outcome in station.programmer.service_read_many(remaining):
+        cv = outcome.spec.cv
+        pom_reason = results[cv][1]
+        if outcome.result is not None:
+            results[cv] = (outcome.result.value, None)
+        else:
+            # The service failure names the reason, not POM's earlier one:
+            # service mode is the path that actually decided this CV.
+            reason = type(outcome.error).__name__ if outcome.error is not None else pom_reason
+            results[cv] = (None, reason)
+    return results
 
 
 def _check_d9(station: Station, *, use_programming_track: bool) -> Check:
@@ -404,10 +429,16 @@ def _check_d9(station: Station, *, use_programming_track: bool) -> Check:
     legitimate when POM read is proven, and `--no-programming-track` says nothing
     against it.
     """
-    results = {
-        cv: _best_effort_read(station, cv, use_programming_track=use_programming_track)
-        for cv in IDENTITY_CVS
-    }
+    try:
+        results = _identity_reads(station, use_programming_track=use_programming_track)
+    except RailctlError as exc:
+        # Every other check has this; D9 did not, and the batching change made
+        # the omission reachable. `service_read_many`'s `finally` calls
+        # `exit_service_mode`, which raises `StationBusyError` when the station
+        # will not leave service mode - that used to be caught per CV inside
+        # `_best_effort_read` and would now escape `run_probe` entirely,
+        # losing D10-D12 and the whole report over one check's failure.
+        return Check("D9", CHECK_TITLES["D9"], "fail", str(exc))
     values = {cv: value for cv, (value, _) in results.items()}
     family = decoder_family(values[DECODER_TYPE_CV])
     read_count = sum(1 for value in values.values() if value is not None)
@@ -428,7 +459,13 @@ def _check_d9(station: Station, *, use_programming_track: bool) -> Check:
         if not use_programming_track:
             attempted += " and the programming track is disabled"
         return Check("D9", CHECK_TITLES["D9"], "skip", f"{detail}; {attempted}")
-    return Check("D9", CHECK_TITLES["D9"], "unknown", f"{detail}; every read failed ({reasons})")
+    # "no identity CV was read", not "every read failed": a batch cut short by
+    # a short circuit leaves most CVs never attempted, and claiming they failed
+    # is the same error as reporting `skip` for a check that ran. The reasons
+    # list is what carries the causes, and only for the CVs that produced one.
+    return Check(
+        "D9", CHECK_TITLES["D9"], "unknown", f"{detail}; no identity CV was read ({reasons})"
+    )
 
 
 AddressFormOutcome = Literal["accepted", "rejected", "ambiguous"]

@@ -26,6 +26,7 @@ from railctl.errors import (
     ShortCircuitError,
     StationBusyError,
     TrackPowerError,
+    TransportError,
     UnsupportedCommandError,
 )
 from railctl.station.capabilities import Capabilities
@@ -128,6 +129,20 @@ SERVICE_ENCODING_ORDER: Final[tuple[tuple[str, CvEncoding], ...]] = (
     ("service_ext_cv", CvEncoding.SERVICE_EXT),
 )
 UNEXERCISED_BANDS: Final[frozenset[int]] = frozenset({2, 3})  # 63 16 / 63 17, never answered here
+# Conditions no later CV in a shared service-mode session can survive.
+#
+# The first two cannot clear themselves by trying the next CV: a shorted track
+# stays shorted, and a station that owns the bus for another operation still
+# owns it. The last two qualify on cost rather than certainty - a dead link
+# might in principle recover, but finding out costs `li_ack_programming`
+# (95 s) per CV, so a batch of nine identity CVs would hang for a quarter of
+# an hour before reporting what the first failure already said.
+BATCH_ENDING_ERRORS: Final[tuple[type[RailctlError], ...]] = (
+    ShortCircuitError,
+    StationBusyError,
+    LinkTimeout,
+    TransportError,
+)
 _REGISTER_COLLISION_MAX: Final[int] = 8  # registers 1..8 collide with CV1..8
 
 
@@ -253,6 +268,39 @@ class CvProgrammer:
         # a second, different page selected under the same key must verify
         # again, not ride on the first page's read-back.
         self._verified_pages: dict[PageKey, CvPage] = {}
+        # When the last service-mode session closed, or None if none has
+        # closed since the gap it owed was already paid. See
+        # `_await_session_gap`.
+        self._last_session_end: float | None = None
+
+    def _await_session_gap(self) -> None:
+        """Wait out `service_session_gap` if a session closed too recently.
+
+        A session opened too soon after the previous one closed fails
+        outright - every CV in it answers `61 13`, the first one included.
+        Measured 2026-08-07 (issue #22): three sessions run back to back,
+        the first read its CVs, the second failed both, and a third 3 s
+        later read them again.
+
+        Paid at most once per session, not once per CV: the timestamp is
+        cleared as soon as it has been honoured, so the reads that follow
+        inside the same open session go straight through. Nothing is owed
+        before the first session of a process, and nothing is owed after the
+        last one - a trailing sleep no caller is waiting on would be pure
+        cost.
+        """
+        if self._last_session_end is None:
+            return
+        remaining = self._station.timing.service_session_gap - (
+            self._station.now() - self._last_session_end
+        )
+        if remaining > 0:
+            self._station.pause(remaining)
+        # Cleared AFTER the wait, not before: an interrupted pause leaves the
+        # debt owed, so the next read tries again. Clearing first would let a
+        # failed wait look like a paid one, which is a silent return to the
+        # bug rather than an error anybody sees.
+        self._last_session_end = None
 
     def reads_available(self, mode: ProgMode) -> bool:
         """Whether ANY read path is confirmed working for `mode`.
@@ -306,6 +354,15 @@ class CvProgrammer:
         self, cv: int, value: int, *, address: int | None, mode: ProgMode
     ) -> tuple[CvEncoding, bool]:
         """Puts one CV write on the wire and confirms the station accepted it.
+
+        Does NOT call `_await_session_gap`, unlike the read path. A write
+        that immediately followed a read's closed session could hit the same
+        "reopened too soon" failure the gap exists to prevent - but nothing
+        does that today (`service_write` confirms from its own echo and never
+        reads back), and the write path was never measured for it. The
+        asymmetry runs the safe way round: a READ pays the gap whatever
+        closed the previous session, a write included. Measure before adding
+        a delay here.
 
         POM: the interface ack IS the confirmation - there is no other channel
         (module docstring: "neither the PC nor the interface can determine
@@ -594,6 +651,10 @@ class CvProgrammer:
         rule is that no new command may be sent until the previous one is
         acknowledged, and the station may still be finishing the read's
         internal retries when this runs.
+
+        Stamps `_last_session_end` on the way out, including when the exit
+        itself fails: a session that closed badly is still a session the next
+        one must not follow too closely.
         """
         try:
             left_service_mode = False
@@ -619,6 +680,7 @@ class CvProgrammer:
                     cmd_track_power_off(), timeout=self._station.timing.li_ack_programming
                 )
         finally:
+            self._last_session_end = self._station.now()
             self._station.invalidate_caches()
 
     def service_read(self, cv: int, *, page: CvPage | None = None) -> CvResult:
@@ -656,42 +718,116 @@ class CvProgrammer:
         so a caller relying on paging in service mode finds out immediately,
         instead of reading whatever page the decoder already had selected.
         """
+        power_before = self._station.status().track_power
+        try:
+            return self._read_in_open_session(cv, page=page)
+        finally:
+            self.exit_service_mode(restore_power=power_before)
+
+    def service_read_many(self, cvs: Sequence[int]) -> list[CvReadOutcome]:
+        """Read several CVs inside ONE service-mode session.
+
+        Not a convenience wrapper around `service_read`: the session count is
+        the point. Measured on the bench 2026-08-07 (issue #22), a decoder
+        that answers inside an open session stops answering when the session
+        is reopened immediately - the caller that read nine CVs as nine
+        sessions got one value and eight `61 13`s, while four reads inside a
+        single session all succeeded on the same run and the same track.
+
+        One CV failing does not end the batch, and does not close the
+        session: each outcome carries its own error, the way `cv_read_many`
+        already reports partial failure. The session closes once, in the
+        `finally`, whatever happened inside it.
+
+        Two errors DO end it. A short circuit on the programming track and a
+        station that reports another operation already running are both
+        conditions no later CV in the batch can survive, so continuing would
+        send telegrams that cannot work and bury the real fault under eight
+        copies of its consequences. They are recorded as that CV's outcome
+        and the batch stops there; the CVs after it are simply absent from
+        the returned list, which is not the same as having failed.
+        `cv_read_many` continues past them, but each of its reads opens its
+        own session - here the whole batch shares one.
+
+        No `page` parameter, unlike `service_read`. Every caller so far reads
+        CVs below 256, and `service_read` cannot honour a page in service
+        mode anyway - it only emits `page.not_selected`. Adding a parameter
+        that could not be acted on would promise more than this can do.
+        """
+        if not cvs:
+            # No session at all rather than an empty one: opening and closing
+            # for nothing would stamp `_last_session_end` and make the NEXT
+            # real read wait out a gap it does not owe.
+            return []
+        power_before = self._station.status().track_power
+        outcomes: list[CvReadOutcome] = []
+        try:
+            for cv in cvs:
+                spec = CvSpec(cv=cv)
+                try:
+                    result = self._read_in_open_session(cv)
+                except BATCH_ENDING_ERRORS as exc:
+                    outcomes.append(CvReadOutcome(spec=spec, result=None, error=exc))
+                    # The rest are reported as NOT ATTEMPTED - both fields
+                    # None - which is what `CvReadOutcome`'s own docstring
+                    # reserves that combination for. Copying the batch-ending
+                    # error onto them would claim nine short circuits where
+                    # the station reported one, and dropping them from the
+                    # list would leave a caller unable to tell a CV that was
+                    # never tried from one it forgot to ask about.
+                    outcomes.extend(
+                        CvReadOutcome(spec=CvSpec(cv=skipped), result=None, error=None)
+                        for skipped in cvs[len(outcomes) :]
+                    )
+                    break
+                except RailctlError as exc:
+                    outcomes.append(CvReadOutcome(spec=spec, result=None, error=exc))
+                else:
+                    outcomes.append(CvReadOutcome(spec=spec, result=result, error=None))
+        finally:
+            self.exit_service_mode(restore_power=power_before)
+        return outcomes
+
+    def _read_in_open_session(self, cv: int, *, page: CvPage | None = None) -> CvResult:
+        """One service-mode read, WITHOUT opening or closing the session.
+
+        Every caller is responsible for `exit_service_mode`, which is why this
+        is private: a caller that forgets it leaves the station in service
+        mode and the layout dead.
+        """
         if page is not None:
             self._station.emit("page.not_selected", {"cv": cv, "page": page, "mode": "service"})
         telegram, encoding, page_index = self.service_read_telegram(cv)
-        power_before = self._station.status().track_power
+        self._await_session_gap()
         start = self._station.now()
         try:
-            try:
-                self._station.exchange(telegram, timeout=self._station.timing.li_ack_programming)
-            except UnsupportedCommandError:
-                # `Station.exchange` (facade.py) already turns a `61 82` reply
-                # into this exception rather than returning `Unsupported` - by
-                # the time a reply reaches this method it can never actually
-                # BE `Unsupported`. Re-raised with a CV-specific message; the
-                # general `61 82` -> `UnsupportedCommandError` mapping is
-                # `Station.exchange`'s own docstring, not repeated here.
-                raise UnsupportedCommandError(
-                    f"the command station rejected the service-mode read opcode for CV{cv}"
-                ) from None
-            matcher = CvMatcher(
-                encoding,
-                cv,
-                page_index=page_index if encoding is CvEncoding.SERVICE_EXT else None,
-            )
-            outcome = self.await_result(
-                matcher,
-                timeout=self._station.timing.service_result,
-                first_delay=self._station.timing.service_first_poll_delay,
-                interval=self._station.timing.service_poll_interval,
-                exchange_timeout=self._station.timing.li_ack_programming,
-                allow_poll=True,
-                ready_means_done=False,
-                context="service",
-            )
-            return self._finish_service_read(cv, encoding, page_index, outcome, start)
-        finally:
-            self.exit_service_mode(restore_power=power_before)
+            self._station.exchange(telegram, timeout=self._station.timing.li_ack_programming)
+        except UnsupportedCommandError:
+            # `Station.exchange` (facade.py) already turns a `61 82` reply
+            # into this exception rather than returning `Unsupported` - by
+            # the time a reply reaches this method it can never actually
+            # BE `Unsupported`. Re-raised with a CV-specific message; the
+            # general `61 82` -> `UnsupportedCommandError` mapping is
+            # `Station.exchange`'s own docstring, not repeated here.
+            raise UnsupportedCommandError(
+                f"the command station rejected the service-mode read opcode for CV{cv}"
+            ) from None
+        matcher = CvMatcher(
+            encoding,
+            cv,
+            page_index=page_index if encoding is CvEncoding.SERVICE_EXT else None,
+        )
+        outcome = self.await_result(
+            matcher,
+            timeout=self._station.timing.service_result,
+            first_delay=self._station.timing.service_first_poll_delay,
+            interval=self._station.timing.service_poll_interval,
+            exchange_timeout=self._station.timing.li_ack_programming,
+            allow_poll=True,
+            ready_means_done=False,
+            context="service",
+        )
+        return self._finish_service_read(cv, encoding, page_index, outcome, start)
 
     def _finish_service_read(
         self,
