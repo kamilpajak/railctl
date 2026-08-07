@@ -160,7 +160,31 @@ class CvVerifyError(ProgrammingError):
 
 
 class CvOutOfRangeError(ProgrammingError):
-    """The CV number is outside the bound the selected mode supports."""
+    """The CV number is outside the bound the selected mode supports.
+
+    Kept for what its name says. It still covers a CV out of reach of the
+    encodings a station HAS proven - "direct opcodes only cover CV1..255" is a
+    bound, and the remedy is the one a range error implies: another CV number,
+    or another mode. What it no longer covers is a station nobody has probed;
+    see `ServiceEncodingUnknownError`.
+    """
+
+
+class ServiceEncodingUnknownError(ProgrammingError):
+    """No service-mode encoding has been established on this station yet.
+
+    A state error, not a usage error: the CV is fine and the identical call
+    succeeds once a probe has run. It was `CvOutOfRangeError` until issue #16,
+    where the doctor printed `every read failed (['CvOutOfRangeError'])` for
+    CV7 and CV8 - both plainly valid - and the first reading of that line was
+    "our CV numbering is broken", which is the most damaging fault this
+    codebase can have. Minutes went into the wrong file before the real cause
+    turned out to be "not probed yet".
+
+    The remedy differs too, which is the test for whether two failures deserve
+    one type: a range error is fixed by typing a different number, this one by
+    running `railctl doctor`.
+    """
 
 
 class PomReadUnsupportedError(ProgrammingError):
@@ -186,6 +210,7 @@ EXIT_CODES: Final[dict[type[RailctlError], int]] = {
     CvOutOfRangeError: 15,
     PomReadUnsupportedError: 16,
     IndexPageRequiredError: 17,
+    ServiceEncodingUnknownError: 18,
     ProgrammingError: 19,
     TrackPowerError: 20,
 }
