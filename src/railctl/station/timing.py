@@ -37,6 +37,16 @@ class Timing:
     service_poll_interval: float = 0.50  # minimum gap between polls, not a deadline
     service_ready_limit: int = 8
     service_exit_settle: float = 0.10
+    # A service-mode session opened too soon after the previous one closed
+    # fails outright - every CV in it answers 61 13, including the first.
+    # Measured on ONE station, a YD7010 with a ZIMO MS450: another may need
+    # no gap at all, or a longer one, and nothing probes for it. `Timing` is
+    # injectable, so a per-station value has somewhere to go later without
+    # changing this default. 2026-08-07: 0.0, 0.5, 1.0,
+    # 1.25 and 1.5 s all failed (1.5 twice), 1.75, 2.0 and 3.0 s all
+    # succeeded. 3.0 is the smallest value that was seen to work repeatedly
+    # across the whole session, not the smallest that ever worked.
+    service_session_gap: float = 3.0
     page_cache_ttl: float = 10.0
 
 

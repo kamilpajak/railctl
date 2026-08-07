@@ -736,3 +736,204 @@ def test_station_cv_read_delegates_to_the_programmer(bench, monkeypatch):
         "mode": ProgMode.SERVICE,
         "page": (1, 2),
     }
+
+
+def test_service_read_many_opens_one_session_for_every_cv(bench_factory, monkeypatch):
+    """Three CVs, one exit - not one exit per CV.
+
+    Measured on the bench 2026-08-07 (issue #22): a decoder that answers
+    inside an open service-mode session stops answering when the session is
+    reopened immediately. The doctor's D9 read nine identity CVs as nine
+    sessions and got one value and eight `61 13`s, while D5-D7's four reads
+    inside a single session all succeeded on the same run.
+
+    The proof is the script, not an assertion: exactly one
+    resume-operations exchange is scripted, and `FakeTransport` raises on any
+    unscripted request - so a second exit fails the test where it happens,
+    naming the telegram. `await_result` is stubbed for the same reason the
+    tests above stub it: this is about session boundaries, not polling.
+    """
+    bench = bench_factory(capabilities=make_capabilities(z21_cv_opcodes=True))
+    bench.expect(STATUS_REQUEST, reply=STATUS_POWER_ON)  # power_before, read once
+    for cv in (7, 8, 250):
+        bench.expect(cmd_z21_cv_read(cv), reply=ACK)
+    bench.expect(cmd_track_power_on(), reply=ACK)  # the ONLY exit
+    bench.expect(STATUS_REQUEST, reply=STATUS_POWER_ON)
+
+    values = iter((5, 145, 6))
+    monkeypatch.setattr(
+        bench.station.programmer,
+        "await_result",
+        lambda matcher, **kwargs: CvValue(
+            raw_cv=matcher.cv, value=next(values), ident=0x14, z21_form=True
+        ),
+    )
+
+    outcomes = bench.station.programmer.service_read_many([7, 8, 250])
+
+    assert [outcome.spec.cv for outcome in outcomes] == [7, 8, 250]
+    assert [outcome.result.value for outcome in outcomes] == [5, 145, 6]
+    assert all(outcome.error is None for outcome in outcomes)
+    assert bench.transport.script_pending == []
+
+
+def test_service_read_many_keeps_the_session_open_after_one_cv_fails(bench_factory, monkeypatch):
+    """A failing CV must not close the session or end the batch.
+
+    D9 reads nine CVs and a decoder that answers none of them is an ordinary
+    outcome, not an error to abort on - `cv_read_many` already reports
+    partial failure the same way, one error per outcome. If a failure closed
+    the session, the CVs after it would each reopen one and the fix above
+    would be undone by its own error path.
+    """
+    bench = bench_factory(capabilities=make_capabilities(z21_cv_opcodes=True))
+    bench.expect(STATUS_REQUEST, reply=STATUS_POWER_ON)
+    for cv in (7, 8):
+        bench.expect(cmd_z21_cv_read(cv), reply=ACK)
+    bench.expect(cmd_track_power_on(), reply=ACK)
+    bench.expect(STATUS_REQUEST, reply=STATUS_POWER_ON)
+
+    outcomes_by_cv = {7: NoAck(), 8: CvValue(raw_cv=8, value=145, ident=0x14, z21_form=True)}
+    monkeypatch.setattr(
+        bench.station.programmer,
+        "await_result",
+        lambda matcher, **kwargs: outcomes_by_cv[matcher.cv],
+    )
+
+    outcomes = bench.station.programmer.service_read_many([7, 8])
+
+    assert outcomes[0].result is None
+    assert isinstance(outcomes[0].error, DecoderNoAckError)
+    assert outcomes[1].result is not None and outcomes[1].result.value == 145
+    assert bench.transport.script_pending == []
+
+
+def test_a_second_service_session_waits_out_the_gap(bench_factory, monkeypatch):
+    """A session opened too soon after the previous one closed fails on the
+    real station - every CV in it answers `61 13`, the first one included.
+    Measured 2026-08-07 (issue #22): 0.0 to 1.5 s all failed, 1.75 s and
+    above worked.
+
+    The fake clock is the instrument here, exactly as in the exit-timeout
+    tests above: nothing about the reply changes, only how much time the
+    programmer spends before sending the second read.
+    """
+    bench = bench_factory(capabilities=make_capabilities(z21_cv_opcodes=True))
+    for _ in range(2):
+        _script_read_and_clean_exit(bench, cmd_z21_cv_read(8))
+    monkeypatch.setattr(
+        bench.station.programmer,
+        "await_result",
+        lambda matcher, **kwargs: CvValue(raw_cv=8, value=145, ident=0x14, z21_form=True),
+    )
+
+    bench.station.programmer.service_read(8)
+    after_first = bench.clock.monotonic()
+    bench.station.programmer.service_read(8)
+
+    assert bench.clock.monotonic() - after_first >= TIMING.service_session_gap
+
+
+def test_the_session_gap_is_paid_once_per_session_not_once_per_cv(bench_factory, monkeypatch):
+    """Three CVs in one batch owe one gap between them and the session
+    before, not three. Paying per CV would undo the batching this method
+    exists for and add six seconds to every doctor run for nothing."""
+    bench = bench_factory(capabilities=make_capabilities(z21_cv_opcodes=True))
+    _script_read_and_clean_exit(bench, cmd_z21_cv_read(8))
+    bench.expect(STATUS_REQUEST, reply=STATUS_POWER_ON)
+    for cv in (7, 8, 250):
+        bench.expect(cmd_z21_cv_read(cv), reply=ACK)
+    bench.expect(cmd_track_power_on(), reply=ACK)
+    bench.expect(STATUS_REQUEST, reply=STATUS_POWER_ON)
+    monkeypatch.setattr(
+        bench.station.programmer,
+        "await_result",
+        lambda matcher, **kwargs: CvValue(raw_cv=matcher.cv, value=1, ident=0x14, z21_form=True),
+    )
+
+    bench.station.programmer.service_read(8)
+    after_first = bench.clock.monotonic()
+    bench.station.programmer.service_read_many([7, 8, 250])
+    elapsed = bench.clock.monotonic() - after_first
+
+    assert elapsed >= TIMING.service_session_gap
+    assert elapsed < 2 * TIMING.service_session_gap
+    assert bench.transport.script_pending == []
+
+
+def test_service_read_many_stops_the_batch_on_a_short_circuit(bench_factory, monkeypatch):
+    """A shorted programming track ends the batch; it is not one CV's news.
+
+    Every CV after it would fail for the same reason, so continuing buries
+    the fault under copies of its own consequences and sends telegrams that
+    cannot work. The CVs after the short are absent from the result rather
+    than present and failed - "not attempted" and "attempted and failed" are
+    different facts, which is why `CvReadOutcome` keeps `result` and `error`
+    independent.
+
+    The session still closes exactly once: only one resume-operations
+    exchange is scripted, and `FakeTransport` raises on anything unscripted.
+    """
+    bench = bench_factory(capabilities=make_capabilities(z21_cv_opcodes=True))
+    bench.expect(STATUS_REQUEST, reply=STATUS_POWER_ON)
+    bench.expect(cmd_z21_cv_read(7), reply=ACK)
+    bench.expect(cmd_track_power_on(), reply=ACK)
+    bench.expect(STATUS_REQUEST, reply=STATUS_POWER_ON)
+    monkeypatch.setattr(
+        bench.station.programmer,
+        "await_result",
+        lambda matcher, **kwargs: ShortCircuit(),
+    )
+
+    outcomes = bench.station.programmer.service_read_many([7, 8, 250])
+
+    assert isinstance(outcomes[0].error, ShortCircuitError)
+    # The CVs after it are reported as NOT ATTEMPTED - both fields None -
+    # rather than dropped from the list or handed a copy of the short
+    # circuit they never met. `CvReadOutcome`'s docstring reserves that
+    # combination for exactly this case.
+    assert [(o.spec.cv, o.result, o.error) for o in outcomes[1:]] == [
+        (8, None, None),
+        (250, None, None),
+    ]
+    assert bench.transport.script_pending == []
+
+
+def test_service_read_many_with_no_cvs_opens_no_session(bench_factory):
+    """An empty batch must not open a session it does not need.
+
+    Opening and closing one would stamp `_last_session_end`, and the next
+    real read would then wait out a three-second gap it does not owe. Nothing
+    is scripted here: `FakeTransport` raises on the first unscripted request,
+    so any telegram at all fails the test.
+    """
+    bench = bench_factory(capabilities=make_capabilities(z21_cv_opcodes=True))
+
+    assert bench.station.programmer.service_read_many([]) == []
+    assert bench.sent == []
+
+
+def test_service_read_many_stops_the_batch_on_a_link_timeout(bench_factory, monkeypatch):
+    """A dead link ends the batch on cost, not on certainty.
+
+    A link that times out might in principle recover, unlike a shorted track.
+    But each attempt costs `li_ack_programming` (95 s), so letting nine
+    identity CVs each find out would hang a doctor run for a quarter of an
+    hour to report what the first failure already said.
+    """
+    bench = bench_factory(capabilities=make_capabilities(z21_cv_opcodes=True))
+    bench.expect(STATUS_REQUEST, reply=STATUS_POWER_ON)
+    bench.expect(cmd_z21_cv_read(7), reply=ACK)
+    bench.expect(cmd_track_power_on(), reply=ACK)
+    bench.expect(STATUS_REQUEST, reply=STATUS_POWER_ON)
+
+    def timeout(matcher, **kwargs):
+        raise LinkTimeout("link gone")
+
+    monkeypatch.setattr(bench.station.programmer, "await_result", timeout)
+
+    outcomes = bench.station.programmer.service_read_many([7, 8, 250])
+
+    assert isinstance(outcomes[0].error, LinkTimeout)
+    assert [(o.result, o.error) for o in outcomes[1:]] == [(None, None), (None, None)]
+    assert bench.transport.script_pending == []
