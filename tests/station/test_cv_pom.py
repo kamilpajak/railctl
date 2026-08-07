@@ -617,3 +617,39 @@ def test_a_stale_result_from_an_earlier_read_is_discarded_and_reported(bench):
 
     stale = [payload for name, payload in bench.events if name == "cv.stale_result"]
     assert stale == [{"cv": 8, "raw_cv": 7, "encoding": "POM_ZERO_BASED"}]
+
+
+@pytest.mark.parametrize(
+    "proven",
+    ["z21_cv_opcodes", "service_direct_cv", "service_ext_cv"],
+)
+def test_resolve_mode_auto_falls_back_to_service_on_any_proven_encoding(proven: str):
+    """Any ONE proven service-mode encoding is service mode working.
+
+    The fallback used to consult `service_direct_cv` alone, though the rest of
+    the module counts all three - `reads_available` and
+    `_service_encoding_for` both do. A station proving only the Z21 opcode was
+    therefore refused an AUTO read and told to use `--mode service`, which
+    then succeeded, because the encoding picker accepts what the fallback had
+    just declined to look at. A tool must not refuse a path it demonstrates
+    one command later. Issue #25.
+    """
+    capabilities = Capabilities.unknown("bench").with_learned(**{"pom_read": False, proven: True})
+
+    assert resolve_mode(ProgMode.AUTO, capabilities, operation="read") is ProgMode.SERVICE
+
+
+def test_resolve_mode_auto_still_refuses_when_every_service_encoding_is_measured_false():
+    """The widening must not turn into "fall back to service whatever the
+    station said". Three `61 82` replies are a measured no, and a station with
+    no CV read path at all must not be sent to a mode that cannot work
+    either."""
+    capabilities = Capabilities.unknown("bench").with_learned(
+        pom_read=False,
+        z21_cv_opcodes=False,
+        service_direct_cv=False,
+        service_ext_cv=False,
+    )
+
+    with pytest.raises(PomReadUnsupportedError):
+        resolve_mode(ProgMode.AUTO, capabilities, operation="read")

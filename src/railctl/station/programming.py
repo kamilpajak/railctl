@@ -236,12 +236,23 @@ def resolve_mode(
     and `None` (unknown - POM is tried and the outcome recorded). SERVICE is
     the fallback only when POM is a measured no AND service mode is a measured
     yes; nothing here is inferred from an unprobed capability.
+
+    "Service mode is a measured yes" means ANY one of the three encodings is
+    proven, which is what `reads_available` and `_service_encoding_for`
+    already mean by it. This used to consult `service_direct_cv` alone, so a
+    station proving only the Z21 opcode was refused an AUTO read and told to
+    use `--mode service` - which then worked, because the encoding picker
+    accepts what the fallback had declined to look at. Issue #25.
+
+    Iterating `SERVICE_ENCODING_ORDER` rather than naming the three fields
+    keeps the definition in one place: a fourth encoding joins that tuple and
+    this fallback follows without being edited.
     """
     if mode is not ProgMode.AUTO:
         return mode
     if capabilities.pom_read is not False:
         return ProgMode.POM
-    if capabilities.service_direct_cv is True:
+    if any(getattr(capabilities, name) is True for name, _ in SERVICE_ENCODING_ORDER):
         return ProgMode.SERVICE
     raise PomReadUnsupportedError(
         f"POM is unsupported on this command station for a CV {operation}; put "
