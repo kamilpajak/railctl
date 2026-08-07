@@ -253,6 +253,35 @@ class CvProgrammer:
         # a second, different page selected under the same key must verify
         # again, not ride on the first page's read-back.
         self._verified_pages: dict[PageKey, CvPage] = {}
+        # When the last service-mode session closed, or None if none has
+        # closed since the gap it owed was already paid. See
+        # `_await_session_gap`.
+        self._last_session_end: float | None = None
+
+    def _await_session_gap(self) -> None:
+        """Wait out `service_session_gap` if a session closed too recently.
+
+        A session opened too soon after the previous one closed fails
+        outright - every CV in it answers `61 13`, the first one included.
+        Measured 2026-08-07 (issue #22): three sessions run back to back,
+        the first read its CVs, the second failed both, and a third 3 s
+        later read them again.
+
+        Paid at most once per session, not once per CV: the timestamp is
+        cleared as soon as it has been honoured, so the reads that follow
+        inside the same open session go straight through. Nothing is owed
+        before the first session of a process, and nothing is owed after the
+        last one - a trailing sleep no caller is waiting on would be pure
+        cost.
+        """
+        if self._last_session_end is None:
+            return
+        remaining = self._station.timing.service_session_gap - (
+            self._station.now() - self._last_session_end
+        )
+        self._last_session_end = None
+        if remaining > 0:
+            self._station.pause(remaining)
 
     def reads_available(self, mode: ProgMode) -> bool:
         """Whether ANY read path is confirmed working for `mode`.
@@ -594,6 +623,10 @@ class CvProgrammer:
         rule is that no new command may be sent until the previous one is
         acknowledged, and the station may still be finishing the read's
         internal retries when this runs.
+
+        Stamps `_last_session_end` on the way out, including when the exit
+        itself fails: a session that closed badly is still a session the next
+        one must not follow too closely.
         """
         try:
             left_service_mode = False
@@ -619,6 +652,7 @@ class CvProgrammer:
                     cmd_track_power_off(), timeout=self._station.timing.li_ack_programming
                 )
         finally:
+            self._last_session_end = self._station.now()
             self._station.invalidate_caches()
 
     def service_read(self, cv: int, *, page: CvPage | None = None) -> CvResult:
@@ -707,6 +741,7 @@ class CvProgrammer:
         if page is not None:
             self._station.emit("page.not_selected", {"cv": cv, "page": page, "mode": "service"})
         telegram, encoding, page_index = self.service_read_telegram(cv)
+        self._await_session_gap()
         start = self._station.now()
         try:
             self._station.exchange(telegram, timeout=self._station.timing.li_ack_programming)
