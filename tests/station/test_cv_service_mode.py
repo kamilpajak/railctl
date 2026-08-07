@@ -998,3 +998,37 @@ def test_a_station_that_rejected_every_encoding_is_not_described_as_unprobed(ben
     assert "rejected every service-mode opcode" in str(caught.value)
     assert "doctor" not in str(caught.value)
     assert not isinstance(caught.value, ServiceEncodingUnknownError)
+
+
+def test_an_unreachable_cv_is_not_sent_to_pom_when_pom_is_measured_unsupported(bench_factory):
+    """`use --mode pom` is advice, not a reflex.
+
+    A caller reaching this raise through AUTO got here BECAUSE `pom_read` is
+    False - that is the only way AUTO resolves to service mode - so naming POM
+    would send them back to the path that sent them here. The remedy is the
+    part of an error most likely to be acted on, and a remedy the station has
+    already ruled out is worse than none.
+    """
+    capabilities = make_capabilities(
+        pom_read=False, service_direct_cv=True, z21_cv_opcodes=False, service_ext_cv=False
+    )
+    bench = bench_factory(capabilities=capabilities)
+
+    with pytest.raises(CvOutOfRangeError) as caught:
+        bench.station.programmer.service_read_telegram(265)
+    assert "pom is unsupported" in caught.value.hint.lower()
+    assert "use `--mode pom`" not in caught.value.hint
+
+
+def test_an_unreachable_cv_still_suggests_pom_while_pom_remains_possible(bench_factory):
+    """The companion: with `pom_read` unprobed or proven, POM is still worth
+    trying and the advice stays as it was. Only a measured False withdraws
+    it."""
+    capabilities = make_capabilities(
+        service_direct_cv=True, z21_cv_opcodes=False, service_ext_cv=False
+    )
+    bench = bench_factory(capabilities=capabilities)
+
+    with pytest.raises(CvOutOfRangeError) as caught:
+        bench.station.programmer.service_read_telegram(265)
+    assert "use `--mode pom`" in caught.value.hint

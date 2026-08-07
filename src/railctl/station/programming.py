@@ -254,10 +254,25 @@ def resolve_mode(
         return ProgMode.POM
     if any(getattr(capabilities, name) is True for name, _ in SERVICE_ENCODING_ORDER):
         return ProgMode.SERVICE
+    # Never advise `--mode service` from here. Widening the condition above
+    # means this line is reached only when NO service encoding is proven, so
+    # that command would raise in its turn - `ServiceEncodingUnknownError` if
+    # anything is still unprobed, `CvOutOfRangeError` if the station rejected
+    # all three. Sending an operator to a mode this function just established
+    # cannot work is the same defect as an error naming a cause that does not
+    # exist (#16), one layer out: the remedy is the part that lies.
+    unprobed = tuple(
+        name for name, _ in SERVICE_ENCODING_ORDER if getattr(capabilities, name) is None
+    )
+    if unprobed:
+        remedy = "run `railctl doctor` to probe the service-mode encodings"
+        state = f"and no service-mode encoding is proven yet (unprobed: {', '.join(unprobed)})"
+    else:
+        remedy = "no CV path is available on this command station"
+        state = "and the station rejected every service-mode encoding (61 82)"
     raise PomReadUnsupportedError(
-        f"POM is unsupported on this command station for a CV {operation}; put "
-        f"the loco on the programming track and use `--mode service`",
-        hint="put the loco on the programming track and use `--mode service`",
+        f"POM is unsupported on this command station for a CV {operation}, {state}",
+        hint=remedy,
     )
 
 
@@ -645,9 +660,17 @@ class CvProgrammer:
             if proven
             else "this command station rejected every service-mode opcode (61 82)"
         )
+        # The hint checks POM rather than assuming it. A caller who arrived
+        # here through AUTO did so BECAUSE `pom_read` is False, so "use
+        # `--mode pom`" would send them back to the path that sent them here.
         raise CvOutOfRangeError(
             f"CV{cv} is not reachable in service mode: {reached}",
-            hint="use `--mode pom`",
+            hint=(
+                "use `--mode pom`"
+                if caps.pom_read is not False
+                else f"CV{cv} is unreachable on this station: POM is unsupported and the "
+                f"service-mode encodings do not reach it"
+            ),
             cv=cv,
         )
 
