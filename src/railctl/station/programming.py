@@ -128,6 +128,10 @@ SERVICE_ENCODING_ORDER: Final[tuple[tuple[str, CvEncoding], ...]] = (
     ("service_ext_cv", CvEncoding.SERVICE_EXT),
 )
 UNEXERCISED_BANDS: Final[frozenset[int]] = frozenset({2, 3})  # 63 16 / 63 17, never answered here
+# Conditions no later CV in a shared service-mode session can survive: the
+# track is shorted, or the station says another operation already owns it.
+# Neither clears itself by trying the next CV.
+BATCH_ENDING_ERRORS: Final[tuple[type[RailctlError], ...]] = (ShortCircuitError, StationBusyError)
 _REGISTER_COLLISION_MAX: Final[int] = 8  # registers 1..8 collide with CV1..8
 
 
@@ -279,9 +283,13 @@ class CvProgrammer:
         remaining = self._station.timing.service_session_gap - (
             self._station.now() - self._last_session_end
         )
-        self._last_session_end = None
         if remaining > 0:
             self._station.pause(remaining)
+        # Cleared AFTER the wait, not before: an interrupted pause leaves the
+        # debt owed, so the next read tries again. Clearing first would let a
+        # failed wait look like a paid one, which is a silent return to the
+        # bug rather than an error anybody sees.
+        self._last_session_end = None
 
     def reads_available(self, mode: ProgMode) -> bool:
         """Whether ANY read path is confirmed working for `mode`.
@@ -335,6 +343,15 @@ class CvProgrammer:
         self, cv: int, value: int, *, address: int | None, mode: ProgMode
     ) -> tuple[CvEncoding, bool]:
         """Puts one CV write on the wire and confirms the station accepted it.
+
+        Does NOT call `_await_session_gap`, unlike the read path. A write
+        that immediately followed a read's closed session could hit the same
+        "reopened too soon" failure the gap exists to prevent - but nothing
+        does that today (`service_write` confirms from its own echo and never
+        reads back), and the write path was never measured for it. The
+        asymmetry runs the safe way round: a READ pays the gap whatever
+        closed the previous session, a write included. Measure before adding
+        a delay here.
 
         POM: the interface ack IS the confirmation - there is no other channel
         (module docstring: "neither the PC nor the interface can determine
@@ -711,6 +728,16 @@ class CvProgrammer:
         already reports partial failure. The session closes once, in the
         `finally`, whatever happened inside it.
 
+        Two errors DO end it. A short circuit on the programming track and a
+        station that reports another operation already running are both
+        conditions no later CV in the batch can survive, so continuing would
+        send telegrams that cannot work and bury the real fault under eight
+        copies of its consequences. They are recorded as that CV's outcome
+        and the batch stops there; the CVs after it are simply absent from
+        the returned list, which is not the same as having failed.
+        `cv_read_many` continues past them, but each of its reads opens its
+        own session - here the whole batch shares one.
+
         No `page` parameter, unlike `service_read`. Every caller so far reads
         CVs below 256, and `service_read` cannot honour a page in service
         mode anyway - it only emits `page.not_selected`. Adding a parameter
@@ -723,6 +750,9 @@ class CvProgrammer:
                 spec = CvSpec(cv=cv)
                 try:
                     result = self._read_in_open_session(cv)
+                except BATCH_ENDING_ERRORS as exc:
+                    outcomes.append(CvReadOutcome(spec=spec, result=None, error=exc))
+                    break
                 except RailctlError as exc:
                     outcomes.append(CvReadOutcome(spec=spec, result=None, error=exc))
                 else:
