@@ -602,23 +602,40 @@ class CvProgrammer:
             if encoding is CvEncoding.SERVICE_EXT and cv <= MAX_CV_EXT:
                 page_index, _c = ext_cv_fields(cv)
                 return encoding, page_index
-        if all(getattr(caps, field_name) is None for field_name, _ in SERVICE_ENCODING_ORDER):
+        proven = tuple(name for name, _ in SERVICE_ENCODING_ORDER if getattr(caps, name) is True)
+        unprobed = tuple(name for name, _ in SERVICE_ENCODING_ORDER if getattr(caps, name) is None)
+        if not proven and unprobed:
             # Not a range error: CV8 is as valid here as anywhere, and this
             # same call succeeds once a probe has run. Issue #16 - the doctor
             # reported the class name and sent a reader after the CV
             # arithmetic instead of after the missing probe.
+            #
+            # Gated on "nothing proven AND something unprobed", not on "all
+            # three unknown". One `61 82` recorded against one encoding while
+            # the others were never tried used to skip this branch entirely
+            # and reach the message below, which asserts that direct opcodes
+            # WORK and cover CV1..255 - about a capability nobody had
+            # measured. Naming a state the station never reported is the same
+            # defect #16 exists to remove, one step further in.
             raise ServiceEncodingUnknownError(
-                f"CV{cv} is not reachable in service mode: no encoding has been "
-                f"probed on this command station (Z21 covers CV{CV_MIN}..{MAX_CV_Z21}, "
-                f"extended CV{CV_MIN}..{MAX_CV_EXT}, direct CV{CV_MIN}..{MAX_CV_DIRECT}, "
-                f"all unknown)",
+                f"CV{cv} is not reachable in service mode: no encoding is proven on this "
+                f"command station (unprobed: {', '.join(unprobed)}; Z21 would cover "
+                f"CV{CV_MIN}..{MAX_CV_Z21}, extended CV{CV_MIN}..{MAX_CV_EXT}, direct "
+                f"CV{CV_MIN}..{MAX_CV_DIRECT})",
                 hint="run `railctl doctor` to probe the service-mode encodings",
                 cv=cv,
             )
+        # Both remaining cases share a type because they share a remedy, which
+        # is the test this file applies: every service-mode encoding was
+        # rejected, or the proven ones do not reach this far. Either way the
+        # operator's move is another CV number or `--mode pom`, never a probe.
+        reached = (
+            f"the encodings this station proved ({', '.join(proven)}) do not reach it"
+            if proven
+            else "this command station rejected every service-mode opcode (61 82)"
+        )
         raise CvOutOfRangeError(
-            f"CV{cv} is not reachable in service mode on this command station "
-            f"(no extended or Z21 CV opcodes; direct opcodes only cover "
-            f"CV{CV_MIN}..{MAX_CV_DIRECT})",
+            f"CV{cv} is not reachable in service mode: {reached}",
             hint="use `--mode pom`",
             cv=cv,
         )
