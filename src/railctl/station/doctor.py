@@ -372,18 +372,46 @@ def _best_effort_read(
     2 under `station/` requires."""
     caps = station.capabilities
     address = station.default_address
-    reason: str | None = None
     if caps.pom_read is True and address is not None:
         try:
             return station.programmer.pom_read(cv, address=address).value, None
         except RailctlError as exc:
-            reason = type(exc).__name__
-    if not use_programming_track:
-        return None, reason
-    try:
-        return station.programmer.service_read(cv).value, None
-    except RailctlError as exc:
-        return None, type(exc).__name__
+            return None, type(exc).__name__
+    return None, None
+
+
+def _identity_reads(
+    station: Station, *, use_programming_track: bool
+) -> dict[int, tuple[int | None, str | None]]:
+    """Every identity CV, POM first where it is proven, then ONE service-mode
+    session for whatever POM did not deliver.
+
+    The session count is the reason this exists rather than a loop over
+    `_best_effort_read`. Reopening service mode per CV cost eight of nine
+    reads on the bench (issue #22); `service_read_many` opens it once.
+
+    POM stays per-CV because it needs no session at all - it runs on the
+    operations track - so nothing is gained by batching it and the existing
+    "POM first when proven" order is preserved exactly.
+    """
+    results = {
+        cv: _best_effort_read(station, cv, use_programming_track=use_programming_track)
+        for cv in IDENTITY_CVS
+    }
+    remaining = [cv for cv, (value, _) in results.items() if value is None]
+    if not use_programming_track or not remaining:
+        return results
+    for outcome in station.programmer.service_read_many(remaining):
+        cv = outcome.spec.cv
+        pom_reason = results[cv][1]
+        if outcome.result is not None:
+            results[cv] = (outcome.result.value, None)
+        else:
+            # The service failure names the reason, not POM's earlier one:
+            # service mode is the path that actually decided this CV.
+            reason = type(outcome.error).__name__ if outcome.error is not None else pom_reason
+            results[cv] = (None, reason)
+    return results
 
 
 def _check_d9(station: Station, *, use_programming_track: bool) -> Check:
@@ -404,10 +432,7 @@ def _check_d9(station: Station, *, use_programming_track: bool) -> Check:
     legitimate when POM read is proven, and `--no-programming-track` says nothing
     against it.
     """
-    results = {
-        cv: _best_effort_read(station, cv, use_programming_track=use_programming_track)
-        for cv in IDENTITY_CVS
-    }
+    results = _identity_reads(station, use_programming_track=use_programming_track)
     values = {cv: value for cv, (value, _) in results.items()}
     family = decoder_family(values[DECODER_TYPE_CV])
     read_count = sum(1 for value in values.values() if value is not None)

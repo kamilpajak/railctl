@@ -656,42 +656,86 @@ class CvProgrammer:
         so a caller relying on paging in service mode finds out immediately,
         instead of reading whatever page the decoder already had selected.
         """
+        power_before = self._station.status().track_power
+        try:
+            return self._read_in_open_session(cv, page=page)
+        finally:
+            self.exit_service_mode(restore_power=power_before)
+
+    def service_read_many(self, cvs: Sequence[int]) -> list[CvReadOutcome]:
+        """Read several CVs inside ONE service-mode session.
+
+        Not a convenience wrapper around `service_read`: the session count is
+        the point. Measured on the bench 2026-08-07 (issue #22), a decoder
+        that answers inside an open session stops answering when the session
+        is reopened immediately - the caller that read nine CVs as nine
+        sessions got one value and eight `61 13`s, while four reads inside a
+        single session all succeeded on the same run and the same track.
+
+        One CV failing does not end the batch, and does not close the
+        session: each outcome carries its own error, the way `cv_read_many`
+        already reports partial failure. The session closes once, in the
+        `finally`, whatever happened inside it.
+
+        No `page` parameter, unlike `service_read`. Every caller so far reads
+        CVs below 256, and `service_read` cannot honour a page in service
+        mode anyway - it only emits `page.not_selected`. Adding a parameter
+        that could not be acted on would promise more than this can do.
+        """
+        power_before = self._station.status().track_power
+        outcomes: list[CvReadOutcome] = []
+        try:
+            for cv in cvs:
+                spec = CvSpec(cv=cv)
+                try:
+                    result = self._read_in_open_session(cv)
+                except RailctlError as exc:
+                    outcomes.append(CvReadOutcome(spec=spec, result=None, error=exc))
+                else:
+                    outcomes.append(CvReadOutcome(spec=spec, result=result, error=None))
+        finally:
+            self.exit_service_mode(restore_power=power_before)
+        return outcomes
+
+    def _read_in_open_session(self, cv: int, *, page: CvPage | None = None) -> CvResult:
+        """One service-mode read, WITHOUT opening or closing the session.
+
+        Every caller is responsible for `exit_service_mode`, which is why this
+        is private: a caller that forgets it leaves the station in service
+        mode and the layout dead.
+        """
         if page is not None:
             self._station.emit("page.not_selected", {"cv": cv, "page": page, "mode": "service"})
         telegram, encoding, page_index = self.service_read_telegram(cv)
-        power_before = self._station.status().track_power
         start = self._station.now()
         try:
-            try:
-                self._station.exchange(telegram, timeout=self._station.timing.li_ack_programming)
-            except UnsupportedCommandError:
-                # `Station.exchange` (facade.py) already turns a `61 82` reply
-                # into this exception rather than returning `Unsupported` - by
-                # the time a reply reaches this method it can never actually
-                # BE `Unsupported`. Re-raised with a CV-specific message; the
-                # general `61 82` -> `UnsupportedCommandError` mapping is
-                # `Station.exchange`'s own docstring, not repeated here.
-                raise UnsupportedCommandError(
-                    f"the command station rejected the service-mode read opcode for CV{cv}"
-                ) from None
-            matcher = CvMatcher(
-                encoding,
-                cv,
-                page_index=page_index if encoding is CvEncoding.SERVICE_EXT else None,
-            )
-            outcome = self.await_result(
-                matcher,
-                timeout=self._station.timing.service_result,
-                first_delay=self._station.timing.service_first_poll_delay,
-                interval=self._station.timing.service_poll_interval,
-                exchange_timeout=self._station.timing.li_ack_programming,
-                allow_poll=True,
-                ready_means_done=False,
-                context="service",
-            )
-            return self._finish_service_read(cv, encoding, page_index, outcome, start)
-        finally:
-            self.exit_service_mode(restore_power=power_before)
+            self._station.exchange(telegram, timeout=self._station.timing.li_ack_programming)
+        except UnsupportedCommandError:
+            # `Station.exchange` (facade.py) already turns a `61 82` reply
+            # into this exception rather than returning `Unsupported` - by
+            # the time a reply reaches this method it can never actually
+            # BE `Unsupported`. Re-raised with a CV-specific message; the
+            # general `61 82` -> `UnsupportedCommandError` mapping is
+            # `Station.exchange`'s own docstring, not repeated here.
+            raise UnsupportedCommandError(
+                f"the command station rejected the service-mode read opcode for CV{cv}"
+            ) from None
+        matcher = CvMatcher(
+            encoding,
+            cv,
+            page_index=page_index if encoding is CvEncoding.SERVICE_EXT else None,
+        )
+        outcome = self.await_result(
+            matcher,
+            timeout=self._station.timing.service_result,
+            first_delay=self._station.timing.service_first_poll_delay,
+            interval=self._station.timing.service_poll_interval,
+            exchange_timeout=self._station.timing.li_ack_programming,
+            allow_poll=True,
+            ready_means_done=False,
+            context="service",
+        )
+        return self._finish_service_read(cv, encoding, page_index, outcome, start)
 
     def _finish_service_read(
         self,

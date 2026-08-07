@@ -21,6 +21,7 @@ from typing import TYPE_CHECKING
 
 import pytest
 
+from railctl.errors import DecoderNoAckError
 from railctl.station import doctor as doctor_module
 from railctl.station.capabilities import Capabilities
 from railctl.station.doctor import (
@@ -33,7 +34,7 @@ from railctl.station.doctor import (
     run_probe,
     verdict_lines,
 )
-from railctl.station.types import Check, DoctorReport
+from railctl.station.types import Check, CvReadOutcome, CvSpec, DoctorReport
 from railctl.transport.fake import FakeTransport
 from railctl.xbus.codec import encode
 from railctl.xbus.commands import (
@@ -773,7 +774,7 @@ def test_d9_names_the_failure_reasons_when_only_some_identity_cvs_are_read(
     WHICH ones failed was never in doubt. What was missing is why: a decoder
     that ignores a CV and a link that faulted produce the same `?`.
 
-    `_best_effort_read` is substituted rather than scripted on the wire.
+    `_identity_reads` is substituted rather than scripted on the wire.
     Driving nine identity CVs to a specific mix of successes and failures
     through the service-mode result machinery would make the test about that
     machinery, and the branch under test is the formatting decision in
@@ -781,16 +782,54 @@ def test_d9_names_the_failure_reasons_when_only_some_identity_cvs_are_read(
     """
     reads = {7: (145, None), 8: (145, None)}
 
-    def fake_read(_station, cv, *, use_programming_track):
-        return reads.get(cv, (None, "DecoderNotRespondingError"))
+    def fake_reads(_station, *, use_programming_track):
+        return {
+            cv: reads.get(cv, (None, "DecoderNotRespondingError"))
+            for cv in doctor_module.IDENTITY_CVS
+        }
 
-    monkeypatch.setattr(doctor_module, "_best_effort_read", fake_read)
+    monkeypatch.setattr(doctor_module, "_identity_reads", fake_reads)
     check = doctor_module._check_d9(doctor_bench.station, use_programming_track=True)
     assert check.status == "ok"
     assert "CV7=145" in check.detail
     assert "CV28=?" in check.detail
     assert "some reads failed" in check.detail
     assert "DecoderNotRespondingError" in check.detail
+
+
+def test_d9_reads_every_identity_cv_in_one_service_mode_session(doctor_bench, monkeypatch):
+    """One batched call, not nine separate reads.
+
+    Measured on the bench 2026-08-07 (issue #22): reopening service mode per
+    CV cost eight of nine reads, while four reads inside one session all
+    succeeded on the same run and the same unpowered track. The session
+    boundary itself is pinned one layer down, in
+    `test_service_read_many_opens_one_session_for_every_cv`; what this test
+    owns is that D9 asks for the batch at all rather than looping.
+
+    `service_read` is stubbed to fail loudly for the same reason: a D9 that
+    quietly went back to per-CV reads would otherwise still produce a
+    plausible report.
+    """
+    calls: list[tuple[int, ...]] = []
+
+    def fake_read_many(cvs):
+        calls.append(tuple(cvs))
+        return [
+            CvReadOutcome(spec=CvSpec(cv=cv), result=None, error=DecoderNoAckError("no ack"))
+            for cv in cvs
+        ]
+
+    def forbidden_read(cv, **kwargs):
+        raise AssertionError(f"D9 opened a session of its own for CV{cv}")
+
+    monkeypatch.setattr(doctor_bench.station.programmer, "service_read_many", fake_read_many)
+    monkeypatch.setattr(doctor_bench.station.programmer, "service_read", forbidden_read)
+
+    report = run_probe(doctor_bench.station, now_utc=lambda: "2026-08-05T00:00:00Z")
+
+    assert calls == [doctor_module.IDENTITY_CVS]
+    assert report.check("D9").status == "unknown"
 
 
 def test_d9_skips_the_programming_track_when_it_is_disabled(doctor_bench):

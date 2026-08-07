@@ -736,3 +736,73 @@ def test_station_cv_read_delegates_to_the_programmer(bench, monkeypatch):
         "mode": ProgMode.SERVICE,
         "page": (1, 2),
     }
+
+
+def test_service_read_many_opens_one_session_for_every_cv(bench_factory, monkeypatch):
+    """Three CVs, one exit - not one exit per CV.
+
+    Measured on the bench 2026-08-07 (issue #22): a decoder that answers
+    inside an open service-mode session stops answering when the session is
+    reopened immediately. The doctor's D9 read nine identity CVs as nine
+    sessions and got one value and eight `61 13`s, while D5-D7's four reads
+    inside a single session all succeeded on the same run.
+
+    The proof is the script, not an assertion: exactly one
+    resume-operations exchange is scripted, and `FakeTransport` raises on any
+    unscripted request - so a second exit fails the test where it happens,
+    naming the telegram. `await_result` is stubbed for the same reason the
+    tests above stub it: this is about session boundaries, not polling.
+    """
+    bench = bench_factory(capabilities=make_capabilities(z21_cv_opcodes=True))
+    bench.expect(STATUS_REQUEST, reply=STATUS_POWER_ON)  # power_before, read once
+    for cv in (7, 8, 250):
+        bench.expect(cmd_z21_cv_read(cv), reply=ACK)
+    bench.expect(cmd_track_power_on(), reply=ACK)  # the ONLY exit
+    bench.expect(STATUS_REQUEST, reply=STATUS_POWER_ON)
+
+    values = iter((5, 145, 6))
+    monkeypatch.setattr(
+        bench.station.programmer,
+        "await_result",
+        lambda matcher, **kwargs: CvValue(
+            raw_cv=matcher.cv, value=next(values), ident=0x14, z21_form=True
+        ),
+    )
+
+    outcomes = bench.station.programmer.service_read_many([7, 8, 250])
+
+    assert [outcome.spec.cv for outcome in outcomes] == [7, 8, 250]
+    assert [outcome.result.value for outcome in outcomes] == [5, 145, 6]
+    assert all(outcome.error is None for outcome in outcomes)
+    assert bench.transport.script_pending == []
+
+
+def test_service_read_many_keeps_the_session_open_after_one_cv_fails(bench_factory, monkeypatch):
+    """A failing CV must not close the session or end the batch.
+
+    D9 reads nine CVs and a decoder that answers none of them is an ordinary
+    outcome, not an error to abort on - `cv_read_many` already reports
+    partial failure the same way, one error per outcome. If a failure closed
+    the session, the CVs after it would each reopen one and the fix above
+    would be undone by its own error path.
+    """
+    bench = bench_factory(capabilities=make_capabilities(z21_cv_opcodes=True))
+    bench.expect(STATUS_REQUEST, reply=STATUS_POWER_ON)
+    for cv in (7, 8):
+        bench.expect(cmd_z21_cv_read(cv), reply=ACK)
+    bench.expect(cmd_track_power_on(), reply=ACK)
+    bench.expect(STATUS_REQUEST, reply=STATUS_POWER_ON)
+
+    outcomes_by_cv = {7: NoAck(), 8: CvValue(raw_cv=8, value=145, ident=0x14, z21_form=True)}
+    monkeypatch.setattr(
+        bench.station.programmer,
+        "await_result",
+        lambda matcher, **kwargs: outcomes_by_cv[matcher.cv],
+    )
+
+    outcomes = bench.station.programmer.service_read_many([7, 8])
+
+    assert outcomes[0].result is None
+    assert isinstance(outcomes[0].error, DecoderNoAckError)
+    assert outcomes[1].result is not None and outcomes[1].result.value == 145
+    assert bench.transport.script_pending == []
