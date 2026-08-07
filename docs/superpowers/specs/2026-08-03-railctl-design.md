@@ -154,7 +154,7 @@ class RailctlError(Exception):
 | `StationError` | `RailctlError` | facade-level base |
 | `TrackPowerError` | `StationError` | operation needs power on, or power is in the wrong state |
 | `ProgrammingError` | `StationError` | CV-operation base; carries `cv: int \| None` |
-| `DecoderNoAckError` / `ShortCircuitError` / `StationBusyError` / `DecoderNotRespondingError` / `CvVerifyError` / `CvOutOfRangeError` / `PomReadUnsupportedError` / `IndexPageRequiredError` | `ProgrammingError` | see the station section |
+| `DecoderNoAckError` / `ShortCircuitError` / `StationBusyError` / `DecoderNotRespondingError` / `CvVerifyError` / `CvOutOfRangeError` / `ServiceEncodingUnknownError` / `PomReadUnsupportedError` / `IndexPageRequiredError` | `ProgrammingError` | see the station section |
 
 Argument validation (address, speed, CV, value out of range) raises plain `ValueError`, which the CLI maps to the Typer usage code. The CLI catches `RailctlError` at the top, prints `str(exc)`, prints `Hint: {exc.hint}` when set, and exits with `exit_code_for(exc)`.
 
@@ -947,6 +947,7 @@ Events via `on_event(name, payload)`:
 | 15 | `CvOutOfRangeError` |
 | 16 | `PomReadUnsupportedError` |
 | 17 | `IndexPageRequiredError` |
+| 18 | `ServiceEncodingUnknownError` |
 | 19 | `ProgrammingError` (base) |
 | 20 | `TrackPowerError` |
 

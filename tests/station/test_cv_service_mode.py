@@ -18,6 +18,7 @@ from railctl.errors import (
     DecoderNoAckError,
     DecoderNotRespondingError,
     LinkTimeout,
+    ServiceEncodingUnknownError,
     ShortCircuitError,
     StationBusyError,
     UnsupportedCommandError,
@@ -148,16 +149,30 @@ def test_service_read_telegram_with_no_encoding_probed_names_the_bound_and_sugge
     bench_factory,
 ):
     """An unprobed station never sends an opcode that has not been observed
-    to work: None is not enough, only True is."""
+    to work: None is not enough, only True is.
+
+    The TYPE is the point, not just the message (issue #16). CV8 is plainly
+    in range and the identical call succeeds once a probe has run, so
+    `CvOutOfRangeError` named a cause that does not exist and sent a reader
+    hunting the CV arithmetic in `xbus/cv.py` - the one place in this
+    codebase where an off-by-one silently corrupts a decoder. A caller must
+    be able to tell "your CV number is wrong", which the user fixes by typing
+    another number, from "this station has not been probed", which the user
+    fixes by probing.
+    """
     capabilities = make_capabilities(
         z21_cv_opcodes=None, service_direct_cv=None, service_ext_cv=None
     )
     bench = bench_factory(capabilities=capabilities)
 
-    with pytest.raises(CvOutOfRangeError) as caught:
+    with pytest.raises(ServiceEncodingUnknownError) as caught:
         bench.station.programmer.service_read_telegram(8)
     assert str(MAX_CV_DIRECT) in str(caught.value)
     assert "doctor" in caught.value.hint
+    assert caught.value.cv == 8
+    # Not a range error, and not catchable as one: the whole point is that a
+    # `except CvOutOfRangeError` must no longer swallow this case.
+    assert not isinstance(caught.value, CvOutOfRangeError)
 
 
 def test_service_read_telegram_when_the_cv_exceeds_every_available_encoding_suggests_pom(

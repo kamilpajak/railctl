@@ -215,7 +215,9 @@ latched output is the mechanism, and it explains why the run could not be rescue
   fails its own service-mode measurements (#14).
 - Nothing the doctor measures is persisted, so a later process finds every encoding "unknown" and
   is told to run the doctor (#15).
-- `CvOutOfRangeError` is raised when no encoding has been probed, naming the wrong cause (#16).
+- ~~`CvOutOfRangeError` is raised when no encoding has been probed, naming the wrong cause (#16).~~
+  Fixed: that case now raises `ServiceEncodingUnknownError` (exit 18), which names a state the
+  operator clears by probing rather than a CV number they would have to retype.
 
 ### Confirmed by watching the locomotive
 
