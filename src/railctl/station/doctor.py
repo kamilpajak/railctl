@@ -599,15 +599,30 @@ def run_probe(
         )
     checks.append(d4_check)
 
-    if use_programming_track and track_powered:
-        # Gated on the same `track_powered` D3 already established, not merely
-        # on the flag: entering service mode cuts main power, and leaving it
-        # again (exit_service_mode) unconditionally sends resume-operations
-        # (cmd_track_power_on()) to check the station left service mode -
-        # briefly re-energising the main track even when the operator never
-        # authorised power at all. D3 already recorded "unknown - re-run with
-        # --power-on" for an unpowered bench with no --power-on; driving the
-        # programming track here anyway would silently overrule that refusal.
+    if use_programming_track:
+        # Not gated on `track_powered`. This batch used to share D3's gate,
+        # on the reasoning that entering service mode cuts main power and
+        # that leaving it re-energises the track behind the operator's back.
+        # Measured on the bench 2026-08-06 (docs/probe-results.md, "Service
+        # mode needs no track power"), both are false on this station: a
+        # service read returned CV8=145 four times out of four with the
+        # track dead, and a multimeter on the rails never saw the track
+        # energise on exit. Gating cost the operator three capabilities and
+        # bought nothing. Issue #20.
+        #
+        # `power_before` still decides what exit_service_mode restores, so
+        # an unpowered bench is left unpowered - that part was never in
+        # dispute and stays exactly as it was.
+        #
+        # Scope: measured on the YD7010 only. `exit_service_mode` sends
+        # resume-operations unconditionally, and on a station where that
+        # telegram DOES energise a dead track, this batch would briefly power
+        # a layout whose operator declined --power-on. Adding a station means
+        # measuring that. The fix would then be a capability gating the EXIT
+        # path, not this entry gate: gating entry costs the three
+        # capabilities again, and D9 already drives the programming track
+        # through the identical exit with no gate of its own - which is why
+        # this precondition protected nothing even before it was measured.
         power_before = station.status().track_power
         try:
             checks.append(_check_d5(station))
@@ -617,10 +632,6 @@ def run_probe(
             checks.append(_check_d8(station, d4_noack=d4_noack, d5_passed=d5_passed))
         finally:
             station.programmer.exit_service_mode(restore_power=power_before)
-    elif use_programming_track:
-        detail = "track power is off; re-run with --power-on to run D5-D8"
-        for check_id in ("D5", "D6", "D7", "D8"):
-            checks.append(Check(check_id, CHECK_TITLES[check_id], "unknown", detail))
     else:
         skip_detail = "programming track disabled (--no-programming-track)"
         for check_id in ("D5", "D6", "D7", "D8"):
