@@ -23,6 +23,7 @@ from railctl.errors import (
     PomReadUnsupportedError,
     ProtocolError,
     RailctlError,
+    ServiceEncodingUnknownError,
     ShortCircuitError,
     StationBusyError,
     TrackPowerError,
@@ -602,7 +603,11 @@ class CvProgrammer:
                 page_index, _c = ext_cv_fields(cv)
                 return encoding, page_index
         if all(getattr(caps, field_name) is None for field_name, _ in SERVICE_ENCODING_ORDER):
-            raise CvOutOfRangeError(
+            # Not a range error: CV8 is as valid here as anywhere, and this
+            # same call succeeds once a probe has run. Issue #16 - the doctor
+            # reported the class name and sent a reader after the CV
+            # arithmetic instead of after the missing probe.
+            raise ServiceEncodingUnknownError(
                 f"CV{cv} is not reachable in service mode: no encoding has been "
                 f"probed on this command station (Z21 covers CV{CV_MIN}..{MAX_CV_Z21}, "
                 f"extended CV{CV_MIN}..{MAX_CV_EXT}, direct CV{CV_MIN}..{MAX_CV_DIRECT}, "

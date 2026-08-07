@@ -28,6 +28,7 @@ from railctl.errors import (
     ProgrammingError,
     ProtocolError,
     RailctlError,
+    ServiceEncodingUnknownError,
     ShortCircuitError,
     StationBusyError,
     StationError,
@@ -66,6 +67,7 @@ def _tree(root: type[RailctlError] = RailctlError) -> set[type[RailctlError]]:
         (CvOutOfRangeError("x"), 15),
         (PomReadUnsupportedError("x"), 16),
         (IndexPageRequiredError("x"), 17),
+        (ServiceEncodingUnknownError("x"), 18),
         (ProgrammingError("x"), 19),
         (TrackPowerError("x"), 20),
     ],
@@ -179,3 +181,13 @@ def test_railctl_error_details_defaults_to_empty_and_round_trips():
     programming = ProgrammingError("x", cv=8, details={"attempts": 3})
     assert programming.cv == 8
     assert programming.details == {"attempts": 3}
+
+
+def test_an_unprobed_station_and_a_bad_cv_number_do_not_share_an_exit_code():
+    """The two used to be one class, and a script could not tell them apart
+    (issue #16). They ask the operator for different things: a range error is
+    fixed by typing another CV number, an unprobed station by running
+    `railctl doctor`. Sharing a code would leave a caller with no way to
+    decide which, and the CLI contract forbids repurposing a code later.
+    """
+    assert exit_code_for(ServiceEncodingUnknownError("x")) != exit_code_for(CvOutOfRangeError("x"))
