@@ -699,33 +699,49 @@ def test_d5_through_d8_batch_exits_service_mode_even_when_a_check_raises(doctor_
     assert cmd_track_power_on() in doctor_bench.sent
 
 
-def test_d5_through_d8_report_unknown_when_track_is_off_without_power_on(doctor_bench):
-    """Pinned: entering service mode cuts main power, and leaving it again
-    unconditionally re-energises the main track through
-    `exit_service_mode`'s own resume-operations telegram - so the D5-D8
-    batch must not run at all when D3 refused to power the track on. Running
-    it anyway would silently overrule D3's own '--power-on' refusal and
-    briefly re-power a track the operator left off on purpose. Distinct from
-    `test_d5_through_d8_are_skipped_under_no_programming_track`: that one is
-    an explicit opt-out (`skip`), this one is an unmet precondition
-    (`unknown`), the same distinction D4 already makes for the same reason."""
+def test_d5_through_d7_run_on_an_unpowered_track(doctor_bench):
+    """A service-mode read needs no track power, so an unpowered bench must
+    not cost the operator these three capabilities.
+
+    This test replaces one that pinned the opposite. That one justified
+    itself with two claims about the station - that entering service mode
+    cuts main power, and that leaving it re-energises the main track - which
+    were written into a code comment and never measured. Both were
+    contradicted on the bench on 2026-08-06 (`docs/probe-results.md`,
+    "Service mode needs no track power"): a service read returned `CV8=145`
+    four times out of four with the track dead, and a multimeter on the
+    rails never saw the track energise on exit. Issue #20.
+
+    D8 is deliberately not asserted here: it gates on D4, which skips
+    without an address, so it says nothing about the track-power question
+    this test exists to settle."""
     doctor_bench.transport.on_write.set(cmd_station_status(), STATUS_REPLY_UNPOWERED)
-    report = run_probe(doctor_bench.station, now_utc=lambda: "2026-08-05T00:00:00Z")
-    for check_id in ("D5", "D6", "D7", "D8"):
-        check = report.check(check_id)
-        assert check.status == "unknown"
-        assert "power" in check.detail.lower()
-    assert report.capabilities.service_direct_cv is None
-    assert report.capabilities.z21_cv_opcodes is None
-    assert report.capabilities.service_ext_cv is None
-    # No service-mode telegram was sent at all - not even an entry attempt -
-    # and exit_service_mode never ran, so neither power telegram appears.
-    assert not any(
-        request.startswith(b"\x21\x10") or request[:1] == b"\x22" or request[:1] == b"\x23"
-        for request in doctor_bench.sent
+    # Same reply scripting the powered D5/D6/D7 success tests use, so the only
+    # difference between them and this test is the track power state.
+    doctor_bench.transport.on_write.queue_once(
+        cmd_service_result_request(), cv_reply(0x14, PROBE_CV, PROBE_CV_VALUE)
     )
-    assert cmd_track_power_on() not in doctor_bench.sent
-    assert cmd_track_power_off() not in doctor_bench.sent
+    doctor_bench.transport.on_write.queue_once_for(cmd_z21_cv_read(1), cv_reply(0x14, 1, 5))
+    doctor_bench.transport.on_write.queue_once_for(
+        cmd_service_ext_read(PROBE_CV), cv_reply(0x14, PROBE_CV, PROBE_CV_VALUE)
+    )
+    doctor_bench.transport.on_write.queue_once_for(
+        cmd_service_ext_read(EXT_HIGH_PROBE_CV), cv_reply(0x15, 1, 7)
+    )
+    report = run_probe(doctor_bench.station, now_utc=lambda: "2026-08-05T00:00:00Z")
+    for check_id in ("D5", "D6", "D7"):
+        check = report.check(check_id)
+        assert check.status == "ok"
+        assert "power" not in check.detail.lower()
+    assert report.capabilities.service_direct_cv is True
+    assert report.capabilities.z21_cv_opcodes is True
+    assert report.capabilities.service_ext_cv is True
+    # The batch really reached the wire: a service-mode read opcode was sent.
+    assert any(request[:1] in (b"\x22", b"\x23") for request in doctor_bench.sent)
+    # And it still leaves the track as it found it - `exit_service_mode`
+    # sends resume-operations, then power-off because `power_before` was False.
+    assert cmd_track_power_on() in doctor_bench.sent
+    assert cmd_track_power_off() in doctor_bench.sent
 
 
 def test_d9_with_no_established_read_path_reports_family_unknown_never_ms(doctor_bench):
