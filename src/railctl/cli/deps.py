@@ -83,6 +83,15 @@ class Settings:
     color: Literal["auto", "always", "never"]
     assume_yes: bool
     interactive: bool
+    # What the ROOT level actually had TYPED on the command line, kept beside the resolved
+    # `fmt` so `merge_settings` can see both sides of the verb at once - see
+    # `check_format_conflict`. Only the command line: the environment and the config file
+    # stay out of these two fields, because `--json` is documented to win over
+    # RAILCTL_FORMAT and folding the variable in here would turn that documented precedence
+    # into a refusal. They default to "nothing was typed" so a test building a `Settings` by
+    # hand describes the ordinary case without naming them.
+    fmt_flag: str | None = None
+    json_flag: bool = False
 
 
 def check_choice(name: str, value: object, allowed: tuple[str, ...]) -> None:
@@ -102,6 +111,13 @@ def check_format_conflict(*, json_flag: bool, fmt: str | None) -> None:
     `pick()` sees - not a second, competing source. Passing both `--format=ndjson` and
     `--json` is a real conflict, not "last flag wins": on a CLI that drives a running train,
     silently picking one of two contradictory instructions is worse than refusing to guess.
+
+    Both callers pass the union of the two flag positions, never one level's copy alone.
+    Compared per level, `railctl --format ndjson status --json` and
+    `railctl --json status --format ndjson` were each accepted and each silently produced
+    the other format - so a wrapper that pins a house format in a prefix array and appends
+    `--json` per call got JSON where it asked for NDJSON, and its line reader never found a
+    `summary` event.
     """
     if json_flag and fmt is not None and fmt != "json":
         raise ValueError(f"--json conflicts with --format={fmt}; pass only one")
@@ -167,6 +183,8 @@ def build_settings(
         # branch even against a real terminal, for scripted use over a pseudo
         # terminal.
         interactive=stdin.isatty() and not non_interactive,
+        fmt_flag=fmt,
+        json_flag=json_flag,
     )
 
 
@@ -204,7 +222,15 @@ def merge_settings(
         updates["target"] = target
     if address is not None:
         updates["address"] = address
-    check_format_conflict(json_flag=json_flag, fmt=fmt)
+    # The union of both flag positions, not this level's copy alone: `--format` before the
+    # verb and `--json` after it are one contradiction, however they are spread around the
+    # command name. `base.fmt` cannot stand in for `base.fmt_flag` here - it defaults to
+    # "human", so comparing `--json` against it would refuse the ordinary
+    # `railctl status --json`.
+    check_format_conflict(
+        json_flag=json_flag or base.json_flag,
+        fmt=fmt if fmt is not None else base.fmt_flag,
+    )
     resolved_fmt = "json" if json_flag else fmt
     if resolved_fmt is not None:
         check_choice("format", resolved_fmt, ALLOWED_FORMATS)

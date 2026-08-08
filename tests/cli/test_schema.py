@@ -600,6 +600,38 @@ def test_a_bad_value_after_the_subcommand_exits_2_with_the_usage_envelope(
     assert json.loads(captured.err)["code"] == "usage"
 
 
+@pytest.mark.parametrize(
+    "argv",
+    [
+        ["--format", "ndjson", "--json", "status"],
+        ["status", "--format", "ndjson", "--json"],
+        ["--format", "ndjson", "status", "--json"],
+        ["--json", "status", "--format", "ndjson"],
+    ],
+    ids=["both-before", "both-after", "split-format-first", "split-json-first"],
+)
+def test_json_and_a_different_format_are_refused_wherever_the_verb_sits(
+    fake_station, argv: list[str]
+):
+    # The last two orderings used to be accepted, each silently producing the
+    # format named on ITS side of the verb: the conflict check saw one level's
+    # copy at a time, so the two flags never met.
+    result = runner.invoke(app, argv)
+    assert result.exit_code != 0
+    assert result.stdout == ""
+    assert isinstance(result.exception, ValueError)
+    assert "--json conflicts with --format=ndjson" in str(result.exception)
+
+
+def test_json_alone_after_the_verb_is_still_accepted(fake_station):
+    # The reason the check reads `fmt_flag` and not `fmt`: `base.fmt` is already
+    # resolved to "human" by default, so comparing `--json` against it would
+    # refuse this, the most ordinary invocation there is.
+    result = runner.invoke(app, ["status", "--json"])
+    assert result.exit_code == 0
+    assert json.loads(result.stdout)["schema"] == "railctl/status/v1"
+
+
 @pytest.mark.parametrize("variable", ["RAILCTL_ADDRESS", "RAILCTL_VERBOSE"])
 def test_an_unusable_environment_value_still_answers_with_the_error_envelope(
     monkeypatch, capsys, variable: str
