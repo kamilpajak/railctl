@@ -211,10 +211,22 @@ def build_drive(
         "direction_source": direction_source,
         "changed": changed,
         "previous_speed_decoded": previous_speed_decoded,
+        # Decoded off the ident byte and then dropped. It says another throttle
+        # holds this locomotive - exactly what an operator needs to know before
+        # commanding it, and the one field here whose UNKNOWN (no reply, or a
+        # stop that reads nothing) is a different answer from `false`.
+        "in_use_by_other": None if was is None else was.in_use_by_other,
     }
     outcome.say(
         f"loco {address} set to speed {speed} {direction_text} ({tri_state(changed)} changed)"
     )
+    if was is not None and was.in_use_by_other:
+        outcome.warn(
+            "loco_in_use_by_other",
+            f"another throttle holds loco {address}; this command was sent anyway and the "
+            f"two of you are now driving the same locomotive",
+            address=address,
+        )
     if direction_source == DIRECTION_STOP_DEFAULT:
         outcome.say(
             "the stop was sent forward without reading the locomotive first - a stop never "

@@ -359,6 +359,50 @@ def test_build_drive_changed_unknown_when_prior_step_mode_not_decoded():
     assert any("not decoded" in line for line in result.lines)
 
 
+def test_build_drive_reports_that_another_throttle_holds_the_locomotive():
+    """`in_use_by_other` is decoded off the ident byte and was then dropped.
+
+    The facade deliberately does not raise on it (`Station.loco_info`: "another
+    device holding this locomotive blocks nothing here, it only gets
+    reported"), which makes reporting it this layer's job.
+    """
+    was = replace(LOCO_128, in_use_by_other=True)
+    result = throttle.build_drive(
+        3, 30, Direction.FORWARD, was=was, direction_source=throttle.DIRECTION_KEPT
+    )
+    assert result.result["in_use_by_other"] is True
+    assert [w.name for w in result.warnings] == ["loco_in_use_by_other"]
+    assert result.warnings[0].details == {"address": 3}
+
+
+def test_build_drive_leaves_in_use_by_other_unknown_when_nothing_was_read():
+    """A stop reads nothing, so `false` here would be a flag this tool never
+    looked at, reported as a flag it looked at and found clear."""
+    stop = throttle.build_drive(
+        3, 0, Direction.FORWARD, was=None, direction_source=throttle.DIRECTION_STOP_DEFAULT
+    )
+    assert stop.result["in_use_by_other"] is None
+    assert stop.warnings == []
+    free = throttle.build_drive(
+        3, 30, Direction.FORWARD, was=LOCO_128, direction_source=throttle.DIRECTION_KEPT
+    )
+    assert free.result["in_use_by_other"] is False
+    assert free.warnings == []
+
+
+def test_drive_prints_the_in_use_warning_in_both_renderings(monkeypatch):
+    station = FakeStation(loco_info=replace(LOCO_128, in_use_by_other=True))
+    app = _app(station, monkeypatch, fmt="json")
+    payload = json.loads(runner.invoke(app, ["drive", "30"]).stdout)
+    assert [w["name"] for w in payload["warnings"]] == ["loco_in_use_by_other"]
+
+    human = runner.invoke(
+        _app(FakeStation(loco_info=replace(LOCO_128, in_use_by_other=True)), monkeypatch),
+        ["drive", "30"],
+    )
+    assert "another throttle holds loco 3" in human.stdout
+
+
 def test_build_drive_keeps_the_three_outcomes_apart_in_the_human_text():
     # true / false / unknown must stay distinguishable in the human rendering
     # too, not only in the JSON - that is the project's whole rule, applied to
