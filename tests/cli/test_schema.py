@@ -109,14 +109,15 @@ def test_typer_option_builds_the_repeatable_count_flag_for_verbose():
     assert built.default is None
 
 
-def test_typer_option_forwards_only_a_railctl_prefixed_environment_variable():
-    by_name = {o.name: o for o in GLOBAL_OPTIONS}
-    assert typer_option(by_name["--target"]).envvar == "RAILCTL_TARGET"
-    # `--color` documents NO_COLOR, but NO_COLOR is a render-time override, not
-    # a value in the flag/env/config/default chain. Letting Click resolve it
-    # would hand `--color` the string "1" for everyone who sets it globally.
-    assert typer_option(by_name["--color"]).envvar is None
-    assert typer_option(by_name["--json"]).envvar is None
+def test_typer_option_forwards_no_environment_variable_to_click():
+    # `Option.env` is published metadata (the manifest names the variables) and
+    # `build_settings` is the single place that reads them, at the environment
+    # level of `pick()`. Click reading them first takes that level away: it
+    # type-casts RAILCTL_ADDRESS itself, outside the `railctl/error/v1`
+    # envelope, and it drops RAILCTL_FORMAT into the slot a typed `--format`
+    # occupies, so `--json` then reads as a conflict with a flag nobody typed.
+    for option in GLOBAL_OPTIONS:
+        assert typer_option(option).envvar is None, option.name
 
 
 def test_typer_argument_required_uses_ellipsis_and_optional_uses_none():
@@ -597,6 +598,42 @@ def test_a_bad_value_after_the_subcommand_exits_2_with_the_usage_envelope(
     captured = capsys.readouterr()
     assert captured.out == ""
     assert json.loads(captured.err)["code"] == "usage"
+
+
+@pytest.mark.parametrize("variable", ["RAILCTL_ADDRESS", "RAILCTL_VERBOSE"])
+def test_an_unusable_environment_value_still_answers_with_the_error_envelope(
+    monkeypatch, capsys, variable: str
+):
+    # Click resolving the variable itself put the failure outside the envelope:
+    # exit 2 with a rich usage box on stderr and no JSON at all, so a wrapper
+    # calling `json.loads(stderr)` on a non-zero exit got a JSONDecodeError.
+    # `build_settings` owns these variables, so the failure is a `usage` report
+    # like every other bad value.
+    import railctl.cli.main as cli_main
+
+    monkeypatch.setenv(variable, "abc")
+    monkeypatch.setattr(sys, "argv", ["railctl", "schema"])
+    with pytest.raises(SystemExit) as caught:
+        cli_main.main()
+    assert caught.value.code == 2
+    captured = capsys.readouterr()
+    assert captured.out == ""
+    payload = json.loads(captured.err)
+    assert payload["code"] == "usage"
+    assert variable in payload["message"]
+
+
+def test_the_format_variable_is_not_a_typed_flag_so_json_does_not_conflict_with_it(
+    monkeypatch, fake_station
+):
+    # `--json` is documented to win over RAILCTL_FORMAT (`config.pick`: flag
+    # beats environment). With Click reading the variable, it arrived in the
+    # same slot as a typed `--format` and this invocation was refused as a
+    # conflict with a flag that appears nowhere on the command line.
+    monkeypatch.setenv("RAILCTL_FORMAT", "human")
+    result = runner.invoke(app, ["--json", "status"])
+    assert result.exit_code == 0
+    assert json.loads(result.stdout)["schema"] == "railctl/status/v1"
 
 
 def test_double_verbose_after_the_subcommand_reaches_the_traceback_switch(fake_station):

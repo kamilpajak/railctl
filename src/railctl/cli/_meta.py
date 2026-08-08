@@ -48,10 +48,6 @@ SCHEMA_SCHEMA: Final[str] = "railctl/schema/v1"
 
 OptionType = Literal["string", "integer", "boolean", "enum"]
 
-#: Only a variable spelled this way is a real input in the flag/env/config/default chain
-#: `build_settings` resolves; see `typer_option`.
-_ENV_PREFIX: Final[str] = "RAILCTL_"
-
 
 @dataclass(frozen=True, slots=True)
 class Option:
@@ -130,8 +126,8 @@ GLOBAL_OPTIONS: Final[tuple[Option, ...]] = (
     # `--color`'s only environment input is NO_COLOR (design spec table), read
     # later at render time - `NO_COLOR`/`TERM=dumb` are a force-plain-text
     # override, not a value in the same precedence chain as the three above.
-    # Kept here as documentation; `typer_option` below never lets a
-    # non-`RAILCTL_*` `env` reach Click.
+    # Like every other `env` in this table it is published metadata and nothing
+    # more; `typer_option` below hands no environment variable to Click.
     Option(
         name="--color",
         help="auto, always, or never",
@@ -219,21 +215,26 @@ def typer_option(option: Option) -> Any:
     and would start taking the route issue #30 already tracks as a gap. Both
     positions of the flag are validated instead, in `build_settings` and
     `merge_settings`, which is what makes them fail identically.
+
+    No `envvar=` either, for the same reason one layer down. `Option.env` is
+    published metadata - the manifest names RAILCTL_TARGET, RAILCTL_ADDRESS,
+    RAILCTL_FORMAT and RAILCTL_VERBOSE from these rows - and `build_settings`
+    is the single place that READS those variables, at the environment level of
+    `pick()`, below the CLI flag. Handing the same name to Click makes Click
+    read and type-cast it first, before any railctl code runs, which costs two
+    measured behaviours: `RAILCTL_ADDRESS=abc railctl schema` exits through
+    Click's own rich usage box with no `railctl/error/v1` envelope on stderr at
+    all, and `RAILCTL_FORMAT=human railctl --json status` is refused as a
+    `--json`/`--format` conflict even though no `--format` was typed, because
+    the environment value arrived in the slot a typed flag occupies.
     """
     names: list[str] = [option.name]
     if option.short is not None:
         names.append(option.short)
-    # Only a RAILCTL_*-prefixed row is a real environment input in the same
-    # precedence chain `build_settings` resolves. `--color`'s `env="NO_COLOR"`
-    # is documentation: NO_COLOR is a later, render-time override, and letting
-    # Click resolve it here as well would hand `--color` the string "1" for
-    # anyone who sets NO_COLOR globally.
-    envvar = option.env if option.env is not None and option.env.startswith(_ENV_PREFIX) else None
     return typer.Option(
         option.default,
         *names,
         help=option.help,
-        envvar=envvar,
         count=option.repeatable,
     )
 
@@ -256,20 +257,19 @@ def _bare_default(option: Option) -> object:
 
 def global_option(name: str) -> Any:
     """A per-command copy of a `GLOBAL_OPTIONS` row: same flags and help, but a
-    bare "nothing typed here" default and no `envvar`.
+    bare "nothing typed here" default.
 
     Every registered command declares all eight of these because Click parses
     a Typer group's own options only *before* the subcommand name - without a
     per-command copy, `railctl doctor --address 3` is a usage error before
     `doctor` ever runs, even though the design's own examples put the flag
-    after the verb. The root `global_options` callback (`main.py`) still owns
-    the one real resolution of the environment and the config file; repeating
-    `envvar=` here would let Click read the same variable a second time at the
-    subcommand level, and that second read would silently win over whatever
-    `build_settings` already folded in from `config.toml`.
+    after the verb. Only the default differs from the root copy: `merge_settings`
+    layers this level over the already-resolved `Settings`, so a bare default is
+    what tells "not typed after the verb" from "typed the same value again".
+    Neither copy carries an `envvar` - see `typer_option`.
     """
     row = _GLOBAL_BY_NAME[name]
-    return typer_option(replace(row, default=_bare_default(row), env=None))
+    return typer_option(replace(row, default=_bare_default(row)))
 
 
 _BASE_EXIT_MEANINGS: Final[dict[int, str]] = {
