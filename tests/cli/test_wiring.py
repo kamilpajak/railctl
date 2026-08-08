@@ -12,6 +12,7 @@ import importlib
 import io
 import json
 import logging
+import os
 import runpy
 import sys
 
@@ -778,6 +779,35 @@ def test_bad_config_file_exits_2_naming_file_line_and_key(monkeypatch, capsys, t
     message = json.loads(capsys.readouterr().err)["message"]
     assert str(bad) in message
     assert "bogus" in message
+
+
+def test_an_unreadable_config_file_is_one_internal_envelope_not_a_traceback(
+    monkeypatch, capsys, tmp_path
+):
+    # `Path.read_text` raises PermissionError, which is neither RailctlError nor ValueError.
+    # Without a final safety net in `main()` the process ends in a Python traceback with no
+    # `code` field, and a wrapper doing `json.loads(stderr)` raises instead of branching.
+    config = tmp_path / "railctl" / "config.toml"
+    config.parent.mkdir(parents=True, exist_ok=True)
+    config.write_text('target = "auto"\n', encoding="utf-8")
+    config.chmod(0o000)
+    if os.access(config, os.R_OK):  # pragma: no cover - only when the suite runs as root
+        config.chmod(0o600)
+        pytest.skip("this user can read a mode-000 file, so it cannot be made unreadable")
+    try:
+        monkeypatch.setattr(sys, "argv", ["railctl", "--json", "status"])
+        with pytest.raises(SystemExit) as caught:
+            cli_main.main()
+    finally:
+        config.chmod(0o600)
+    assert caught.value.code == 1
+    captured = capsys.readouterr()
+    assert captured.out == ""
+    assert captured.err.count("\n") == 1
+    payload = json.loads(captured.err)
+    assert payload["schema"] == "railctl/error/v1"
+    assert payload["code"] == "internal"
+    assert payload["exit_code"] == 1
 
 
 def test_a_railctl_error_out_of_the_callback_keeps_its_own_exit_code(monkeypatch, capsys):

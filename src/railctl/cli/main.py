@@ -15,7 +15,7 @@ from typing import NoReturn, TextIO
 
 import typer
 
-from railctl.cli._errors import OutputContext, report_for, usage_report
+from railctl.cli._errors import OutputContext, _internal_report, report_for, usage_report
 from railctl.cli.commands import basics
 from railctl.cli.config import config_path, load_config
 from railctl.cli.deps import Settings, build_settings, configure_logging
@@ -102,6 +102,12 @@ def main() -> None:
     command body starts, `run()` (Task 8) already converts its failures to
     `typer.Exit`, which Typer's own dispatch handles without reaching here.
 
+    The final `except Exception` is the safety net for everything else that can go
+    wrong while resolving global options - an unreadable `config.toml` raising
+    `PermissionError`, say. It publishes the same `internal` / exit 1 envelope
+    `run()` publishes for a bug inside a command body, because a caller must never
+    have to parse a traceback to find out what happened.
+
     The process exit code is read off the same `ErrorReport` that was just written to stderr,
     never computed a second time next to it - a run that exits 2 while its own JSON envelope
     says `"exit_code": 1` is two answers to one question, and a script has no way to tell
@@ -118,6 +124,26 @@ def main() -> None:
         # failures, and `usage_report` is the same builder `run()` uses for one raised inside
         # a command body, so the two paths cannot answer differently.
         _fail(usage_report(exc))
+    except Exception as exc:
+        # The same safety net `run()` gives a command body, so the two entry paths cannot
+        # answer differently. Without it an unreadable `config.toml` leaves a Python
+        # traceback on stderr and no `code` field for a wrapper to branch on.
+        _fail(_internal_report(exc, _entry_output()))
+
+
+def _entry_output() -> OutputContext:
+    """The only field `_internal_report` reads off this is `stderr`, where it prints the
+    traceback when RAILCTL_VERBOSE is set. Colour is off for both streams and the format is
+    JSON because this runs while resolving `--color` and `--format` themselves, so there is
+    no resolved answer to honour - the same choice `_fail` documents below.
+    """
+    return OutputContext(
+        fmt="json",
+        stdout_color=False,
+        stderr_color=False,
+        stdout=sys.stdout,
+        stderr=sys.stderr,
+    )
 
 
 def _fail(report: ErrorReport) -> NoReturn:
