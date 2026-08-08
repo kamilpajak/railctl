@@ -101,6 +101,31 @@ def report_for(
     )
 
 
+def usage_report(exc: BaseException) -> ErrorReport:
+    """The exit-2 report for a malformed invocation - one definition, two callers.
+
+    `run()` uses it for a `ValueError` raised inside a command's `work()`, and `cli/main.py`
+    uses it for one raised out of the Typer callback before any command started. Building it
+    in two places is how the process exit code and the `exit_code` inside the JSON envelope
+    drift apart: `report_for` would answer 1/`internal` for a plain `ValueError`, because
+    neither `error_code` nor `exit_code_for` knows anything about it, and a script would then
+    be told this tool has a bug when the operator simply typed a bad flag.
+
+    `suggestions` is read off the exception rather than hardcoded to `[]`, so a `UsageProblem`
+    (`cli/deps.py`) reaches the envelope with the runnable argv array it was raised with. Any
+    other `ValueError` has no such attribute and still publishes an empty list.
+    """
+    return ErrorReport(
+        code=USAGE_CODE,
+        message=str(exc),
+        retryable=False,
+        exit_code=USAGE_EXIT_CODE,
+        details={},
+        suggestions=[list(argv) for argv in getattr(exc, "suggestions", None) or []],
+        hint=getattr(exc, "hint", None),
+    )
+
+
 def _verbose() -> bool:
     # The one place this package reads an environment variable directly: RAILCTL_VERBOSE is
     # the global --verbose flag's env fallback (design L2), and Task 9's Typer wiring sets it
@@ -144,15 +169,7 @@ def run(command: str, ctx: OutputContext, work: Callable[[], CommandResult]) -> 
         # in that command - so it is reported as one, where it will be noticed and fixed.
         report = _internal_report(exc, ctx)
     except ValueError as exc:
-        report = ErrorReport(
-            code=USAGE_CODE,
-            message=str(exc),
-            retryable=False,
-            exit_code=USAGE_EXIT_CODE,
-            details={},
-            suggestions=[],
-            hint=None,
-        )
+        report = usage_report(exc)
     except RailctlError as exc:
         report = report_for(exc, command=command)
     except Exception as exc:  # the safety net: anything else is a bug, never a domain answer

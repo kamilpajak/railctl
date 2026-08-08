@@ -95,6 +95,41 @@ def test_load_config_rejects_an_out_of_range_address_naming_the_bound(tmp_path: 
     assert "9999" in message
 
 
+def test_load_config_rejects_a_non_string_target_naming_the_type(tmp_path: Path):
+    path = tmp_path / "config.toml"
+    path.write_text("target = 3\n", encoding="utf-8")
+    with pytest.raises(ValueError) as caught:
+        load_config(path)
+    message = str(caught.value)
+    assert "line 1" in message
+    assert "target" in message
+
+
+def test_load_config_rejects_a_non_integer_address_naming_the_type(tmp_path: Path):
+    path = tmp_path / "config.toml"
+    path.write_text('address = "3"\n', encoding="utf-8")
+    with pytest.raises(ValueError) as caught:
+        load_config(path)
+    message = str(caught.value)
+    assert "line 1" in message
+    assert "address" in message
+    assert "integer" in message
+
+
+def test_load_config_falls_back_to_line_1_when_the_key_is_written_in_quoted_form(tmp_path: Path):
+    # tomllib reads `"bogus" = 1` as the key `bogus`, which no `^bogus\s*=` scan can
+    # find in the text. Line 1 is the honest fallback: the file and the key are still
+    # named, and no line number is invented for a line that was never located.
+    path = tmp_path / "config.toml"
+    path.write_text('target = "auto"\n"bogus" = 1\n', encoding="utf-8")
+    with pytest.raises(ValueError) as caught:
+        load_config(path)
+    message = str(caught.value)
+    assert str(path) in message
+    assert "bogus" in message
+    assert "line 1" in message
+
+
 def test_load_config_rejects_a_negative_verbose_count(tmp_path: Path):
     path = tmp_path / "config.toml"
     path.write_text("verbose = -1\n", encoding="utf-8")

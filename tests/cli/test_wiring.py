@@ -8,22 +8,27 @@ this is the one test file this task's contract allows for `deps.py`,
 
 from __future__ import annotations
 
+import importlib
 import io
 import json
 import logging
+import runpy
 import sys
 
 import pytest
+import typer
 from typer.testing import CliRunner
 
+import railctl.cli.main as cli_main
+from railctl.cli._errors import OutputContext, run
 from railctl.cli.commands.basics import STATUS_SCHEMA, VERSION_SCHEMA, build_status, build_version
 from railctl.cli.config import Config
 from railctl.cli.deps import (
     Settings,
     UsageProblem,
     build_settings,
-    confirm,
     configure_logging,
+    confirm,
     link_info,
     merge_settings,
     open_station,
@@ -40,15 +45,15 @@ def _config(**overrides) -> Config:
 
 
 def _settings(**overrides) -> Settings:
-    base = dict(
-        target="auto",
-        address=None,
-        fmt="human",
-        verbose=0,
-        color="auto",
-        assume_yes=False,
-        interactive=False,
-    )
+    base = {
+        "target": "auto",
+        "address": None,
+        "fmt": "human",
+        "verbose": 0,
+        "color": "auto",
+        "assume_yes": False,
+        "interactive": False,
+    }
     base.update(overrides)
     return Settings(**base)
 
@@ -57,16 +62,16 @@ def _settings(**overrides) -> Settings:
 
 
 def test_target_precedence_cli_over_env_over_config_over_default():
-    common = dict(
-        address=None,
-        fmt=None,
-        json_flag=False,
-        verbose=None,
-        color="auto",
-        yes=False,
-        non_interactive=True,
-        stdin=io.StringIO(),
-    )
+    common = {
+        "address": None,
+        "fmt": None,
+        "json_flag": False,
+        "verbose": None,
+        "color": "auto",
+        "yes": False,
+        "non_interactive": True,
+        "stdin": io.StringIO(),
+    }
     all_four = dict(
         target="cli-target",
         env={"RAILCTL_TARGET": "env-target"},
@@ -83,16 +88,16 @@ def test_target_precedence_cli_over_env_over_config_over_default():
 
 
 def test_address_precedence_cli_over_env_over_config_over_default():
-    common = dict(
-        target=None,
-        fmt=None,
-        json_flag=False,
-        verbose=None,
-        color="auto",
-        yes=False,
-        non_interactive=True,
-        stdin=io.StringIO(),
-    )
+    common = {
+        "target": None,
+        "fmt": None,
+        "json_flag": False,
+        "verbose": None,
+        "color": "auto",
+        "yes": False,
+        "non_interactive": True,
+        "stdin": io.StringIO(),
+    }
     all_four = dict(
         address=1,
         env={"RAILCTL_ADDRESS": "2"},
@@ -109,16 +114,16 @@ def test_address_precedence_cli_over_env_over_config_over_default():
 
 
 def test_verbose_precedence_cli_over_env_over_config_over_default():
-    common = dict(
-        target=None,
-        address=None,
-        fmt=None,
-        json_flag=False,
-        color="auto",
-        yes=False,
-        non_interactive=True,
-        stdin=io.StringIO(),
-    )
+    common = {
+        "target": None,
+        "address": None,
+        "fmt": None,
+        "json_flag": False,
+        "color": "auto",
+        "yes": False,
+        "non_interactive": True,
+        "stdin": io.StringIO(),
+    }
     all_four = dict(
         verbose=2,
         env={"RAILCTL_VERBOSE": "1"},
@@ -139,16 +144,16 @@ def test_verbose_precedence_cli_over_env_over_config_over_default():
 def test_format_precedence_cli_over_env_over_default():
     # `format` has no config-file key at all (design spec L3): only three
     # keys ever live in config.toml, and format is not one of them.
-    common = dict(
-        target=None,
-        address=None,
-        verbose=None,
-        color="auto",
-        yes=False,
-        non_interactive=True,
-        stdin=io.StringIO(),
-        config=_config(),
-    )
+    common = {
+        "target": None,
+        "address": None,
+        "verbose": None,
+        "color": "auto",
+        "yes": False,
+        "non_interactive": True,
+        "stdin": io.StringIO(),
+        "config": _config(),
+    }
     # Format is `Literal["human", "json", "ndjson"]`, not an enum class - there
     # is nothing to call it with, so the comparison is against the plain string.
     assert (
@@ -318,6 +323,27 @@ def test_interactive_is_decided_by_stdin_isatty():
 # downstream task to invent its own version.
 
 
+def test_an_unknown_format_is_rejected_naming_the_three_that_exist():
+    with pytest.raises(ValueError) as caught:
+        build_settings(
+            target=None,
+            address=None,
+            fmt="yaml",
+            json_flag=False,
+            verbose=None,
+            color="auto",
+            yes=False,
+            non_interactive=True,
+            env={},
+            config=_config(),
+            stdin=io.StringIO(),
+        )
+    message = str(caught.value)
+    assert "yaml" in message
+    for known in ("human", "json", "ndjson"):
+        assert known in message
+
+
 def test_merge_settings_overrides_only_the_typed_fields():
     base = _settings(target="auto", address=None, fmt="human", color="auto")
     merged = merge_settings(base, address=7, fmt="json")
@@ -342,6 +368,29 @@ def test_merge_settings_leaves_base_untouched_when_nothing_is_typed():
     assert merge_settings(base) == base
 
 
+def test_merge_settings_covers_every_one_of_the_eight_global_options():
+    # Tasks 10-12 hand all eight through on every invocation. A field this function
+    # silently ignores would look like the operator's flag simply having no effect.
+    base = _settings(target="auto", verbose=0, color="auto", assume_yes=False, interactive=True)
+    merged = merge_settings(
+        base,
+        target="serial:auto",
+        address=9,
+        fmt="ndjson",
+        verbose=2,
+        color="never",
+        yes=True,
+        non_interactive=True,
+    )
+    assert merged.target == "serial:auto"
+    assert merged.address == 9
+    assert merged.fmt == "ndjson"
+    assert merged.verbose == 2
+    assert merged.color == "never"
+    assert merged.assume_yes is True
+    assert merged.interactive is False
+
+
 # -- require_address ----------------------------------------------------
 
 
@@ -353,6 +402,28 @@ def test_require_address_raises_a_usage_problem_with_the_documented_suggestion()
     with pytest.raises(UsageProblem) as caught:
         require_address(_settings(address=None), argv_hint=["railctl", "drive", "40"])
     assert caught.value.suggestions == [["railctl", "drive", "40", "--address", "3"]]
+
+
+def test_a_usage_problems_argv_suggestion_survives_into_the_json_envelope():
+    # Asserting `caught.value.suggestions` at the raise site (above) passes even when
+    # `run()` drops the array on the way out, which is what made `UsageProblem` decoration
+    # rather than a contract. This asserts the array a script actually receives.
+    ctx = OutputContext(fmt="json", color=False, stdout=io.StringIO(), stderr=io.StringIO())
+
+    def work():
+        return require_address(_settings(address=None), argv_hint=["railctl", "drive", "40"])
+
+    with pytest.raises(typer.Exit) as caught:
+        run("drive", ctx, work)
+    assert caught.value.exit_code == 2
+    assert ctx.stdout.getvalue() == ""
+    payload = json.loads(ctx.stderr.getvalue())
+    assert payload["code"] == "usage"
+    assert payload["suggestions"] == [["railctl", "drive", "40", "--address", "3"]]
+    # argv arrays, never a shell string: no element may need splitting to be runnable.
+    for argv in payload["suggestions"]:
+        for word in argv:
+            assert " " not in word
 
 
 # -- confirm --------------------------------------------------------------
@@ -557,3 +628,185 @@ def test_build_status_emergency_stop_alone_leaves_track_power_on():
     assert result.result["emergency_off"] is False
     assert result.result["track_power"] is True
     assert "track power: on" in result.lines
+
+
+# -- main.py: app wiring, error paths, __main__ -------------------------------
+
+
+@pytest.fixture(autouse=True)
+def _isolated_config_dir(monkeypatch, tmp_path):
+    # Every test below either builds `app`/`main()` for real or imports a
+    # module that resolves `config_path()` at call time - none of them may
+    # ever touch a developer's real ~/.config/railctl.
+    monkeypatch.setenv("XDG_CONFIG_HOME", str(tmp_path))
+    for key in ("RAILCTL_TARGET", "RAILCTL_ADDRESS", "RAILCTL_VERBOSE", "RAILCTL_FORMAT"):
+        monkeypatch.delenv(key, raising=False)
+
+
+def _patch_station(monkeypatch, station):
+    monkeypatch.setattr(Station, "open", staticmethod(lambda *a, **k: station))
+
+
+def test_version_command_json_output_is_one_value_with_station_facts(monkeypatch):
+    _patch_station(monkeypatch, _FakeStation(raw_version=0x40, station_id=0x12))
+    runner = CliRunner()
+    result = runner.invoke(cli_main.app, ["--format", "json", "version"])
+    assert result.exit_code == 0
+    payload = json.loads(result.stdout)
+    assert payload["station"]["protocol_version"] == "4.0"
+    assert payload["station"]["command_station_id"] == 18
+    assert payload["result"]["tool_version"] == "0.1.0"
+
+
+def test_version_command_human_output_contains_the_same_facts(monkeypatch):
+    _patch_station(monkeypatch, _FakeStation(raw_version=0x40, station_id=0x12))
+    runner = CliRunner()
+    result = runner.invoke(cli_main.app, ["version"])
+    assert result.exit_code == 0
+    for fact in ("4.0", "18", "0.1.0"):
+        assert fact in result.stdout
+
+
+def test_status_command_json_carries_raw_byte_and_decoded_names(monkeypatch):
+    class _StatusStation(_FakeStation):
+        def status(self):
+            return StationStatus.from_raw(0x04)
+
+    _patch_station(monkeypatch, _StatusStation())
+    runner = CliRunner()
+    result = runner.invoke(cli_main.app, ["--format", "json", "status"])
+    assert result.exit_code == 0
+    payload = json.loads(result.stdout)
+    assert payload["result"]["raw_hex"] == "0x04"
+    assert payload["result"]["auto_start_mode"] is True
+    assert "short" not in json.dumps(payload).lower()
+
+
+def test_status_command_human_carries_raw_byte_and_decoded_names(monkeypatch):
+    class _StatusStation(_FakeStation):
+        def status(self):
+            return StationStatus.from_raw(0x04)
+
+    _patch_station(monkeypatch, _StatusStation())
+    runner = CliRunner()
+    result = runner.invoke(cli_main.app, ["status"])
+    assert result.exit_code == 0
+    assert "0x04" in result.stdout
+    assert "start mode" in result.stdout
+    assert "short" not in result.stdout.lower()
+
+
+def test_open_station_failure_exits_3_with_empty_stdout_and_json_stderr(monkeypatch):
+    def fake_open(*a, **k):
+        raise TransportError("the port vanished")
+
+    monkeypatch.setattr(Station, "open", staticmethod(fake_open))
+    runner = CliRunner()
+    # `--format json` is what makes the error a JSON object: `render_error` (Task 8)
+    # writes machine-readable errors in every mode BUT human, and human is the default.
+    result = runner.invoke(cli_main.app, ["--format", "json", "version"])
+    assert result.exit_code == 3
+    assert result.stdout == ""
+    payload = json.loads(result.stderr)
+    assert payload["exit_code"] == 3
+
+
+def test_open_station_failure_in_human_mode_writes_plain_text_and_empty_stdout(monkeypatch):
+    def fake_open(*a, **k):
+        raise TransportError("the port vanished")
+
+    monkeypatch.setattr(Station, "open", staticmethod(fake_open))
+    runner = CliRunner()
+    result = runner.invoke(cli_main.app, ["version"])
+    assert result.exit_code == 3
+    assert result.stdout == ""
+    assert "the port vanished" in result.stderr
+
+
+def test_station_is_closed_even_when_the_command_body_raises(monkeypatch):
+    class _FailingStation(_FakeStation):
+        def version(self):
+            raise TransportError("station went away mid-read")
+
+    station = _FailingStation()
+    _patch_station(monkeypatch, station)
+    runner = CliRunner()
+    result = runner.invoke(cli_main.app, ["version"])
+    assert station.closed is True
+    assert result.exit_code == 3
+
+
+def test_address_out_of_range_exits_2_before_any_command_runs(monkeypatch):
+    monkeypatch.setattr(sys, "argv", ["railctl", "--address", "20000", "status"])
+    with pytest.raises(SystemExit) as caught:
+        cli_main.main()
+    assert caught.value.code == 2
+
+
+def test_address_out_of_range_writes_json_error_and_empty_stdout(monkeypatch, capsys):
+    monkeypatch.setattr(sys, "argv", ["railctl", "--address", "20000", "status"])
+    with pytest.raises(SystemExit):
+        cli_main.main()
+    captured = capsys.readouterr()
+    assert captured.out == ""
+    # Exactly one JSON value on stderr, on one line - the same shape `run()` writes once a
+    # command has started, so a script does not need two parsers for the same failure.
+    assert captured.err.count("\n") == 1
+    payload = json.loads(captured.err)
+    assert payload["exit_code"] == 2
+    # The envelope must agree with the process status. Built with `report_for` instead of
+    # `usage_report`, a plain ValueError publishes 1/"internal" here while the process still
+    # exits 2 - a script reading the JSON would be told this tool has a bug.
+    assert payload["code"] == "usage"
+
+
+def test_bad_config_file_exits_2_naming_file_line_and_key(monkeypatch, capsys, tmp_path):
+    bad = tmp_path / "railctl" / "config.toml"
+    bad.parent.mkdir(parents=True, exist_ok=True)
+    bad.write_text("bogus = 1\n", encoding="utf-8")
+    monkeypatch.setattr(sys, "argv", ["railctl", "status"])
+    with pytest.raises(SystemExit) as caught:
+        cli_main.main()
+    assert caught.value.code == 2
+    message = json.loads(capsys.readouterr().err)["message"]
+    assert str(bad) in message
+    assert "bogus" in message
+
+
+def test_a_railctl_error_out_of_the_callback_keeps_its_own_exit_code(monkeypatch, capsys):
+    # `load_config` raises only ValueError today, but the callback is where Task 12's
+    # capabilities loading lands, and `Capabilities.load` raises RailctlError. The point
+    # pinned here is that such a failure exits with the code its class is mapped to (3 for
+    # TransportError), not the flat 2 a usage error gets.
+    def explode(_path):
+        raise TransportError("no station on this target")
+
+    monkeypatch.setattr(cli_main, "load_config", explode)
+    monkeypatch.setattr(sys, "argv", ["railctl", "status"])
+    with pytest.raises(SystemExit) as caught:
+        cli_main.main()
+    assert caught.value.code == 3
+    captured = capsys.readouterr()
+    assert captured.out == ""
+    payload = json.loads(captured.err)
+    assert payload["code"] == "transport"
+    assert payload["exit_code"] == 3
+
+
+def test_dunder_main_module_calls_main(monkeypatch):
+    calls = []
+    monkeypatch.setattr(cli_main, "main", lambda: calls.append(True))
+    runpy.run_module("railctl.__main__", run_name="__main__")
+    assert calls == [True]
+
+
+def test_importing_dunder_main_as_a_module_does_not_run_main(monkeypatch):
+    # `import railctl.__main__` happens on every `python -m railctl` before the module is
+    # re-executed under `__main__`. Without the name guard the CLI would run twice.
+    calls = []
+    monkeypatch.setattr(cli_main, "main", lambda: calls.append(True))
+    module = importlib.import_module("railctl.__main__")
+    importlib.reload(module)
+    assert calls == []
+    monkeypatch.undo()
+    importlib.reload(module)
