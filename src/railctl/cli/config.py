@@ -173,7 +173,12 @@ def pick(
     """
     if flag is not None:
         return flag
-    if env_value is not None:
+    # An exported-but-empty variable counts as unset, the same decision `render.py` makes for
+    # `NO_COLOR`: "an unset variable and an empty one must decide the same way, not set". A CI
+    # job writing `export RAILCTL_ADDRESS="$MAYBE_UNSET"` otherwise fails every invocation
+    # with "environment variable RAILCTL_ADDRESS='' is invalid", and the RAILCTL_TARGET case
+    # reports a transport failure - the tool blaming the hardware for its own empty variable.
+    if env_value:
         try:
             return cast(env_value)
         except (TypeError, ValueError) as exc:

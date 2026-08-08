@@ -279,6 +279,27 @@ def test_railctl_port_env_var_has_no_effect():
     assert with_port == without_port
 
 
+def test_an_empty_environment_variable_is_treated_as_unset_for_both_keys():
+    # `export RAILCTL_TARGET="$MAYBE_UNSET"` must not make the tool open target `''` and then
+    # report a transport failure, and `export RAILCTL_ADDRESS=""` must not exit 2. Both fall
+    # through to the config file, exactly as an unset variable does.
+    settings = build_settings(
+        target=None,
+        address=None,
+        fmt=None,
+        json_flag=False,
+        verbose=None,
+        color="auto",
+        yes=False,
+        non_interactive=True,
+        env={"RAILCTL_TARGET": "", "RAILCTL_ADDRESS": ""},
+        config=_config(target="config-target", address=7),
+        stdin=io.StringIO(),
+    )
+    assert settings.target == "config-target"
+    assert settings.address == 7
+
+
 def test_interactive_is_decided_by_stdin_isatty():
     class _Terminal(io.StringIO):
         def isatty(self) -> bool:

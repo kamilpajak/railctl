@@ -171,3 +171,11 @@ def test_pick_wraps_a_cast_failure_in_value_error():
     with pytest.raises(ValueError) as caught:
         pick(None, "not-a-number", None, 0, name="address", cast=int)
     assert "RAILCTL_ADDRESS" in str(caught.value)
+
+
+def test_pick_treats_an_exported_but_empty_environment_variable_as_unset():
+    # The same rule `render.py` applies to NO_COLOR: an unset variable and an empty one
+    # decide the same way. `export RAILCTL_ADDRESS="$MAYBE_UNSET"` in a CI job must fall
+    # through to the config file, not fail with "RAILCTL_ADDRESS='' is invalid".
+    assert pick(None, "", 3, 0, name="address", cast=int) == 3
+    assert pick(None, "", None, 0, name="address", cast=int) == 0
