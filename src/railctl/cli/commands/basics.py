@@ -22,11 +22,17 @@ from railctl.cli.deps import link_info, merged_output, open_station, station_inf
 from railctl.cli.result import CommandResult, StationInfo
 from railctl.xbus.replies import StationStatus, StationVersion
 
-VERSION_SCHEMA: Final[str] = "railctl/version/v1"
-STATUS_SCHEMA: Final[str] = "railctl/status/v1"
-
 _VERSION_META = command_meta("version")
 _STATUS_META = command_meta("status")
+
+# Read off the metadata row, never retyped. `railctl schema` publishes `meta.schema` as what
+# this command emits and the envelope carries the same string as what it emitted; written
+# twice, the day one of them is bumped to `/v2` the manifest and the output disagree and a
+# consumer keyed on `schema` silently stops matching. `_meta` cannot read these from here -
+# `basics` imports `_meta`, not the other way round - so the row is the source and this is
+# the alias that keeps the two names the rest of the code already uses.
+VERSION_SCHEMA: Final[str] = _VERSION_META.schema
+STATUS_SCHEMA: Final[str] = _STATUS_META.schema
 
 # Built once, at import time - see the same B008 note in main.py. Every registered command
 # builds this identical eight-tuple; the duplication across command modules is the accepted

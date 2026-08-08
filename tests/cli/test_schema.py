@@ -526,6 +526,18 @@ def test_no_fuzzy_abbreviation_for_status():
 
 
 @pytest.mark.parametrize("meta", COMMANDS, ids=lambda m: m.path)
+def test_the_envelope_carries_the_schema_string_the_manifest_publishes(
+    fake_station, meta: CommandMeta
+):
+    # The manifest says what a command emits; the envelope says what it emitted.
+    # Written as two literals, a bump to `/v2` in one of them leaves a consumer
+    # keyed on `schema` matching nothing, with no test saying so.
+    result = runner.invoke(app, [meta.path, "--format", "json"])
+    assert result.exit_code == 0
+    assert json.loads(result.stdout)["schema"] == meta.schema
+
+
+@pytest.mark.parametrize("meta", COMMANDS, ids=lambda m: m.path)
 def test_command_help_text_matches_the_metadata_row(meta: CommandMeta):
     # `version`/`status` carried their own hand-written `help=` before this
     # task; this is what makes the manifest and `--help` one string rather
