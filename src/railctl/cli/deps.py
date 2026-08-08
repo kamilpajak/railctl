@@ -65,8 +65,19 @@ class UsageProblem(ValueError):
     array instead of a sentence an agent would have to parse back apart.
     """
 
-    def __init__(self, message: str, *, suggestions: list[list[str]]) -> None:
+    def __init__(
+        self,
+        message: str,
+        *,
+        suggestions: list[list[str]],
+        details: dict[str, object] | None = None,
+    ) -> None:
         super().__init__(message)
+        # The same field `RailctlError` carries, for the same reason: the prose
+        # of `message` is free to change and a caller must not have to parse it
+        # to learn WHICH condition fired. `_errors.usage_report` publishes this
+        # in the envelope's `details`.
+        self.details = dict(details or {})
         # Checked, not merely annotated. The envelope hands this field straight to an agent
         # as something to run, and a bare string used to arrive there split into
         # `[["r"], ["a"], ["i"], ["l"], ...]` - valid JSON that runs nothing. Failing here

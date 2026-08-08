@@ -135,16 +135,18 @@ def usage_report(exc: BaseException) -> ErrorReport:
     neither `error_code` nor `exit_code_for` knows anything about it, and a script would then
     be told this tool has a bug when the operator simply typed a bad flag.
 
-    `suggestions` is read off the exception rather than hardcoded to `[]`, so a `UsageProblem`
-    (`cli/deps.py`) reaches the envelope with the runnable argv array it was raised with. Any
-    other `ValueError` has no such attribute and still publishes an empty list.
+    `suggestions` and `details` are read off the exception rather than hardcoded to `[]`/`{}`,
+    so a `UsageProblem` (`cli/deps.py`) reaches the envelope with the runnable argv array and
+    the structured reason it was raised with. Any other `ValueError` has neither attribute and
+    still publishes an empty list and an empty object.
     """
+    details = getattr(exc, "details", None)
     return ErrorReport(
         code=USAGE_CODE,
         message=str(exc),
         retryable=False,
         exit_code=USAGE_EXIT_CODE,
-        details={},
+        details=dict(details) if isinstance(details, dict) else {},
         suggestions=_argv_arrays(getattr(exc, "suggestions", None)),
         hint=getattr(exc, "hint", None),
     )

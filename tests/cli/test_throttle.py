@@ -296,26 +296,36 @@ def test_parse_state_accepts_and_rejects():
 
 
 def test_build_drive_direction_is_a_word_never_a_wire_value():
-    result = throttle.build_drive(3, 30, Direction.FORWARD, was=LOCO_128)
+    result = throttle.build_drive(
+        3, 30, Direction.FORWARD, was=LOCO_128, direction_source=throttle.DIRECTION_KEPT
+    )
     assert result.result["direction"] == "forward"
-    result = throttle.build_drive(3, 20, Direction.REVERSE, was=LOCO_128)
+    result = throttle.build_drive(
+        3, 20, Direction.REVERSE, was=LOCO_128, direction_source=throttle.DIRECTION_KEPT
+    )
     assert result.result["direction"] == "reverse"
 
 
 def test_build_drive_changed_true_when_speed_or_direction_differs():
     was = replace(LOCO_128, speed=10, direction=Direction.FORWARD)
-    result = throttle.build_drive(3, 30, Direction.FORWARD, was=was)
+    result = throttle.build_drive(
+        3, 30, Direction.FORWARD, was=was, direction_source=throttle.DIRECTION_KEPT
+    )
     assert result.result["changed"] is True
 
 
 def test_build_drive_changed_false_when_nothing_differs():
     was = replace(LOCO_128, speed=30, direction=Direction.FORWARD)
-    result = throttle.build_drive(3, 30, Direction.FORWARD, was=was)
+    result = throttle.build_drive(
+        3, 30, Direction.FORWARD, was=was, direction_source=throttle.DIRECTION_KEPT
+    )
     assert result.result["changed"] is False
 
 
 def test_build_drive_changed_unknown_when_prior_state_unavailable():
-    result = throttle.build_drive(3, 30, Direction.FORWARD, was=None)
+    result = throttle.build_drive(
+        3, 30, Direction.FORWARD, was=None, direction_source=throttle.DIRECTION_KEPT
+    )
     assert result.result["changed"] is None
     assert result.result["previous_speed_decoded"] is None
     assert any("could not be read" in line for line in result.lines)
@@ -327,7 +337,9 @@ def test_build_drive_changed_unknown_when_prior_step_mode_not_decoded():
     `changed` here would mean comparing a number against a layout railctl never
     decoded, which is exactly the "recorded absent by a defective instrument"
     failure this project exists to avoid."""
-    result = throttle.build_drive(3, 30, Direction.FORWARD, was=LOCO_14_STEP)
+    result = throttle.build_drive(
+        3, 30, Direction.FORWARD, was=LOCO_14_STEP, direction_source=throttle.DIRECTION_KEPT
+    )
     assert result.result["changed"] is None
     assert result.result["previous_speed_decoded"] is False
     assert any("not decoded" in line for line in result.lines)
@@ -337,9 +349,23 @@ def test_build_drive_keeps_the_three_outcomes_apart_in_the_human_text():
     # true / false / unknown must stay distinguishable in the human rendering
     # too, not only in the JSON - that is the project's whole rule, applied to
     # `changed`.
-    yes = throttle.build_drive(3, 30, Direction.FORWARD, was=replace(LOCO_128, speed=10))
-    no = throttle.build_drive(3, 30, Direction.FORWARD, was=replace(LOCO_128, speed=30))
-    unknown = throttle.build_drive(3, 30, Direction.FORWARD, was=None)
+    yes = throttle.build_drive(
+        3,
+        30,
+        Direction.FORWARD,
+        was=replace(LOCO_128, speed=10),
+        direction_source=throttle.DIRECTION_KEPT,
+    )
+    no = throttle.build_drive(
+        3,
+        30,
+        Direction.FORWARD,
+        was=replace(LOCO_128, speed=30),
+        direction_source=throttle.DIRECTION_KEPT,
+    )
+    unknown = throttle.build_drive(
+        3, 30, Direction.FORWARD, was=None, direction_source=throttle.DIRECTION_KEPT
+    )
     assert "yes changed" in yes.lines[0]
     assert "no changed" in no.lines[0]
     assert "unknown changed" in unknown.lines[0]
@@ -403,23 +429,102 @@ def test_drive_reverse_flag_overrides_current_direction(monkeypatch):
     assert station.calls[-2] == ("drive", (3, 20, Direction.REVERSE), {})
 
 
-def test_drive_falls_back_to_forward_when_there_is_no_direction_to_keep(monkeypatch):
-    # LOCO_14_STEP has direction None: replies.py decodes only the 128-step
-    # layout and leaves the rest UNKNOWN. There is no current direction to keep,
-    # so the documented fallback applies rather than a guessed one.
+def test_drive_refuses_a_positive_speed_when_the_direction_was_never_decoded(monkeypatch):
+    """The founding rule at the one place where it moves a train.
+
+    LOCO_14_STEP has direction None because replies.py decodes only the
+    128-step layout. Answering FORWARD here sent an undecoded value to the
+    track as a measured one, and a locomotive already running in reverse
+    reversed on the spot.
+
+    BENCH CHECK: put a decoder in 28-step mode, run it in reverse, and run
+    `railctl drive 40 --address 3`. Nothing may move. This test only shows that
+    no `drive` call was made.
+    """
+    station = FakeStation(loco_info=LOCO_14_STEP)
+    app = _app(station, monkeypatch, fmt="json")
+    result = runner.invoke(app, ["drive", "30"])
+    assert result.exit_code == 2
+    assert "drive" not in station.call_names
+    error = json.loads(result.stderr)
+    assert error["code"] == "usage"
+    assert error["details"] == {"reason": "direction_undecoded", "speed_steps": 14}
+    assert "14 speed steps" in error["message"]
+    assert error["suggestions"] == [
+        ["railctl", "drive", "30", "--address", "3", "--forward"],
+        ["railctl", "drive", "30", "--address", "3", "--reverse"],
+    ]
+
+
+def test_drive_refuses_a_positive_speed_when_the_locomotive_cannot_be_read(monkeypatch):
+    station = FakeStation(loco_info=None)
+    app = _app(station, monkeypatch, fmt="json")
+    result = runner.invoke(app, ["drive", "30"])
+    assert result.exit_code == 2
+    assert "drive" not in station.call_names
+    error = json.loads(result.stderr)
+    assert error["details"] == {"reason": "direction_unread", "speed_steps": None}
+
+
+@pytest.mark.parametrize("flag", ["--forward", "--reverse"])
+def test_the_direction_flags_are_what_the_refusal_asks_for_and_they_work(monkeypatch, flag):
+    """A refusal that names a flag the CLI does not accept is a dead end.
+
+    `--forward` exists only because of the refusal above: with `--reverse` the
+    only spelling, there was no runnable answer that meant forward.
+    """
     station = FakeStation(loco_info=LOCO_14_STEP)
     app = _app(station, monkeypatch)
-    result = runner.invoke(app, ["drive", "30"])
-    assert result.exit_code == 0
-    assert station.calls[-2] == ("drive", (3, 30, Direction.FORWARD), {})
+    result = runner.invoke(app, ["drive", "30", flag])
+    assert result.exit_code == 0, result.stderr
+    expected = Direction.FORWARD if flag == "--forward" else Direction.REVERSE
+    assert station.calls[-2] == ("drive", (3, 30, expected), {})
 
 
-def test_drive_falls_back_to_forward_when_the_locomotive_cannot_be_read(monkeypatch):
-    station = FakeStation(loco_info=None)
-    app = _app(station, monkeypatch)
+def test_forward_and_reverse_together_are_refused_before_a_station_is_opened(monkeypatch):
+    station = FakeStation()
+    app = _app(station, monkeypatch, fmt="json")
+    result = runner.invoke(app, ["drive", "30", "--forward", "--reverse"])
+    assert result.exit_code == 2
+    assert station.calls == []
+    error = json.loads(result.stderr)
+    assert error["details"] == {"reason": "contradictory_direction_flags"}
+
+
+def test_the_stop_says_it_chose_forward_without_reading_rather_than_claiming_it_kept_one(
+    monkeypatch,
+):
+    """`drive 0` reads nothing, so "forward" in its envelope is a choice, not a
+    measurement, and `direction_source` is what keeps the two apart."""
+    station = FakeStation()
+    app = _app(station, monkeypatch, fmt="json")
+    result = runner.invoke(app, ["drive", "0"])
+    assert result.exit_code == 0
+    payload = json.loads(result.stdout)
+    assert payload["result"]["direction"] == "forward"
+    assert payload["result"]["direction_source"] == "stop-default"
+
+    human = runner.invoke(_app(FakeStation(), monkeypatch), ["drive", "0"])
+    assert "without reading the locomotive first" in human.stdout
+
+
+def test_a_typed_direction_is_reported_as_typed_not_as_kept(monkeypatch):
+    station = FakeStation()
+    app = _app(station, monkeypatch, fmt="json")
+    result = runner.invoke(app, ["drive", "0", "--reverse"])
+    assert result.exit_code == 0
+    payload = json.loads(result.stdout)
+    assert payload["result"]["direction"] == "reverse"
+    assert payload["result"]["direction_source"] == "flag"
+
+
+def test_a_kept_direction_is_reported_as_kept(monkeypatch):
+    station = FakeStation(loco_info=replace(LOCO_128, direction=Direction.REVERSE))
+    app = _app(station, monkeypatch, fmt="json")
     result = runner.invoke(app, ["drive", "30"])
     assert result.exit_code == 0
-    assert station.calls[-2] == ("drive", (3, 30, Direction.FORWARD), {})
+    payload = json.loads(result.stdout)
+    assert payload["result"]["direction_source"] == "kept"
 
 
 def test_drive_positive_speed_refuses_on_emergency_off(monkeypatch):
@@ -691,6 +796,31 @@ def test_function_says_the_direction_is_unknown_rather_than_guessing_forward(mon
     result = runner.invoke(app, ["function", "f2", "on"])
     assert result.exit_code == 0
     assert "loco 3 is running at step 30 unknown direction" in result.stderr
+
+
+def test_function_says_the_running_state_is_unknown_for_an_undecoded_speed(monkeypatch):
+    """`speed is None` is UNKNOWN, not zero.
+
+    The guard was `not info.speed`, which is True for both, so the notice was
+    silently skipped for every 14/27/28-step decoder - the locomotive most
+    likely to be moving unnoticed, since the same reply mode is why `drive`
+    cannot read its direction either.
+    """
+    station = FakeStation(loco_info=LOCO_14_STEP)
+    app = _app(station, monkeypatch)
+    result = runner.invoke(app, ["function", "f2", "on"])
+    assert result.exit_code == 0
+    assert "loco 3 is running: unknown" in result.stderr
+    assert "14 speed steps" in result.stderr
+
+
+def test_the_unknown_running_notice_never_invents_a_step_count(monkeypatch):
+    # `speed_steps` is None when the ident byte names no mode this tool knows.
+    station = FakeStation(loco_info=replace(LOCO_14_STEP, speed_steps=None))
+    app = _app(station, monkeypatch)
+    result = runner.invoke(app, ["function", "f2", "on"])
+    assert result.exit_code == 0
+    assert "an unrecognised number of speed steps" in result.stderr
 
 
 def test_function_prints_no_running_notice_for_a_standing_locomotive(monkeypatch):

@@ -23,6 +23,7 @@ import typer
 
 from railctl.cli._errors import run
 from railctl.cli._meta import (
+    DRIVE_FORWARD_OPT,
     DRIVE_REVERSE_OPT,
     DRIVE_SPEED_ARG,
     FUNCTION_FORCE_GROUP_OPT,
@@ -35,7 +36,7 @@ from railctl.cli._meta import (
     typer_option,
 )
 from railctl.cli.config import capabilities_path
-from railctl.cli.deps import merged_output, open_station, require_address
+from railctl.cli.deps import UsageProblem, merged_output, open_station, require_address
 from railctl.cli.result import CommandResult, tri_state
 from railctl.errors import (
     FunctionGroupUnreadableError,
@@ -73,6 +74,24 @@ _DIRECTION_TEXT: Final[dict[Direction, str]] = {
 #: never performed as a measured fact.
 _UNKNOWN_DIRECTION: Final[str] = "unknown direction"
 
+#: The running reminder for a reply railctl could not decode a speed from. The
+#: guard used to be `not info.speed`, which folded UNKNOWN into "standing
+#: still" and skipped the notice for every 14/27/28-step decoder - the one
+#: locomotive most likely to be moving unnoticed, because the same reply mode
+#: is why `drive` cannot read its direction either.
+UNKNOWN_SPEED_NOTICE: Final[str] = (
+    "loco {address} is running: {state} - the station answered in {steps} speed steps and "
+    "railctl decodes a speed only from the 128-step reply; whatever it was doing, it keeps "
+    "doing after this command exits"
+)
+
+#: Where the direction on the wire came from. Published in the envelope because
+#: "forward" alone does not say whether the station reported it, the operator
+#: typed it, or the stop path chose it without reading anything.
+DIRECTION_FROM_FLAG: Final[str] = "flag"
+DIRECTION_KEPT: Final[str] = "kept"
+DIRECTION_STOP_DEFAULT: Final[str] = "stop-default"
+
 # Built once, at import time, into names the signatures below reference - a
 # call to `global_option(...)`/`typer_option(...)`/`typer_argument(...)`
 # written directly as a parameter default would trip Ruff's B008 (function call
@@ -89,6 +108,7 @@ _NON_INTERACTIVE = global_option("--non-interactive")
 
 _SPEED_ARG = typer_argument(DRIVE_SPEED_ARG)
 _REVERSE = typer_option(DRIVE_REVERSE_OPT)
+_FORWARD = typer_option(DRIVE_FORWARD_OPT)
 _FUNC_ARG = typer_argument(FUNCTION_FUNC_ARG)
 _STATE_ARG = typer_argument(FUNCTION_STATE_ARG)
 _FORCE_GROUP = typer_option(FUNCTION_FORCE_GROUP_OPT)
@@ -152,7 +172,12 @@ def parse_state(token: str | None) -> Literal["on", "off", "toggle"]:
 
 
 def build_drive(
-    address: int, speed: int, direction: Direction, *, was: LocoInfo | None
+    address: int,
+    speed: int,
+    direction: Direction,
+    *,
+    was: LocoInfo | None,
+    direction_source: str,
 ) -> CommandResult:
     if was is None:
         changed: bool | None = None
@@ -175,12 +200,18 @@ def build_drive(
         "address": address,
         "speed": speed,
         "direction": direction_text,
+        "direction_source": direction_source,
         "changed": changed,
         "previous_speed_decoded": previous_speed_decoded,
     }
     outcome.say(
         f"loco {address} set to speed {speed} {direction_text} ({tri_state(changed)} changed)"
     )
+    if direction_source == DIRECTION_STOP_DEFAULT:
+        outcome.say(
+            "the stop was sent forward without reading the locomotive first - a stop never "
+            "waits on a read - so this may have changed its stored direction"
+        )
     if previous_speed_decoded is False:
         outcome.say(
             "the locomotive's previous speed step mode is not 128-step and was not "
@@ -231,25 +262,91 @@ def _read_loco(station: Station, address: int) -> LocoInfo | None:
         return None
 
 
-def _direction_for(reverse: bool | None, was: LocoInfo | None) -> Direction:
-    """`--reverse` given means reverse. Omitted means keep whatever direction
-    the locomotive is already running (the spec's worked example: `railctl
-    drive 30 --address 3  # keeps current direction`), and forward only when
-    there is no current direction to keep - either the locomotive could not be
-    read at all, or its reply was not in the one step mode railctl decodes.
-    """
+def _steps_text(info: LocoInfo) -> str:
+    """The reply's speed-step mode as a word, never a guessed number."""
+    return "an unrecognised number of" if info.speed_steps is None else str(info.speed_steps)
+
+
+def _typed_direction(
+    reverse: bool | None, forward: bool | None, *, argv_hint: list[str]
+) -> Direction | None:
+    """The direction the OPERATOR typed, or None when they typed neither."""
+    if reverse and forward:
+        raise UsageProblem(
+            "--forward and --reverse contradict each other; pass one",
+            suggestions=[[*argv_hint, "--forward"], [*argv_hint, "--reverse"]],
+            details={"reason": "contradictory_direction_flags"},
+        )
     if reverse:
         return Direction.REVERSE
+    if forward:
+        return Direction.FORWARD
+    return None
+
+
+def _direction_for(
+    typed: Direction | None, was: LocoInfo | None, *, address: int, argv_hint: list[str]
+) -> Direction:
+    """The direction a POSITIVE speed goes out with: what the operator typed,
+    or the direction the locomotive is already running (the spec's worked
+    example, `railctl drive 30 --address 3  # keeps current direction`).
+
+    When there is neither, this REFUSES. It used to answer `Direction.FORWARD`,
+    which is this project's founding rule broken at the one place where it
+    moves a train: `replies.py` leaves `direction` None for every 14/27/28-step
+    `loco_info` reply because `speed.py` decodes only the 128-step layout, and
+    an undecoded direction was then sent to the track as a measured one. On a
+    decoder the station reports in 28 steps, `railctl drive 40` with no flag
+    sent FORWARD to a locomotive that may have been running in reverse.
+
+    Unknown is an answer. Saying so and naming the flag that settles it costs
+    the operator one word and costs a guess nothing to make.
+    """
+    if typed is not None:
+        return typed
     if was is not None and was.direction is not None:
         return was.direction
-    return Direction.FORWARD
+    if was is None:
+        message = (
+            f"loco {address}'s current direction could not be read, so there is no direction "
+            f"to keep; pass --forward or --reverse to say which way this speed runs"
+        )
+        details: dict[str, object] = {"reason": "direction_unread", "speed_steps": None}
+    else:
+        message = (
+            f"the station answered for loco {address} in {_steps_text(was)} speed steps, and "
+            f"railctl decodes a direction only from the 128-step reply, so its current "
+            f"direction is unknown; pass --forward or --reverse to say which way this speed "
+            f"runs"
+        )
+        details = {"reason": "direction_undecoded", "speed_steps": was.speed_steps}
+    raise UsageProblem(
+        message,
+        suggestions=[[*argv_hint, "--forward"], [*argv_hint, "--reverse"]],
+        details=details,
+    )
 
 
 def _warn_if_running(info: LocoInfo | None, address: int, stderr: Any) -> None:
     """The running reminder, on stderr, whenever a command leaves a locomotive
-    moving. stdout carries the result only, so this never reaches the envelope
-    in any format."""
-    if info is None or not info.speed:
+    moving - or whenever railctl cannot tell whether it did.
+
+    stdout carries the result only, so this never reaches the envelope in any
+    format. The guard was `not info.speed`, which is True for `speed is None`
+    as well as for 0 - so UNKNOWN was folded into "standing still" and the
+    notice was silently skipped for every non-128-step reply.
+    """
+    if info is None:
+        return
+    if info.speed is None:
+        print(
+            UNKNOWN_SPEED_NOTICE.format(
+                address=address, state=tri_state(None), steps=_steps_text(info)
+            ),
+            file=stderr,
+        )
+        return
+    if info.speed == 0:
         return
     direction_text = (
         _DIRECTION_TEXT[info.direction] if info.direction is not None else _UNKNOWN_DIRECTION
@@ -278,6 +375,7 @@ def register(app: typer.Typer) -> None:
         ctx: typer.Context,
         speed: int = _SPEED_ARG,
         reverse: bool | None = _REVERSE,
+        forward: bool | None = _FORWARD,
         target: str | None = _TARGET,
         address: int | None = _ADDRESS,
         format_: str | None = _FORMAT,
@@ -302,7 +400,11 @@ def register(app: typer.Typer) -> None:
         )
 
         def work() -> CommandResult:
-            resolved = require_address(settings, argv_hint=["railctl", "drive", str(speed)])
+            argv_hint = ["railctl", "drive", str(speed)]
+            resolved = require_address(settings, argv_hint=argv_hint)
+            typed = _typed_direction(
+                reverse, forward, argv_hint=[*argv_hint, "--address", str(resolved)]
+            )
             station = open_station(settings, capabilities_path=capabilities_path())
             try:
                 # THE ONE BRANCH THAT MUST NOT ACQUIRE A CONDITION: speed 0 is
@@ -321,7 +423,22 @@ def register(app: typer.Typer) -> None:
                 if speed > 0:
                     preflight(station, speed=speed)
                     was = _read_loco(station, resolved)
-                direction = _direction_for(reverse, was)
+                    direction = _direction_for(
+                        typed,
+                        was,
+                        address=resolved,
+                        argv_hint=[*argv_hint, "--address", str(resolved)],
+                    )
+                    source = DIRECTION_FROM_FLAG if typed is not None else DIRECTION_KEPT
+                elif typed is not None:
+                    direction, source = typed, DIRECTION_FROM_FLAG
+                else:
+                    # A speed telegram always carries a direction bit, so the
+                    # stop has to send one, and it reads nothing first. Forward
+                    # is what goes out - not because the locomotive was
+                    # measured running forward, but because a stop cannot wait
+                    # on a reply. `build_drive` says exactly that.
+                    direction, source = Direction.FORWARD, DIRECTION_STOP_DEFAULT
                 station.drive(resolved, speed, direction)
                 if speed:
                     print(
@@ -332,7 +449,7 @@ def register(app: typer.Typer) -> None:
                         ),
                         file=output.stderr,
                     )
-                return build_drive(resolved, speed, direction, was=was)
+                return build_drive(resolved, speed, direction, was=was, direction_source=source)
             finally:
                 station.close()
 

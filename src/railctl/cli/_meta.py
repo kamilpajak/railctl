@@ -259,13 +259,24 @@ DRIVE_SPEED_ARG = Argument(
 )
 #: Two states, not three: given means reverse, omitted means keep whatever
 #: direction the locomotive is already running. `default=None` rather than
-#: `False` because `false` would publish "forward" as the default, and forward
-#: is only what `drive` falls back to when there is no current direction to
-#: keep. Typer builds no `--no-reverse` counterpart for an explicitly named
-#: flag, and the spec's command tree names none either.
+#: `False` because `false` would publish "forward" as the default, and there is
+#: no default direction - `drive` REFUSES a positive speed when it cannot read
+#: the current one. Typer builds no `--no-reverse` counterpart for an
+#: explicitly named flag, and the spec's command tree names none either.
 DRIVE_REVERSE_OPT = Option(
     name="--reverse",
     help="run in reverse; omit to keep the locomotive's current direction",
+    type="boolean",
+    default=None,
+)
+#: The other half of `--reverse`, and the reason it exists: `drive` refuses a
+#: positive speed when the station's reported direction is unknown, and a
+#: refusal an operator cannot act on is not a refusal, it is a dead end. With
+#: `--reverse` the only way to state a direction, there was no runnable answer
+#: to "the direction could not be read" that meant forward.
+DRIVE_FORWARD_OPT = Option(
+    name="--forward",
+    help="run forward; omit to keep the locomotive's current direction",
     type="boolean",
     default=None,
 )
@@ -276,7 +287,7 @@ _DRIVE = CommandMeta(
     mutates=True,
     exit_codes=THROTTLE_EXIT_CODES,
     arguments=(DRIVE_SPEED_ARG,),
-    options=(DRIVE_REVERSE_OPT,),
+    options=(DRIVE_REVERSE_OPT, DRIVE_FORWARD_OPT),
 )
 
 FUNCTION_FUNC_ARG = Argument(
