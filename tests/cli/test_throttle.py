@@ -567,7 +567,9 @@ def test_build_power_names_the_direction_the_idle_telegram_carried():
     assert result.result["idled_direction"] == "reverse"
     assert result.result["idled_direction_preserved"] is True
     assert "loco 3 was sent speed 0 reverse" in result.lines[-1]
-    assert result.warnings == []
+    # Automatic start mode, so the scope warning fires: this command idles ONE locomotive
+    # and leaves every other one to the unproven stop-all broadcast.
+    assert [w.name for w in result.warnings] == ["unaddressed_locomotives_may_resume"]
 
 
 def test_build_power_warns_when_the_idle_telegram_may_have_changed_the_direction():
@@ -580,8 +582,52 @@ def test_build_power_warns_when_the_idle_telegram_may_have_changed_the_direction
         "on", AUTO_START_STATUS, changed=True, idled=idled, completed=[power.STEP_READ_STATUS]
     )
     assert result.result["idled_direction_preserved"] is False
-    assert [w.name for w in result.warnings] == ["direction_not_preserved"]
-    assert result.warnings[0].details == {"address": 3, "sent": "forward"}
+    assert [w.name for w in result.warnings] == [
+        "unaddressed_locomotives_may_resume",
+        "direction_not_preserved",
+    ]
+    assert result.warnings[-1].details == {"address": 3, "sent": "forward"}
+
+
+def test_power_on_says_that_only_the_addressed_locomotive_got_a_stop_of_its_own():
+    """What `power on` protects, stated rather than assumed.
+
+    Two of the three steps are belt and braces for ONE locomotive: `--address` gets its own
+    speed-0 telegram, so it is covered whether or not the `80 80` prefix did anything. Every
+    other locomotive on the layout has only that prefix - and that a stop-all clears a stored
+    speed out of the station's refresh buffer is inferred, never measured. `docs/probe-
+    results.md` records that a stored speed resumes on power-up and nothing more.
+
+    So if the inference is wrong, `power on` reports success while unaddressed locomotives
+    start moving. The warning is the only thing standing between that and an operator who
+    read the output and believed the layout was safe.
+    """
+    idled = power.Idled(
+        address=3, direction=Direction.FORWARD, direction_preserved=True, changed=False
+    )
+    result = power.build_power(
+        "on", AUTO_START_STATUS, changed=True, idled=idled, completed=[power.STEP_READ_STATUS]
+    )
+    warning = next(w for w in result.warnings if w.name == "unaddressed_locomotives_may_resume")
+    assert "inferred, not measured" in warning.message
+    assert warning.details == {"idled_address": 3}
+
+
+def test_power_off_and_manual_start_mode_do_not_carry_the_resume_warning():
+    """The warning is about locomotives resuming, so it belongs only where they can.
+
+    `power off` energises nothing, and in manual start mode the station holds everything at
+    standstill until it is driven - the measured meaning of bit 2. A warning that fired in
+    either case would be noise, and noise is how a real warning stops being read.
+    """
+    off = power.build_power(
+        "off", AUTO_START_STATUS, changed=True, idled=None, completed=[power.STEP_READ_STATUS]
+    )
+    manual = power.build_power(
+        "on", CLEAR_STATUS, changed=True, idled=None, completed=[power.STEP_READ_STATUS]
+    )
+    for result in (off, manual):
+        assert "unaddressed_locomotives_may_resume" not in [w.name for w in result.warnings]
 
 
 def test_build_power_publishes_the_two_bits_that_decide_whether_anything_can_move():
@@ -1258,7 +1304,10 @@ def test_power_on_still_idles_and_says_so_when_the_direction_cannot_be_read(monk
     assert station.calls[-2] == ("drive", (3, 0, Direction.FORWARD), {})
     payload = json.loads(result.stdout)
     assert payload["result"]["idled_direction_preserved"] is False
-    assert [w["name"] for w in payload["warnings"]] == ["direction_not_preserved"]
+    assert [w["name"] for w in payload["warnings"]] == [
+        "unaddressed_locomotives_may_resume",
+        "direction_not_preserved",
+    ]
 
 
 def test_power_on_does_not_preserve_a_direction_the_reply_never_decoded(monkeypatch):

@@ -145,6 +145,28 @@ def build_power(
         )
     else:
         outcome.say("start mode is manual: locomotives stay stopped until driven")
+    if state == "on" and status.auto_start_mode:
+        # The honest scope of what `power on` protects, and why this is a warning rather than
+        # a comment: two of this command's three steps are belt and braces for ONE locomotive,
+        # and the third is unproven for all the others.
+        #
+        # `--address` gets a speed-0 telegram of its own, so it is covered whether or not the
+        # stop-all worked. Every other locomotive on the layout is protected by the `80 80`
+        # prefix ALONE - and that the prefix clears a stored speed out of the station's refresh
+        # buffer is INFERRED, never measured. docs/probe-results.md records that a stored speed
+        # resumes on power-up; nothing has ever captured what the buffer holds after a stop-all.
+        # If that inference is wrong, every unaddressed locomotive that was moving when power
+        # was cut starts moving again here, and an operator reading a successful `power on` has
+        # no way to learn that from the output.
+        #
+        # Remove this warning only when a bench run has settled it, and cite that run.
+        outcome.warn(
+            "unaddressed_locomotives_may_resume",
+            "only the locomotive given by --address was sent a stop of its own; every other "
+            "locomotive relies on the emergency-stop broadcast sent before the track was "
+            "energised, and that this clears a stored speed is inferred, not measured",
+            idled_address=idled.address if idled is not None else None,
+        )
     _say_emergency_state(outcome, state, status)
     if idled is not None:
         direction_text = DIRECTION_TEXT[idled.direction]
