@@ -79,7 +79,13 @@ def test_config_backed_global_options_match_config_keys():
 
 def test_every_real_manifest_exit_code_is_a_known_code():
     for meta in COMMANDS:
+        # A subset check alone is satisfied by ANY subset, the empty set included:
+        # `_VERSION.exit_codes = (0,)` passed it. The two assertions under it are the
+        # cheap half of the floor; `test_the_observed_exit_code_is_one_the_command_
+        # publishes` below is the half that drives the command and looks.
         assert set(meta.exit_codes) <= KNOWN_CODES, meta.path
+        assert meta.exit_codes, meta.path
+        assert 0 in meta.exit_codes, meta.path
 
 
 def test_the_enum_rows_are_the_same_tuples_deps_validates_against():
@@ -412,6 +418,26 @@ def test_option_names_match_between_typer_and_metadata(meta: CommandMeta):
     # list, so the union with GLOBAL_OPTIONS is what makes an omission fail.
     typer_names = _long_option_names(_leaf_command(meta.path)) - {"--help"}
     assert typer_names == {o.name for o in meta.options} | {o.name for o in GLOBAL_OPTIONS}
+
+
+@pytest.mark.parametrize("meta", [c for c in COMMANDS if c.path != "schema"], ids=lambda m: m.path)
+def test_the_observed_exit_code_is_one_the_command_publishes(meta: CommandMeta):
+    """Drive the command for real and check the answer against its own row.
+
+    `z21:` is one of the three `--target` forms the same manifest advertises, and no
+    command serves it yet, so every station command reaches `UnsupportedFeatureError`
+    and exit 7 - a code both station rows omitted while publishing 3, 4, 5 and 9. A
+    subset check over hand-written literals cannot see that; only running the thing can.
+    """
+    result = runner.invoke(
+        app, [meta.path, "--target", "z21:1.2.3.4", "--format", "json", "--non-interactive"]
+    )
+    # Not 0: this target is deliberately one nothing can serve, so a success here would
+    # mean the invocation never reached the station and the check below proved nothing.
+    assert result.exit_code != 0
+    assert result.exit_code in meta.exit_codes
+    # The process status and the envelope are one answer, never two.
+    assert json.loads(result.stderr)["exit_code"] == result.exit_code
 
 
 def test_global_options_match_the_root_group():

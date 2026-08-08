@@ -155,26 +155,35 @@ _GLOBAL_BY_NAME: Final[dict[str, Option]] = {o.name: o for o in GLOBAL_OPTIONS}
 
 BASE_EXIT_CODES: Final[tuple[int, ...]] = (0, 1, 2)
 
+# Every code a command that opens a `Station` and goes through `Station.exchange()` can
+# actually leave the process with: the base 0/1/2, transport 3, protocol 4, silence 5, the
+# `61 82` refusal 6, out-of-scope 7 (a `z21:` target - one of the three `--target` forms this
+# same table advertises), and `RailctlError`'s own 9. Two of these were missing while both
+# were reachable, so `railctl status --target z21:...` exited 7 against a manifest that said
+# it could not. `help_epilog` reads the two new lines off the exception docstrings on its own.
+STATION_EXIT_CODES: Final[tuple[int, ...]] = (0, 1, 2, 3, 4, 5, 6, 7, 9)
+
 _STATUS = CommandMeta(
     path="status",
     help="Command station status: raw byte and decoded bits",
     schema="railctl/status/v1",
     mutates=False,
-    exit_codes=(0, 1, 2, 3, 4, 5, 9),
+    exit_codes=STATION_EXIT_CODES,
 )
 _VERSION = CommandMeta(
     path="version",
     help="XpressNet version and command station id",
     schema="railctl/version/v1",
     mutates=False,
-    exit_codes=(0, 1, 2, 3, 4, 5, 9),
+    exit_codes=STATION_EXIT_CODES,
 )
 _SCHEMA = CommandMeta(
     path="schema",
     help="Machine-readable manifest of the command tree",
     schema=SCHEMA_SCHEMA,
     mutates=False,
-    exit_codes=(0, 1, 2),
+    # Opens no station and reads no port, so the three base codes are the whole set.
+    exit_codes=BASE_EXIT_CODES,
     arguments=(
         Argument(
             name="path",
