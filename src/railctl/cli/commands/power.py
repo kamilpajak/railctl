@@ -37,7 +37,7 @@ from railctl.cli.deps import (
     open_station,
     read_loco,
 )
-from railctl.cli.result import PARTIAL_EXIT_CODE, CommandResult, error_code
+from railctl.cli.result import PARTIAL_EXIT_CODE, CommandResult, error_code, tri_state
 from railctl.errors import RailctlError
 from railctl.station import Station
 from railctl.xbus.replies import StationStatus
@@ -86,16 +86,28 @@ class Idled:
     address: int
     direction: Direction
     direction_preserved: bool
+    #: Whether the telegram changed anything about this locomotive. `None` when
+    #: the reply carried no decoded speed to compare against (a 14/27/28-step
+    #: reply, or no reply at all) - unknown, never "nothing happened".
+    changed: bool | None
 
 
 def build_power(
     state: str,
     status: StationStatus,
     *,
-    changed: bool,
+    changed: bool | None,
     idled: Idled | None,
     completed: Sequence[str],
 ) -> CommandResult:
+    """`changed` is tri-state, like `drive`'s.
+
+    `power on` reported `true` unconditionally, which is not what a
+    desired-state verb owes a caller. It is now computed: `true` if the power
+    state moved or the idle telegram changed the locomotive, `false` if neither
+    did, and `null` when the locomotive's previous speed was not in a layout
+    railctl decodes, so whether the idle changed it cannot be known.
+    """
     outcome = CommandResult(schema=POWER_SCHEMA, command="power")
     outcome.result = {
         "state": state,
@@ -120,8 +132,7 @@ def build_power(
         "failed_step": None,
     }
     outcome.say(
-        f"track power is {'on' if status.track_power else 'off'} "
-        f"({'changed' if changed else 'no change'})"
+        f"track power is {'on' if status.track_power else 'off'} ({tri_state(changed)} changed)"
     )
     # Start mode is bit 2, and it is named exactly once, in
     # `xbus/replies.py`, as `auto_start_mode`. This reads that field rather
@@ -233,11 +244,17 @@ def build_stop(address: int | None) -> CommandResult:
 #: which of them completed. `power on` is the one that needs it: its second
 #: step energises the track, so "the command failed" stops being the whole
 #: answer from that point on.
+STEP_READ_STATUS_BEFORE: Final[str] = "read_status_before"
 STEP_STOP_ALL: Final[str] = "stop_all"
 STEP_POWER_ON: Final[str] = "power_on"
 STEP_READ_STATUS: Final[str] = "read_status"
 STEP_IDLE_ADDRESS: Final[str] = "idle_address"
 STEP_POWER_OFF: Final[str] = "power_off"
+
+
+def _power_state(status: StationStatus) -> tuple[bool, bool, bool]:
+    """The three bits `power` is about, as one comparable value."""
+    return (status.track_power, status.emergency_stop, status.emergency_off)
 
 
 def _power_on(station: Station, address: int | None) -> CommandResult:
@@ -249,9 +266,16 @@ def _power_on(station: Station, address: int | None) -> CommandResult:
     # holds across a power cycle, so the prefix is a precaution taken on the
     # strength of the first fact, not a proven remedy. Only the last step below
     # - speed 0 to the resolved address - is proven.
+    # Read first, so `changed` can be computed rather than asserted. The
+    # mutations below still run unconditionally: unlike `power off`, this
+    # command's own first call is the stop-all, and skipping it on a track that
+    # already reads as powered would drop the precaution on exactly the runs
+    # where a stored speed is most likely to be sitting in the station.
+    before = station.status()
+    completed = [STEP_READ_STATUS_BEFORE]
     station.emergency_stop(address=None)
     station.power_on()
-    completed = [STEP_STOP_ALL, STEP_POWER_ON]
+    completed += [STEP_STOP_ALL, STEP_POWER_ON]
     # The track is live from here. Anything that fails below is PARTIAL, and
     # the caller has to be able to tell that from "nothing happened".
     try:
@@ -262,7 +286,13 @@ def _power_on(station: Station, address: int | None) -> CommandResult:
             completed.append(STEP_IDLE_ADDRESS)
     except RailctlError as exc:
         return build_power_partial(completed=completed, failure=exc)
-    return build_power("on", status, changed=True, idled=idled, completed=completed)
+    return build_power(
+        "on",
+        status,
+        changed=_changed(_power_state(before) != _power_state(status), idled),
+        idled=idled,
+        completed=completed,
+    )
 
 
 def _power_off(station: Station) -> CommandResult:
@@ -270,15 +300,31 @@ def _power_off(station: Station) -> CommandResult:
     when nothing needs doing is exactly what `changed: false` is for. `power
     on` cannot do the same, because its own first call is the stop-all."""
     before = station.status()
-    completed = [STEP_READ_STATUS]
+    completed = [STEP_READ_STATUS_BEFORE]
     was_on = before.track_power
     if was_on:
         station.power_off()
-        completed.append(STEP_POWER_OFF)
+        completed += [STEP_POWER_OFF, STEP_READ_STATUS]
         after = station.status()
     else:
         after = before
     return build_power("off", after, changed=was_on, idled=None, completed=completed)
+
+
+def _changed(power_moved: bool, idled: Idled | None) -> bool | None:
+    """`true` beats `null` beats `false`.
+
+    A command that definitely changed something says so; one that definitely
+    changed nothing says so; and one that changed the power state not at all
+    but sent a telegram to a locomotive it could not read reports UNKNOWN
+    rather than the convenient `false`.
+    """
+    idle_moved = None if idled is None else idled.changed
+    if power_moved or idle_moved is True:
+        return True
+    if idle_moved is None and idled is not None:
+        return None
+    return False
 
 
 def _idle(station: Station, address: int | None) -> Idled | None:
@@ -300,8 +346,26 @@ def _idle(station: Station, address: int | None) -> Idled | None:
     was = read_loco(station, address)
     stored = was.direction if was is not None else None
     direction = Direction.FORWARD if stored is None else stored
+    # UNKNOWN, not False, when the previous speed was never decoded: a
+    # 14/27/28-step reply carries no speed `speed.py` defines, and answering
+    # "nothing changed" there is this project's founding rule broken in the
+    # `changed` field rather than in a CV read.
+    changed = (
+        None
+        if was is None or was.speed is None
+        else (was.speed, was.direction)
+        != (
+            0,
+            direction,
+        )
+    )
     station.drive(address, 0, direction)
-    return Idled(address=address, direction=direction, direction_preserved=stored is not None)
+    return Idled(
+        address=address,
+        direction=direction,
+        direction_preserved=stored is not None,
+        changed=changed,
+    )
 
 
 def _checked_state(state: str) -> str:

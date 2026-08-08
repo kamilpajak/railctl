@@ -26,8 +26,9 @@ later plan, not with this table.
 from __future__ import annotations
 
 import difflib
-from collections.abc import Sequence
+from collections.abc import Mapping, Sequence
 from dataclasses import dataclass, replace
+from types import MappingProxyType
 from typing import Any, Final, Literal
 
 import typer
@@ -482,6 +483,14 @@ def global_option(name: str) -> Any:
     return typer_option(replace(row, default=_bare_default(row), late_default=False))
 
 
+#: Why a THROTTLE command exits 12 - the pre-flight found the station in a
+#: service-mode session, which is not the `61 1F` reply `StationBusyError`'s
+#: own docstring describes.
+_SERVICE_MODE_MEANING: Final[str] = (
+    "a service-mode programming session is active on the station; it must finish or be "
+    "cancelled before a throttle command can run"
+)
+
 _BASE_EXIT_MEANINGS: Final[dict[int, str]] = {
     0: "success",
     1: "unhandled internal error",
@@ -592,11 +601,26 @@ def _output_lines(schema: str) -> list[str]:
     return ["OUTPUT", f"  schema: {schema}", f"  formats: {', '.join(ALLOWED_FORMATS)}", ""]
 
 
-def _exit_code_lines(codes: Sequence[int]) -> list[str]:
+#: Where an exception's own docstring is not why THIS command exits with that
+#: code. `drive`/`function` exit 12 from the pre-flight finding a service-mode
+#: session on the station, and `StationBusyError`'s docstring opens "The station
+#: reported 61 1F" - a reply neither command has sent anything to provoke. The
+#: class summary is right for the error-code table, where it describes the
+#: class; it is wrong in a command's EXIT CODES section, where it has to
+#: describe that command.
+_COMMAND_EXIT_MEANINGS: Final[dict[str, dict[int, str]]] = {
+    "drive": {12: _SERVICE_MODE_MEANING},
+    "function": {12: _SERVICE_MODE_MEANING},
+}
+
+
+def _exit_code_lines(
+    codes: Sequence[int], overrides: Mapping[int, str] = MappingProxyType({})
+) -> list[str]:
     by_code = {code: klass for klass, code in errors.EXIT_CODES.items()}
     lines = ["EXIT CODES"]
     for code in codes:
-        meaning = _BASE_EXIT_MEANINGS.get(code)
+        meaning = overrides.get(code) or _BASE_EXIT_MEANINGS.get(code)
         if meaning is None:
             meaning = _first_paragraph(by_code[code].__doc__)
         lines.append(f"  {code}: {meaning}")
@@ -624,7 +648,7 @@ def help_epilog(meta: CommandMeta) -> str:
     return "\n".join(
         [
             *_output_lines(meta.schema),
-            *_exit_code_lines(meta.exit_codes),
+            *_exit_code_lines(meta.exit_codes, _COMMAND_EXIT_MEANINGS.get(meta.path, {})),
             "EXAMPLES",
             f"  {_example(meta)}",
         ]

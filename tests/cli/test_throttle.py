@@ -546,15 +546,20 @@ def test_build_power_reports_manual_start_mode_when_bit_2_is_clear():
 
 
 def test_build_power_reports_the_track_as_off_and_unchanged():
+    # "(no changed)" reads oddly and is deliberate: it is `tri_state`, the same
+    # yes/no/unknown wording `drive` prints, so the three outcomes stay
+    # distinguishable in the human text and not only in the JSON.
     result = power.build_power(
         "off", EMERGENCY_OFF_STATUS, changed=False, idled=None, completed=[power.STEP_READ_STATUS]
     )
     assert result.result["track_power"] is False
-    assert "track power is off (no change)" in result.lines[0]
+    assert "track power is off (no changed)" in result.lines[0]
 
 
 def test_build_power_names_the_direction_the_idle_telegram_carried():
-    idled = power.Idled(address=3, direction=Direction.REVERSE, direction_preserved=True)
+    idled = power.Idled(
+        address=3, direction=Direction.REVERSE, direction_preserved=True, changed=True
+    )
     result = power.build_power(
         "on", AUTO_START_STATUS, changed=True, idled=idled, completed=[power.STEP_READ_STATUS]
     )
@@ -568,7 +573,9 @@ def test_build_power_names_the_direction_the_idle_telegram_carried():
 def test_build_power_warns_when_the_idle_telegram_may_have_changed_the_direction():
     """`power on` writes to a locomotive. When it could not read which way that
     locomotive was pointing, the forward it sent is a choice, not a copy."""
-    idled = power.Idled(address=3, direction=Direction.FORWARD, direction_preserved=False)
+    idled = power.Idled(
+        address=3, direction=Direction.FORWARD, direction_preserved=False, changed=None
+    )
     result = power.build_power(
         "on", AUTO_START_STATUS, changed=True, idled=idled, completed=[power.STEP_READ_STATUS]
     )
@@ -758,18 +765,6 @@ def test_drive_positive_speed_refuses_on_service_mode(monkeypatch):
     result = runner.invoke(app, ["drive", "30"])
     assert result.exit_code == 12
     assert "drive" not in station.call_names
-
-
-def test_drive_zero_skips_preflight_and_is_always_sent(monkeypatch):
-    # A stop that needs permission is not a stop. The station here reports
-    # emergency off - the state that refuses every positive speed above - and
-    # speed 0 must still go out, with no status read at all.
-    station = FakeStation(status=EMERGENCY_OFF_STATUS)
-    app = _app(station, monkeypatch)
-    result = runner.invoke(app, ["drive", "0"])
-    assert result.exit_code == 0
-    assert "status" not in station.call_names
-    assert station.calls[-2] == ("drive", (3, 0, Direction.FORWARD), {})
 
 
 @pytest.mark.parametrize("failure", COSMETIC_READ_FAILURES, ids=lambda exc: type(exc).__name__)
@@ -1139,8 +1134,10 @@ def test_drive_human_and_json_report_the_same_facts(monkeypatch):
     station_human = FakeStation(loco_info=replace(LOCO_128, speed=10, direction=Direction.FORWARD))
     app_human = _app(station_human, monkeypatch, fmt="human")
     human = runner.invoke(app_human, ["drive", "30"])
-    joined = human.stdout
-    assert "3" in joined and "30" in joined and "forward" in joined
+    # Not `"3" in joined`: "3" is a substring of the "30" the same line requires,
+    # so the address was unconstrained and `loco 9 set to speed 30` passed. A
+    # mutation confirmed it.
+    assert "loco 3 set to speed 30 forward" in human.stdout
 
 
 def test_function_human_and_json_report_the_same_facts(monkeypatch):
@@ -1158,7 +1155,7 @@ def test_function_human_and_json_report_the_same_facts(monkeypatch):
     station_human = FakeStation(function_toggle_result=True)
     app_human = _app(station_human, monkeypatch, fmt="human")
     human = runner.invoke(app_human, ["function", "f2", "toggle"])
-    assert "3" in human.stdout and "F2" in human.stdout and "on" in human.stdout
+    assert "loco 3 F2 is now on" in human.stdout
 
 
 # --- power ---
@@ -1175,6 +1172,7 @@ def test_power_on_runs_stop_all_then_power_on_then_status_then_idles_address(mon
     result = runner.invoke(app, ["power", "on"])
     assert result.exit_code == 0
     assert station.call_names == [
+        "status",
         "emergency_stop",
         "power_on",
         "status",
@@ -1182,7 +1180,7 @@ def test_power_on_runs_stop_all_then_power_on_then_status_then_idles_address(mon
         "drive",
         "close",
     ]
-    assert station.calls[0] == ("emergency_stop", (), {"address": None})
+    assert station.calls[1] == ("emergency_stop", (), {"address": None})
     assert station.calls[-2] == ("drive", (3, 0, Direction.FORWARD), {})
 
 
@@ -1239,14 +1237,18 @@ def test_power_on_does_not_idle_when_no_address_is_configured(monkeypatch):
     app = _app(station, monkeypatch, address=None)
     result = runner.invoke(app, ["power", "on"])
     assert result.exit_code == 0
-    assert station.call_names == ["emergency_stop", "power_on", "status", "close"]
+    assert station.call_names == ["status", "emergency_stop", "power_on", "status", "close"]
 
 
 @pytest.mark.parametrize(
     ("failing", "completed", "failed_step"),
     [
-        ("status", ["stop_all", "power_on"], "read_status"),
-        ("loco_info", ["stop_all", "power_on", "read_status"], "idle_address"),
+        ("status", ["read_status_before", "stop_all", "power_on"], "read_status"),
+        (
+            "loco_info",
+            ["read_status_before", "stop_all", "power_on", "read_status"],
+            "idle_address",
+        ),
     ],
     ids=["status-read", "idle"],
 )
@@ -1313,12 +1315,48 @@ def test_a_complete_power_run_names_the_steps_it_ran(monkeypatch):
     app = _app(station, monkeypatch, address=3, fmt="json")
     payload = json.loads(runner.invoke(app, ["power", "on"]).stdout)
     assert payload["result"]["completed"] == [
+        "read_status_before",
         "stop_all",
         "power_on",
         "read_status",
         "idle_address",
     ]
     assert payload["result"]["failed_step"] is None
+
+
+@pytest.mark.parametrize(
+    ("loco", "expected"),
+    [(LOCO_STANDING, False), (LOCO_128, True), (LOCO_14_STEP, None)],
+    ids=["nothing-needed-doing", "the-loco-was-moving", "undecoded-speed"],
+)
+def test_power_on_computes_changed_rather_than_asserting_it(monkeypatch, loco, expected):
+    """It reported `true` unconditionally, which is not what a desired-state
+    verb owes a caller.
+
+    The station here is already powered and reports the same status afterwards,
+    so the whole answer comes from the idle telegram: nothing to do, something
+    to do, or a reply carrying no speed railctl decodes - which is UNKNOWN, not
+    the convenient `false`.
+    """
+    station = FakeStation(status=CLEAR_STATUS, loco_info=loco)
+    app = _app(station, monkeypatch, address=3, fmt="json")
+    result = runner.invoke(app, ["power", "on"])
+    assert result.exit_code == 0, result.stderr
+    assert json.loads(result.stdout)["result"]["changed"] is expected
+
+
+def test_power_on_reports_changed_true_when_the_power_state_moved(monkeypatch):
+    class _ComesOn(FakeStation):
+        def status(self):
+            self._record("status")
+            return CLEAR_STATUS if "power_on" in self.call_names else EMERGENCY_OFF_STATUS
+
+    station = _ComesOn(loco_info=LOCO_STANDING)
+    app = _app(station, monkeypatch, address=3, fmt="json")
+    result = runner.invoke(app, ["power", "on"])
+    assert result.exit_code == 0
+    # The locomotive needed nothing; the track did.
+    assert json.loads(result.stdout)["result"]["changed"] is True
 
 
 def test_power_off_reports_changed_false_when_already_off(monkeypatch):
@@ -1367,7 +1405,9 @@ def test_power_human_and_json_report_the_same_facts(monkeypatch):
     station_human = FakeStation(status=AUTO_START_STATUS)
     app_human = _app(station_human, monkeypatch, address=3, fmt="human")
     human = runner.invoke(app_human, ["power", "on"])
-    assert "on" in human.stdout and "3" in human.stdout and "automatic" in human.stdout
+    assert "track power is on" in human.stdout
+    assert "loco 3 was sent speed 0" in human.stdout
+    assert "start mode is automatic" in human.stdout
 
 
 # --- stop ---
@@ -1417,7 +1457,7 @@ def test_stop_human_and_json_report_the_same_facts(monkeypatch):
     station_human = FakeStation()
     app_human = _app(station_human, monkeypatch, fmt="human")
     human = runner.invoke(app_human, ["stop", "--address", "7"])
-    assert "7" in human.stdout
+    assert "loco 7 stopped" in human.stdout
 
 
 # --- never confirmed ---

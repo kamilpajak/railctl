@@ -287,6 +287,27 @@ def test_help_epilog_includes_headings_and_meanings_for_every_exit_code():
     assert "2: usage error" in epilog
 
 
+def test_a_command_explains_its_own_reason_for_an_exit_code_not_the_classs():
+    """Exit 12 out of `drive` is the pre-flight finding a service-mode session.
+
+    `StationBusyError`'s docstring opens "The station reported 61 1F: a programming
+    operation is already running" - true of the class, and not why a throttle command
+    ever exits 12: neither `drive` nor `function` sends anything that could provoke that
+    reply. The class summary stays right where it describes the class, in the error-code
+    table.
+    """
+    for path in ("drive", "function"):
+        section = help_epilog(command_meta(path))
+        assert "12: a service-mode programming session is active" in section, path
+        assert "61 1F" not in section, path
+    # Unchanged where no override applies: the class docstring is the right answer for
+    # every other code, and this must not have become a blanket rewrite.
+    assert "5: No reply arrived within the budget" in help_epilog(command_meta("drive"))
+    # And the error-code table still publishes the class's own summary.
+    rows = {row["code"]: row for row in error_codes()}
+    assert rows["station_busy"]["summary"].startswith("The station reported 61 1F")
+
+
 def test_every_place_that_lists_the_allowed_values_lists_all_of_them():
     # Four copies of one list: the tuple `deps` validates against, the manifest's `enum`,
     # the flag's help string, and the OUTPUT section of every epilog. A value added to the
@@ -603,27 +624,43 @@ def _parsed_surface(command) -> dict[str, object]:
     """
     long_names: set[str] = set()
     shorts: set[str] = set()
+    helps: dict[str, str | None] = {}
     positionals: list[tuple[str, bool]] = []
     for param in command.params:
         if param.param_type_name == "option":
             for opt in param.opts:
                 target = long_names if opt.startswith("--") else shorts
                 target.add(opt)
+                if opt.startswith("--"):
+                    helps[opt] = param.help
         else:
             positionals.append((param.name, param.required))
+    helps.pop("--help", None)
     return {
         "long": long_names - {"--help"},
         "short": shorts,
+        "help": helps,
         "positional": positionals,
     }
 
 
 def _declared_surface(meta: CommandMeta) -> dict[str, object]:
-    """The same three facts, read off the metadata row - the manifest's own claim."""
-    options = (*meta.options, *GLOBAL_OPTIONS)
+    """The same facts, read off the metadata row - the manifest's own claim.
+
+    `help` is here because the two name sets cannot tell `stop`'s `--address`
+    from the global one: both spell the flag the same way, so the union collapsed
+    to a single entry and the command-scoped row went unchecked. `stop`'s row
+    means "stop only this locomotive", the global one means "the locomotive every
+    command acts on", and swapping them would leave the parameter surface test
+    green while `stop --help` described the fallback that command exists to
+    refuse. The command's own rows are layered LAST, which is exactly the
+    precedence Click applies when a command redeclares a flag name.
+    """
+    options = (*GLOBAL_OPTIONS, *meta.options)
     return {
         "long": {o.name for o in options},
         "short": {o.short for o in options if o.short is not None},
+        "help": {o.name: o.help for o in options},
         "positional": [(a.name, a.required) for a in meta.arguments],
     }
 
@@ -759,12 +796,14 @@ def test_a_preflight_refusal_exits_with_a_code_the_command_publishes(
     assert json.loads(result.stderr)["exit_code"] == result.exit_code
 
 
-def test_a_stop_is_never_refused_by_the_state_that_refuses_every_other_speed(monkeypatch):
+def test_the_status_that_refuses_every_other_speed_does_not_refuse_the_stop(monkeypatch):
     """`drive 0` on the same station that produced exit 20 above.
 
-    The pre-flight is skipped outright for speed 0, so this exits 0. A stop that needs
-    permission is not a stop, and the refusal tests above are exactly the thing that could
-    grow a condition swallowing this one.
+    Named for what it covers, not for what one would like to be true: this drives ONE
+    station state, the emergency-off status, through the pre-flight guard. It said "never
+    refused" and could not see the hole that actually existed - a `loco_info` reply the
+    station refused aborted the same command before `station.drive` was reached, without
+    the status ever being consulted. `tests/cli/test_throttle.py` owns that half now.
     """
     monkeypatch.setattr(Station, "open", staticmethod(lambda *a, **k: _FakeStatusStation(0x02)))
     result = runner.invoke(
@@ -834,6 +873,7 @@ def test_the_root_group_carries_the_global_options_and_no_positionals():
     assert _parsed_surface(root) == {
         "long": {o.name for o in GLOBAL_OPTIONS},
         "short": {o.short for o in GLOBAL_OPTIONS if o.short is not None},
+        "help": {o.name: o.help for o in GLOBAL_OPTIONS},
         # The root takes the verb and nothing else; a positional here would swallow
         # the subcommand name.
         "positional": [],

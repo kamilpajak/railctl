@@ -143,10 +143,18 @@ def preflight(station: Station, *, speed: int | None) -> StationStatus:
     single speed value to name.
 
     The reason this exists at all is that a refused command is not the same as
-    a command that did nothing. Without the power check the speed is accepted
-    into the station's refresh buffer and the locomotive starts by itself the
-    moment power returns - which is what happened to the doctor's D3 run
-    (docs/probe-results.md).
+    a command that did nothing.
+
+    MEASURED (docs/probe-results.md, "Settled"): this station's start mode is
+    automatic - locomotives resume their last speed on power-up - and the
+    doctor's D3 run drove a locomotive on a track it believed was powered.
+
+    INFERRED, NOT MEASURED: that a speed sent while the track is dead is
+    accepted into the station's refresh buffer and replayed when power returns.
+    Nobody has captured what that buffer holds across a power cycle. The guard
+    is a precaution taken on the strength of the measured fact above, not a
+    remedy anyone has watched work; a bench run that sends a speed with the
+    track off and then restores power is what would settle it.
     """
     status = station.status()
     target = f"speed {speed}" if speed is not None else "this command"
