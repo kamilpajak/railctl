@@ -12,25 +12,32 @@ from __future__ import annotations
 
 import dataclasses
 import logging
+import os
 from collections.abc import Mapping
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Final, Literal, TextIO
 
 from railctl import errors
+from railctl.cli._errors import OutputContext
 from railctl.cli.config import VERBOSE_ENV, Config, pick
+from railctl.cli.render import want_color
 from railctl.cli.result import Format, LinkInfo, StationInfo
 from railctl.station import TIMING, Station
 from railctl.xbus.address import LOCO_ADDR_MAX, LOCO_ADDR_MIN
 
-_ALLOWED_FORMATS: Final[tuple[str, ...]] = ("human", "json", "ndjson")
+# Public, not `_ALLOWED_*`, because `cli/_meta.py` publishes these exact tuples as the
+# `enum` list of `--format` and `--color` in `railctl schema`'s manifest. Read there, never
+# retyped: a manifest that advertises a choice this module rejects is a documented lie, and
+# a fourth format added here has to appear in the manifest without a second edit.
+ALLOWED_FORMATS: Final[tuple[str, ...]] = ("human", "json", "ndjson")
 
-# Checked here, by the same mechanism and in the same function as `_ALLOWED_FORMATS`, because
+# Checked here, by the same mechanism and in the same function as `ALLOWED_FORMATS`, because
 # `Settings.color` is declared `Literal["auto", "always", "never"]` and `want_color` falls
 # through anything it does not recognise to `stream.isatty()`. Unvalidated, `--color=nevr`
 # and `--color=off` are accepted and silently mean "auto": a caller who asked for plain text
 # gets escape codes and an exit status that says nothing was wrong.
-_ALLOWED_COLORS: Final[tuple[str, ...]] = ("auto", "always", "never")
+ALLOWED_COLORS: Final[tuple[str, ...]] = ("auto", "always", "never")
 
 # A fixed, illustrative loco number - never derived from any real address - so
 # every "missing --address" message is reproducible and greppable. Design spec
@@ -78,6 +85,28 @@ class Settings:
     interactive: bool
 
 
+def check_choice(name: str, value: object, allowed: tuple[str, ...]) -> None:
+    """Reject a value outside `allowed`, with one message shared by both callers.
+
+    `build_settings` validates what the root callback resolved; `merge_settings` validates
+    what a command's own copy of the same flag carried. Written twice, the two messages drift,
+    and `railctl --format xml status` and `railctl status --format xml` start explaining the
+    same mistake in two different sentences - which is exactly the parity M6 is judged on.
+    """
+    if value not in allowed:
+        raise ValueError(f"--{name} must be one of {allowed}, got {value!r}")
+
+
+def check_format_conflict(*, json_flag: bool, fmt: str | None) -> None:
+    """`--json` is an alias for `--format=json`, so it is folded into the same CLI-flag slot
+    `pick()` sees - not a second, competing source. Passing both `--format=ndjson` and
+    `--json` is a real conflict, not "last flag wins": on a CLI that drives a running train,
+    silently picking one of two contradictory instructions is worse than refusing to guess.
+    """
+    if json_flag and fmt is not None and fmt != "json":
+        raise ValueError(f"--json conflicts with --format={fmt}; pass only one")
+
+
 def build_settings(
     *,
     target: str | None,
@@ -115,22 +144,13 @@ def build_settings(
         verbose, env.get(VERBOSE_ENV), config.verbose, 0, name="verbose", cast=int
     )
 
-    # `--json` is an alias for `--format=json`, so it is folded into the same
-    # CLI-flag slot pick() sees - not a second, competing source. Passing both
-    # `--format=ndjson` and `--json` is a real conflict, not "last flag wins":
-    # on a CLI that drives a running train, silently picking one of two
-    # contradictory instructions is worse than refusing to guess.
-    if json_flag and fmt is not None and fmt != "json":
-        raise ValueError(f"--json conflicts with --format={fmt}; pass only one")
+    check_format_conflict(json_flag=json_flag, fmt=fmt)
     format_flag = "json" if json_flag else fmt
     resolved_format = pick(
         format_flag, env.get("RAILCTL_FORMAT"), None, "human", name="format", cast=str
     )
-    if resolved_format not in _ALLOWED_FORMATS:
-        raise ValueError(f"--format must be one of {_ALLOWED_FORMATS}, got {resolved_format!r}")
-
-    if color not in _ALLOWED_COLORS:
-        raise ValueError(f"--color must be one of {_ALLOWED_COLORS}, got {color!r}")
+    check_choice("format", resolved_format, ALLOWED_FORMATS)
+    check_choice("color", color, ALLOWED_COLORS)
 
     return Settings(
         target=resolved_target,
@@ -170,18 +190,29 @@ def merge_settings(
     options (Tasks 10-12, worked around Click's group-options-before-subcommand
     parsing) can hand every one of them straight through and get `base`
     unchanged back when none of them were actually given on this invocation.
+
+    A value that IS typed here is checked by the same two functions
+    `build_settings` uses, so `railctl status --format xml` fails with the same
+    message, the same `usage` code and the same exit 2 as
+    `railctl --format xml status`. Unchecked, the command-level copy was the
+    hole: nothing else validates it, `render()` falls through an unknown format
+    to its NDJSON branch and `want_color` falls through an unknown colour to
+    `isatty()`, so a typo silently changed the output instead of refusing it.
     """
     updates: dict[str, object] = {}
     if target is not None:
         updates["target"] = target
     if address is not None:
         updates["address"] = address
+    check_format_conflict(json_flag=json_flag, fmt=fmt)
     resolved_fmt = "json" if json_flag else fmt
     if resolved_fmt is not None:
+        check_choice("format", resolved_fmt, ALLOWED_FORMATS)
         updates["fmt"] = resolved_fmt
     if verbose > 0:
         updates["verbose"] = verbose
     if color is not None:
+        check_choice("color", color, ALLOWED_COLORS)
         updates["color"] = color
     if yes:
         updates["assume_yes"] = True
@@ -190,6 +221,72 @@ def merge_settings(
     if not updates:
         return base
     return dataclasses.replace(base, **updates)
+
+
+def context_for(settings: Settings, *, stdout: TextIO, stderr: TextIO) -> OutputContext:
+    """One `--color` value, but `want_color` is asked once per stream.
+
+    The design spec requires stdout and stderr to be tested separately. Deciding once off
+    stdout and painting both is how `railctl status 2> errors.log` run from a terminal ends
+    up writing escape codes into the log; the converse - stdout redirected, stderr still on
+    the operator's terminal - strips the colour off the one line they are meant to read.
+
+    Lives here rather than in `main.py` because `merged_output` below needs it too, and a
+    command module cannot import `main` (which imports every command module in turn). Two
+    copies of a two-stream decision is how one of them quietly goes back to deciding once.
+    """
+    return OutputContext(
+        fmt=settings.fmt,
+        stdout_color=want_color(settings.color, stdout, os.environ),
+        stderr_color=want_color(settings.color, stderr, os.environ),
+        stdout=stdout,
+        stderr=stderr,
+    )
+
+
+def merged_output(
+    base: Settings,
+    streams: OutputContext,
+    *,
+    target: str | None = None,
+    address: int | None = None,
+    fmt: str | None = None,
+    json_flag: bool = False,
+    verbose: int = 0,
+    color: str | None = None,
+    yes: bool = False,
+    non_interactive: bool = False,
+) -> tuple[Settings, OutputContext]:
+    """Layer a command's own copy of the eight global options over `base`, then rebuild
+    everything the root callback derived from them.
+
+    Every registered command declares all eight global options a second time, because Click
+    parses a group's own options only BEFORE the subcommand name - without the copy,
+    `railctl status --address 3` is a usage error before `status` ever runs. This is the other
+    half of that: a flag accepted after the verb has to actually take effect, or the copy is
+    decoration. Rebuilding is unconditional rather than "only when something changed" -
+    `merge_settings` returns `base` itself when nothing was typed, so the rebuild then costs
+    one identical `OutputContext` instead of a second branch to get wrong.
+
+    Logging and `RAILCTL_VERBOSE` are re-derived for the same reason: the root callback wrote
+    them from the root's own `-v`, so without this `railctl status -vv` would resolve
+    `verbose=2` and still print neither decoded diagnostics nor the traceback the flag exists
+    to produce. Written after resolution, never before - see `main.global_options`.
+    """
+    settings = merge_settings(
+        base,
+        target=target,
+        address=address,
+        fmt=fmt,
+        json_flag=json_flag,
+        verbose=verbose,
+        color=color,
+        yes=yes,
+        non_interactive=non_interactive,
+    )
+    configure_logging(settings.verbose, streams.stderr)
+    os.environ[VERBOSE_ENV] = str(settings.verbose)
+    return settings, context_for(settings, stdout=streams.stdout, stderr=streams.stderr)
 
 
 def configure_logging(verbose: int, stderr: TextIO) -> None:

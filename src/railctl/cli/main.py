@@ -11,15 +11,16 @@ from __future__ import annotations
 import os
 import sys
 from collections.abc import Callable, Sequence
-from typing import NoReturn, TextIO
+from typing import NoReturn
 
 import typer
 
 from railctl.cli._errors import OutputContext, _internal_report, report_for, usage_report
-from railctl.cli.commands import basics
+from railctl.cli._meta import GLOBAL_OPTIONS, typer_option
+from railctl.cli.commands import basics, schema
 from railctl.cli.config import VERBOSE_ENV, config_path, load_config
-from railctl.cli.deps import Settings, build_settings, configure_logging
-from railctl.cli.render import render_error, want_color
+from railctl.cli.deps import Settings, build_settings, configure_logging, context_for
+from railctl.cli.render import render_error
 from railctl.cli.result import ErrorReport
 from railctl.errors import RailctlError
 
@@ -32,6 +33,14 @@ app = typer.Typer(
     add_completion=False,
     context_settings={"max_content_width": 100},
 )
+
+# Built once, at import time, into names the callback below references. A call to
+# `typer_option(...)` written directly as a parameter default would trip Ruff's B008
+# (function call in a default argument); its built-in allowlist covers a literal
+# `typer.Option(...)` call, not a wrapper around one. Keyed by flag name rather than
+# unpacked positionally, so reordering `GLOBAL_OPTIONS` cannot silently hand a parameter
+# the wrong row.
+_ROOT_OPTIONS = {option.name: typer_option(option) for option in GLOBAL_OPTIONS}
 
 
 class CliContext:
@@ -71,38 +80,17 @@ class CliContext:
         return context_for(self.settings, stdout=sys.stdout, stderr=sys.stderr)
 
 
-def context_for(settings: Settings, *, stdout: TextIO, stderr: TextIO) -> OutputContext:
-    """One `--color` value, but `want_color` is asked once per stream.
-
-    The design spec requires stdout and stderr to be tested separately. Deciding once off
-    stdout and painting both is how `railctl status 2> errors.log` run from a terminal ends
-    up writing escape codes into the log; the converse - stdout redirected, stderr still on
-    the operator's terminal - strips the colour off the one line they are meant to read.
-    """
-    return OutputContext(
-        fmt=settings.fmt,
-        stdout_color=want_color(settings.color, stdout, os.environ),
-        stderr_color=want_color(settings.color, stderr, os.environ),
-        stdout=stdout,
-        stderr=stderr,
-    )
-
-
 @app.callback()
 def global_options(
     ctx: typer.Context,
-    target: str = typer.Option(None, "--target", help="auto, serial:<path>, or z21:<host>:<port>"),
-    address: int = typer.Option(None, "--address", "-a", help="locomotive address, 1..9999"),
-    format_: str = typer.Option(None, "--format", help="human, json, or ndjson"),
-    json_flag: bool = typer.Option(False, "--json", help="alias for --format=json"),
-    verbose: int = typer.Option(
-        None, "-v", "--verbose", count=True, help="repeatable: -v decoded frames, -vv raw bytes"
-    ),
-    color: str = typer.Option("auto", "--color", help="auto, always, or never"),
-    yes: bool = typer.Option(False, "--yes", "-y", help="answer every confirmation yes"),
-    non_interactive: bool = typer.Option(
-        False, "--non-interactive", help="never prompt, even on a real terminal"
-    ),
+    target: str = _ROOT_OPTIONS["--target"],
+    address: int = _ROOT_OPTIONS["--address"],
+    format_: str = _ROOT_OPTIONS["--format"],
+    json_flag: bool = _ROOT_OPTIONS["--json"],
+    verbose: int = _ROOT_OPTIONS["--verbose"],
+    color: str = _ROOT_OPTIONS["--color"],
+    yes: bool = _ROOT_OPTIONS["--yes"],
+    non_interactive: bool = _ROOT_OPTIONS["--non-interactive"],
 ) -> None:
     def resolve() -> Settings:
         config = load_config(config_path())
@@ -134,6 +122,7 @@ def global_options(
 
 
 basics.register(app)
+schema.register(app)
 
 
 def main() -> None:

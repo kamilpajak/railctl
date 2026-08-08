@@ -16,13 +16,30 @@ import typer
 
 from railctl import __version__
 from railctl.cli._errors import run
+from railctl.cli._meta import command_meta, global_option, help_epilog
 from railctl.cli.config import capabilities_path
-from railctl.cli.deps import link_info, open_station, station_info
+from railctl.cli.deps import link_info, merged_output, open_station, station_info
 from railctl.cli.result import CommandResult, StationInfo
 from railctl.xbus.replies import StationStatus, StationVersion
 
 VERSION_SCHEMA: Final[str] = "railctl/version/v1"
 STATUS_SCHEMA: Final[str] = "railctl/status/v1"
+
+_VERSION_META = command_meta("version")
+_STATUS_META = command_meta("status")
+
+# Built once, at import time - see the same B008 note in main.py. Every registered command
+# builds this identical eight-tuple; the duplication across command modules is the accepted
+# shape, because Click needs a distinct parameter object per command and a shared constant
+# would hand the same one to all of them.
+_TARGET = global_option("--target")
+_ADDRESS = global_option("--address")
+_FORMAT = global_option("--format")
+_JSON = global_option("--json")
+_VERBOSE = global_option("--verbose")
+_COLOR = global_option("--color")
+_YES = global_option("--yes")
+_NON_INTERACTIVE = global_option("--non-interactive")
 
 
 def build_version(version: StationVersion, *, tool_version: str) -> CommandResult:
@@ -78,12 +95,39 @@ def register(app: typer.Typer) -> None:
     ends. `run()` never returns (`NoReturn`): it renders the result (or an
     error) and raises `typer.Exit` itself, so neither command body wraps the
     call in its own `raise typer.Exit(code=...)`.
+
+    Both also declare all eight global options a second time and hand them to
+    `merged_output` - Click parses a group's own options only BEFORE the
+    subcommand name, so without the copy `railctl status --address 3` is a
+    usage error before `status` ever runs, and the design's own examples all
+    put the flag after the verb.
     """
 
-    @app.command("version", help="Report the command station's protocol version and id.")
-    def version_command(ctx: typer.Context) -> None:
+    @app.command("version", help=_VERSION_META.help, epilog=help_epilog(_VERSION_META))
+    def version_command(
+        ctx: typer.Context,
+        target: str | None = _TARGET,
+        address: int | None = _ADDRESS,
+        format_: str | None = _FORMAT,
+        json_flag: bool = _JSON,
+        verbose: int = _VERBOSE,
+        color: str | None = _COLOR,
+        yes: bool = _YES,
+        non_interactive: bool = _NON_INTERACTIVE,
+    ) -> None:
         cli_ctx = ctx.obj
-        settings = cli_ctx.settings
+        settings, output = merged_output(
+            cli_ctx.settings,
+            cli_ctx.output,
+            target=target,
+            address=address,
+            fmt=format_,
+            json_flag=json_flag,
+            verbose=verbose,
+            color=color,
+            yes=yes,
+            non_interactive=non_interactive,
+        )
 
         def work() -> CommandResult:
             station = open_station(settings, capabilities_path=capabilities_path())
@@ -105,12 +149,33 @@ def register(app: typer.Typer) -> None:
                 station.close()
             return outcome
 
-        run("version", cli_ctx.output, work)
+        run("version", output, work)
 
-    @app.command("status", help="Report track power and the station's emergency state.")
-    def status_command(ctx: typer.Context) -> None:
+    @app.command("status", help=_STATUS_META.help, epilog=help_epilog(_STATUS_META))
+    def status_command(
+        ctx: typer.Context,
+        target: str | None = _TARGET,
+        address: int | None = _ADDRESS,
+        format_: str | None = _FORMAT,
+        json_flag: bool = _JSON,
+        verbose: int = _VERBOSE,
+        color: str | None = _COLOR,
+        yes: bool = _YES,
+        non_interactive: bool = _NON_INTERACTIVE,
+    ) -> None:
         cli_ctx = ctx.obj
-        settings = cli_ctx.settings
+        settings, output = merged_output(
+            cli_ctx.settings,
+            cli_ctx.output,
+            target=target,
+            address=address,
+            fmt=format_,
+            json_flag=json_flag,
+            verbose=verbose,
+            color=color,
+            yes=yes,
+            non_interactive=non_interactive,
+        )
 
         def work() -> CommandResult:
             station = open_station(settings, capabilities_path=capabilities_path())
@@ -122,4 +187,4 @@ def register(app: typer.Typer) -> None:
                 station.close()
             return outcome
 
-        run("status", cli_ctx.output, work)
+        run("status", output, work)
