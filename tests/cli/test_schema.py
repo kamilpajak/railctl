@@ -8,6 +8,8 @@ own later commits.
 
 from __future__ import annotations
 
+import dataclasses
+
 import pytest
 
 from railctl.cli import config
@@ -145,6 +147,47 @@ def test_manifest_for_a_single_path_matches_the_tree_entry_shape():
     single = manifest(["status"])
     tree_entry = next(c for c in tree["commands"] if c["path"] == "status")
     assert single["command"] == tree_entry
+
+
+def _as_published(row: object) -> dict[str, object]:
+    """Every field of an `Option`/`Argument`/`CommandMeta` row, in published form.
+
+    `dataclasses.asdict`, not a hand-written expectation dict: restating the nine option
+    fields here would be a third copy of the same table, and a copy written by the same
+    hand that wrote `_option_dict` agrees with it for the same reason it is wrong. The
+    only transformation the manifest applies is tuple -> list, so that is the only thing
+    this function says. A field added to a row and forgotten in `_option_dict` fails
+    here, and so does a published value that does not equal its source.
+    """
+    published = dataclasses.asdict(row)  # type: ignore[call-overload]
+    for key, value in published.items():
+        if isinstance(value, tuple):
+            published[key] = list(value)
+    if "arguments" in published:
+        published["arguments"] = [_as_published(a) for a in row.arguments]  # type: ignore[attr-defined]
+        published["options"] = [_as_published(o) for o in row.options]  # type: ignore[attr-defined]
+    return published
+
+
+@pytest.mark.parametrize("meta", COMMANDS, ids=lambda m: m.path)
+def test_every_published_command_field_equals_the_row_it_came_from(meta: CommandMeta):
+    # `path` was the only field any test looked at, so `"mutates": meta.mutates` could be
+    # replaced by `"mutates": True` for every command in the tree and the suite stayed
+    # green - and `mutates` is the field an agent reads to decide whether a command is
+    # safe to run unattended.
+    entry = next(c for c in manifest(None)["commands"] if c["path"] == meta.path)
+    assert entry == _as_published(meta)
+
+
+@pytest.mark.parametrize("option", GLOBAL_OPTIONS, ids=lambda o: o.name)
+def test_every_published_global_option_field_equals_the_row_it_came_from(option: Option):
+    entry = next(e for e in manifest(None)["global_options"] if e["name"] == option.name)
+    assert entry == _as_published(option)
+
+
+def test_the_single_command_shape_publishes_the_same_fields_as_the_tree():
+    for meta in COMMANDS:
+        assert manifest([meta.path])["command"] == _as_published(meta)
 
 
 def test_manifest_for_an_unknown_path_raises_value_error():
