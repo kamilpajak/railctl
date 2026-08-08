@@ -23,9 +23,13 @@ from railctl.cli.render import render_error, want_color
 from railctl.cli.result import ErrorReport
 from railctl.errors import RailctlError
 
+# No `no_args_is_help=True`: measured on typer 0.27.1 with this group callback and one
+# command, it puts 944 bytes of help on stdout and exits 2. The contract is error to stderr,
+# non-zero exit, empty stdout - so a bare `railctl` must produce the "Missing command" error
+# Click writes to stderr on its own, which is what leaving this off gives (0 bytes on stdout,
+# 457 on stderr, exit 2).
 app = typer.Typer(
     add_completion=False,
-    no_args_is_help=True,
     context_settings={"max_content_width": 100},
 )
 

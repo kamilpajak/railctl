@@ -885,6 +885,16 @@ def test_a_railctl_error_out_of_the_callback_keeps_its_own_exit_code(monkeypatch
     assert payload["exit_code"] == 3
 
 
+def test_a_bare_invocation_writes_the_error_to_stderr_and_leaves_stdout_empty():
+    # "stdout carries the result only" holds for the no-arguments case too: a script that
+    # ran `railctl` by mistake must not have to tell 944 bytes of help text apart from a
+    # result. `no_args_is_help=True` puts the help on stdout with exit 2, which is both.
+    result = CliRunner().invoke(cli_main.app, [])
+    assert result.exit_code == 2
+    assert result.stdout == ""
+    assert result.stderr != ""
+
+
 class _ColourStream(io.StringIO):
     """A stream that answers `isatty()` the way the test asks it to."""
 
