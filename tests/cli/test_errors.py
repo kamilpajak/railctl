@@ -362,7 +362,13 @@ def test_the_json_error_envelope_carries_the_same_hint_the_human_rendering_print
 
 
 def _ctx(fmt: str = "json") -> OutputContext:
-    return OutputContext(fmt=fmt, color=False, stdout=io.StringIO(), stderr=io.StringIO())
+    return OutputContext(
+        fmt=fmt,
+        stdout_color=False,
+        stderr_color=False,
+        stdout=io.StringIO(),
+        stderr=io.StringIO(),
+    )
 
 
 def test_run_converts_keyboard_interrupt_to_aborted_exit_9():

@@ -36,7 +36,13 @@ def test_typer_is_the_only_runtime_dependency():
 
 
 def test_the_console_script_is_declared():
-    assert PYPROJECT["project"]["scripts"] == {"railctl": "railctl.cli.main:app"}
+    """`:main`, not `:app`. `main()` is the wrapper that turns a bad config.toml or an
+    out-of-range --address into a JSON error object and exit 2; the bare Typer `app` lets
+    both out as a traceback. Pointing the installed script at `app` while `python -m
+    railctl` goes through `main()` is how the same failure gets two different behaviours
+    depending on which way the operator started the tool.
+    """
+    assert PYPROJECT["project"]["scripts"] == {"railctl": "railctl.cli.main:main"}
 
 
 def test_the_hardware_marker_is_registered_and_deselected_by_default():

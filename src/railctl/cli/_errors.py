@@ -18,6 +18,7 @@ from typing import NoReturn, TextIO
 
 import typer
 
+from railctl.cli.config import VERBOSE_ENV
 from railctl.cli.render import render, render_error
 from railctl.cli.result import (
     INTERNAL_CODE,
@@ -41,14 +42,24 @@ from railctl.errors import (
 
 @dataclass(frozen=True, slots=True)
 class OutputContext:
+    """Two colour decisions, never one.
+
+    `stdout_color` and `stderr_color` are separate fields, and neither has a default, because
+    the single `color` flag they replaced was what let `railctl status 2> errors.log` from a
+    terminal write escape codes into the log: stdout was a terminal, so stderr got painted too,
+    and `grep '^error:'` over that file then matched nothing. A default value here is what would
+    let a construction site silently go back to answering the question once.
+    """
+
     fmt: Format
-    color: bool
+    stdout_color: bool
+    stderr_color: bool
     stdout: TextIO
     stderr: TextIO
 
 
 def default_suggestions(
-    exc: BaseException, *, command: str, address: int | None = None, cv: int | None = None
+    exc: BaseException, *, command: str, cv: int | None = None
 ) -> list[list[str]]:
     """The two suggestions this project has actually needed (docs/probe-results.md R1: a POM
     read the station never answers, and a confirmation nothing can ask for on a non-interactive
@@ -101,16 +112,79 @@ def report_for(
     )
 
 
+def usage_report(exc: BaseException) -> ErrorReport:
+    """The exit-2 report for a malformed invocation - one definition, two callers.
+
+    `run()` uses it for a `ValueError` raised inside a command's `work()`, and `cli/main.py`
+    uses it for one raised out of the Typer callback before any command started. Building it
+    in two places is how the process exit code and the `exit_code` inside the JSON envelope
+    drift apart: `report_for` would answer 1/`internal` for a plain `ValueError`, because
+    neither `error_code` nor `exit_code_for` knows anything about it, and a script would then
+    be told this tool has a bug when the operator simply typed a bad flag.
+
+    `suggestions` is read off the exception rather than hardcoded to `[]`, so a `UsageProblem`
+    (`cli/deps.py`) reaches the envelope with the runnable argv array it was raised with. Any
+    other `ValueError` has no such attribute and still publishes an empty list.
+    """
+    return ErrorReport(
+        code=USAGE_CODE,
+        message=str(exc),
+        retryable=False,
+        exit_code=USAGE_EXIT_CODE,
+        details={},
+        suggestions=_argv_arrays(getattr(exc, "suggestions", None)),
+        hint=getattr(exc, "hint", None),
+    )
+
+
+def _argv_arrays(value: object) -> list[list[str]]:
+    """`value` as a list of argv arrays, or an empty list if it is not already one.
+
+    This reads an attribute off an arbitrary `ValueError`, so the shape is whatever the
+    raiser put there - `UsageProblem` annotates `list[list[str]]` but an annotation stops
+    nothing at runtime, and any `ValueError` from any library may carry a `.suggestions` of
+    its own. Without the check, `suggestions="railctl doctor"` published
+    `[["r"], ["a"], ["i"], ["l"], ...]`: valid JSON, plausible shape, and nonsense in the one
+    field whose entire purpose is to be handed to `subprocess.run` without a shell.
+
+    A malformed value yields NO suggestion rather than a mangled one. Offering nothing costs
+    a caller one idea; offering `[["r"]]` costs them a command that runs. `UsageProblem`
+    itself rejects a bad value at the raise site, so our own code fails where the mistake is
+    and never arrives here.
+    """
+    if not isinstance(value, list):
+        return []
+    if not all(
+        isinstance(argv, list) and all(isinstance(word, str) for word in argv) for argv in value
+    ):
+        return []
+    return [list(argv) for argv in value]
+
+
 def _verbose() -> bool:
     # The one place this package reads an environment variable directly: RAILCTL_VERBOSE is
-    # the global --verbose flag's env fallback (design L2), and Task 9's Typer wiring sets it
-    # before calling run() rather than every command re-deriving verbosity on its own.
-    return os.environ.get("RAILCTL_VERBOSE", "") not in ("", "0")
+    # the global --verbose flag's env fallback (design L2), and `main.global_options` writes
+    # the RESOLVED verbosity back into it before any command body runs, rather than every
+    # command re-deriving verbosity on its own. That write is what makes `railctl -vv status`
+    # print a traceback for an internal error; without it the flag and this switch disagree
+    # and the only way to get one is an environment variable no help text mentions.
+    return os.environ.get(VERBOSE_ENV, "") not in ("", "0")
 
 
-def _internal_report(exc: BaseException, ctx: OutputContext) -> ErrorReport:
-    """The safety net: this tool has a bug. Never a domain answer, never the operator's fault."""
-    if _verbose():
+def _internal_report(
+    exc: BaseException, ctx: OutputContext, *, verbose: bool | None = None
+) -> ErrorReport:
+    """The safety net: this tool has a bug. Never a domain answer, never the operator's fault.
+
+    `verbose` overrides the `RAILCTL_VERBOSE` lookup for the one caller that knows the answer
+    before the variable is written. `main.global_options` can only write it AFTER resolution
+    succeeds - it reads the same variable as the environment level for `--verbose`, so writing
+    first would make this process's own flag look like an inherited value - which leaves a
+    window where a failure DURING resolution has no traceback switch to consult. That window
+    holds exactly the failures `main()`'s safety net exists to report, an unreadable
+    `config.toml` among them, so `-vv` would go unanswered precisely when it was asked.
+    """
+    if _verbose() if verbose is None else verbose:
         traceback.print_exc(file=ctx.stderr)
     return ErrorReport(
         code=INTERNAL_CODE,
@@ -144,15 +218,7 @@ def run(command: str, ctx: OutputContext, work: Callable[[], CommandResult]) -> 
         # in that command - so it is reported as one, where it will be noticed and fixed.
         report = _internal_report(exc, ctx)
     except ValueError as exc:
-        report = ErrorReport(
-            code=USAGE_CODE,
-            message=str(exc),
-            retryable=False,
-            exit_code=USAGE_EXIT_CODE,
-            details={},
-            suggestions=[],
-            hint=None,
-        )
+        report = usage_report(exc)
     except RailctlError as exc:
         report = report_for(exc, command=command)
     except Exception as exc:  # the safety net: anything else is a bug, never a domain answer
@@ -162,8 +228,8 @@ def run(command: str, ctx: OutputContext, work: Callable[[], CommandResult]) -> 
         # command that only measured its own body would miss the argv-parsing and station-open
         # time a script comparing two invocations actually cares about.
         result.elapsed_ms = round((time.monotonic() - start) * 1000)
-        render(result, fmt=ctx.fmt, stdout=ctx.stdout, color=ctx.color)
+        render(result, fmt=ctx.fmt, stdout=ctx.stdout, color=ctx.stdout_color)
         raise typer.Exit(code=result.exit_code)
 
-    render_error(report, stderr=ctx.stderr, fmt=ctx.fmt, color=ctx.color)
+    render_error(report, stderr=ctx.stderr, fmt=ctx.fmt, color=ctx.stderr_color)
     raise typer.Exit(code=report.exit_code)
