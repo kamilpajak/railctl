@@ -197,6 +197,15 @@ BASE_EXIT_CODES: Final[tuple[int, ...]] = (0, 1, 2)
 # same table advertises), and `RailctlError`'s own 9. Two of these were missing while both
 # were reachable, so `railctl status --target z21:...` exited 7 against a manifest that said
 # it could not. `help_epilog` reads the two new lines off the exception docstrings on its own.
+#
+# This is a "can produce" set, not a "has been observed" one, and the two errors are not
+# symmetric. A published code that never arrives costs a caller one unused branch. A code that
+# arrives unpublished drops them into their unknown-exit-code arm on a failure this tool
+# documents everywhere else. So when a code is arguable, publish it. Only 6 and 7 are driven by
+# a test today (`tests/cli/test_schema.py`, the two reachability guards); 3, 4, 5 and 9 are
+# reachable by reading `Station.exchange` and its callers but are not exercised end to end. Do
+# NOT "tighten" this tuple to the observed four - that is the same defect the comment above
+# describes, running the other way.
 STATION_EXIT_CODES: Final[tuple[int, ...]] = (0, 1, 2, 3, 4, 5, 6, 7, 9)
 
 _STATUS = CommandMeta(
