@@ -10,7 +10,7 @@ from __future__ import annotations
 
 import os
 import sys
-from dataclasses import dataclass
+from collections.abc import Callable
 from typing import NoReturn, TextIO
 
 import typer
@@ -34,12 +34,41 @@ app = typer.Typer(
 )
 
 
-@dataclass(frozen=True, slots=True)
 class CliContext:
-    """Resolved once per invocation, read by every command via `ctx.obj`."""
+    """Resolved on the first read of `ctx.obj`, not while the group callback runs.
 
-    settings: Settings
-    output: OutputContext
+    Click invokes a group's callback BEFORE a subcommand's own eager `--help`, so resolving
+    `config.toml` and the eight global options inside the callback made `railctl status
+    --help` exit 2 with empty stdout on a single typo in the config file - hiding the one
+    page that would have told the operator which keys are recognised. `--help` must work
+    offline at every level.
+
+    Deferring is the fix rather than sniffing argv for `--help`: a help invocation reads no
+    setting, so it resolves nothing by construction, and there is no list of help spellings
+    to keep in step with Click's. A real command reads `ctx.obj` before it does anything
+    else, so it still fails on exactly the same error with exactly the same exit code - only
+    the exception now leaves the command function instead of the callback, and `main()`
+    catches it either way.
+    """
+
+    __slots__ = ("_resolve", "_settings")
+
+    def __init__(self, resolve: Callable[[], Settings]) -> None:
+        self._resolve = resolve
+        self._settings: Settings | None = None
+
+    @property
+    def settings(self) -> Settings:
+        if self._settings is None:
+            self._settings = self._resolve()
+        return self._settings
+
+    @property
+    def output(self) -> OutputContext:
+        # Not memoised, unlike `settings`: this is a frozen dataclass built from the cached
+        # `settings` plus the two real streams, so building it twice cannot answer
+        # differently, and there is no second resolution hiding behind the second call.
+        return context_for(self.settings, stdout=sys.stdout, stderr=sys.stderr)
 
 
 def context_for(settings: Settings, *, stdout: TextIO, stderr: TextIO) -> OutputContext:
@@ -75,25 +104,25 @@ def global_options(
         False, "--non-interactive", help="never prompt, even on a real terminal"
     ),
 ) -> None:
-    config = load_config(config_path())
-    settings = build_settings(
-        target=target,
-        address=address,
-        fmt=format_,
-        json_flag=json_flag,
-        verbose=verbose,
-        color=color,
-        yes=yes,
-        non_interactive=non_interactive,
-        env=os.environ,
-        config=config,
-        stdin=sys.stdin,
-    )
-    configure_logging(settings.verbose, sys.stderr)
-    ctx.obj = CliContext(
-        settings=settings,
-        output=context_for(settings, stdout=sys.stdout, stderr=sys.stderr),
-    )
+    def resolve() -> Settings:
+        config = load_config(config_path())
+        settings = build_settings(
+            target=target,
+            address=address,
+            fmt=format_,
+            json_flag=json_flag,
+            verbose=verbose,
+            color=color,
+            yes=yes,
+            non_interactive=non_interactive,
+            env=os.environ,
+            config=config,
+            stdin=sys.stdin,
+        )
+        configure_logging(settings.verbose, sys.stderr)
+        return settings
+
+    ctx.obj = CliContext(resolve)
 
 
 basics.register(app)
@@ -105,6 +134,9 @@ def main() -> None:
     option (an out-of-range --address, a --json/--format conflict). Once a
     command body starts, `run()` (Task 8) already converts its failures to
     `typer.Exit`, which Typer's own dispatch handles without reaching here.
+    Resolution is deferred to the first `ctx.obj` read (see `CliContext`), so
+    those two now leave the command function rather than the callback - still
+    before its `run()` starts, and still handled here.
 
     The final `except Exception` is the safety net for everything else that can go
     wrong while resolving global options - an unreadable `config.toml` raising

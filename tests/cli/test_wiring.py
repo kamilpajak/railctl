@@ -22,6 +22,7 @@ from typer.testing import CliRunner
 
 import railctl.cli.main as cli_main
 from railctl.cli._errors import OutputContext, run
+from railctl.cli.commands import basics
 from railctl.cli.commands.basics import STATUS_SCHEMA, VERSION_SCHEMA, build_status, build_version
 from railctl.cli.config import Config
 from railctl.cli.deps import (
@@ -710,6 +711,34 @@ def _patch_station(monkeypatch, station):
     monkeypatch.setattr(Station, "open", staticmethod(lambda *a, **k: station))
 
 
+class _TerminalStdin(io.StringIO):
+    def isatty(self) -> bool:
+        return True
+
+
+def _settings_a_command_read(monkeypatch, argv, *, stdin=None):
+    """Run `railctl <argv> version` through the real callback and hand back the `Settings`
+    the command actually read off `ctx.obj`.
+
+    The spy replaces `open_station` inside `commands/basics.py`, which is the first thing
+    either command does with `ctx.obj.settings` - so what it records is the resolved object
+    the command works from, not an argument on its way into `build_settings`.
+    """
+    captured: list[Settings] = []
+
+    def spy(settings, *, capabilities_path):
+        captured.append(settings)
+        return _FakeStation()
+
+    monkeypatch.setattr(basics, "open_station", spy)
+    monkeypatch.setattr(sys, "stdin", io.StringIO() if stdin is None else stdin)
+    monkeypatch.setattr(sys, "argv", ["railctl", *argv, "version"])
+    with pytest.raises(SystemExit):
+        cli_main.main()
+    assert captured, "the command never read ctx.obj.settings"
+    return captured[0]
+
+
 def test_version_command_json_output_is_one_value_with_station_facts(monkeypatch):
     _patch_station(monkeypatch, _FakeStation(raw_version=0x40, station_id=0x12))
     runner = CliRunner()
@@ -883,6 +912,41 @@ def test_a_railctl_error_out_of_the_callback_keeps_its_own_exit_code(monkeypatch
     payload = json.loads(captured.err)
     assert payload["code"] == "transport"
     assert payload["exit_code"] == 3
+
+
+def _write_config(tmp_path, body: str) -> None:
+    path = tmp_path / "railctl" / "config.toml"
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(body, encoding="utf-8")
+
+
+@pytest.mark.parametrize("argv", [["--help"], ["status", "--help"], ["version", "--help"]])
+def test_help_works_at_every_level_even_with_an_unusable_config_file(tmp_path, argv):
+    # One typo in config.toml must not hide the page that names the recognised keys.
+    # Resolving in the group callback broke this: Click runs a group callback BEFORE a
+    # subcommand's eager --help, so `railctl status --help` exited 2 with empty stdout.
+    _write_config(tmp_path, 'targt = "auto"\n')
+    result = CliRunner().invoke(cli_main.app, argv)
+    assert result.exit_code == 0
+    assert "Usage" in result.stdout
+
+
+def test_help_still_works_when_a_global_option_would_not_resolve(tmp_path):
+    # The other two ways resolution used to fail before --help was reached: an out-of-range
+    # --address and an unknown RAILCTL_FORMAT.
+    runner = CliRunner()
+    assert runner.invoke(cli_main.app, ["--address", "20000", "status", "--help"]).exit_code == 0
+    assert (
+        runner.invoke(cli_main.app, ["status", "--help"], env={"RAILCTL_FORMAT": "xml"}).exit_code
+        == 0
+    )
+
+
+def test_a_valid_config_file_is_still_resolved_for_a_real_command(monkeypatch, tmp_path):
+    # Deferring resolution must not turn it off: a command still reads the config file.
+    _write_config(tmp_path, "address = 7\n")
+    settings = _settings_a_command_read(monkeypatch, [])
+    assert settings.address == 7
 
 
 def test_a_bare_invocation_writes_the_error_to_stderr_and_leaves_stdout_empty():
