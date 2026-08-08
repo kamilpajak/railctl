@@ -51,6 +51,7 @@ from railctl.cli.result import (
     USAGE_EXIT_CODE,
     error_code,
 )
+from railctl.xbus.speed import MAX_SPEED_STEP
 
 SCHEMA_SCHEMA: Final[str] = "railctl/schema/v1"
 
@@ -208,6 +209,18 @@ BASE_EXIT_CODES: Final[tuple[int, ...]] = (0, 1, 2)
 # describes, running the other way.
 STATION_EXIT_CODES: Final[tuple[int, ...]] = (0, 1, 2, 3, 4, 5, 6, 7, 9)
 
+# `power on`/`power off` go through `Station._settle_power`, which raises
+# `TrackPowerError` (20) when the station still disagrees after the settle
+# pause. That is the one code the station set above does not already carry.
+POWER_EXIT_CODES: Final[tuple[int, ...]] = (*STATION_EXIT_CODES, 20)
+
+# `drive SPEED>0` and `function` both run `throttle.preflight`, which refuses
+# with `TrackPowerError` (20) on emergency off or emergency stop and with
+# `StationBusyError` (12) on an active service-mode session. Published because
+# they are reachable, not because a test happens to drive them - though
+# tests/cli/test_schema.py drives both, per the rule in design spec L6.
+THROTTLE_EXIT_CODES: Final[tuple[int, ...]] = (*STATION_EXIT_CODES, 12, 20)
+
 _STATUS = CommandMeta(
     path="status",
     help="Command station status: raw byte and decoded bits",
@@ -239,6 +252,97 @@ _SCHEMA = CommandMeta(
     ),
 )
 
+DRIVE_SPEED_ARG = Argument(
+    name="speed",
+    help=f"speed step 0-{MAX_SPEED_STEP}",
+    type="integer",
+)
+#: Two states, not three: given means reverse, omitted means keep whatever
+#: direction the locomotive is already running. `default=None` rather than
+#: `False` because `false` would publish "forward" as the default, and forward
+#: is only what `drive` falls back to when there is no current direction to
+#: keep. Typer builds no `--no-reverse` counterpart for an explicitly named
+#: flag, and the spec's command tree names none either.
+DRIVE_REVERSE_OPT = Option(
+    name="--reverse",
+    help="run in reverse; omit to keep the locomotive's current direction",
+    type="boolean",
+    default=None,
+)
+_DRIVE = CommandMeta(
+    path="drive",
+    help="Set speed step and direction",
+    schema="railctl/drive/v1",
+    mutates=True,
+    exit_codes=THROTTLE_EXIT_CODES,
+    arguments=(DRIVE_SPEED_ARG,),
+    options=(DRIVE_REVERSE_OPT,),
+)
+
+FUNCTION_FUNC_ARG = Argument(
+    name="function",
+    help="f0-f28, a bare number, or an alias such as 'light'",
+    type="string",
+)
+FUNCTION_STATE_ARG = Argument(
+    name="state",
+    help="on, off or toggle - defaults to on",
+    type="string",
+    required=False,
+)
+FUNCTION_FORCE_GROUP_OPT = Option(
+    name="--force-group",
+    help="skip reading the current function group; clears the rest of the group",
+    type="boolean",
+    default=False,
+)
+_FUNCTION = CommandMeta(
+    path="function",
+    help="Set F0-F28 on, off or toggle",
+    schema="railctl/function/v1",
+    mutates=True,
+    exit_codes=THROTTLE_EXIT_CODES,
+    arguments=(FUNCTION_FUNC_ARG, FUNCTION_STATE_ARG),
+    options=(FUNCTION_FORCE_GROUP_OPT,),
+)
+
+#: `enum` here is published metadata that `power_cmd` enforces in its own body.
+#: `typer_argument` attaches no Click-level check, for the same reason
+#: `typer_option` attaches no `callback=`: a `typer.BadParameter` exits through
+#: Click's own usage box and never emits the `railctl/error/v1` envelope.
+POWER_STATE_ARG = Argument(name="state", help="on or off", type="enum", enum=("on", "off"))
+_POWER = CommandMeta(
+    path="power",
+    help="Track power on or off",
+    schema="railctl/power/v1",
+    mutates=True,
+    exit_codes=POWER_EXIT_CODES,
+    arguments=(POWER_STATE_ARG,),
+)
+
+#: Command-scoped, and deliberately NOT the global `--address` /
+#: RAILCTL_ADDRESS / config default that `drive` and `function` read through
+#: `settings.address`. A user with `address = 3` configured who hits the panic
+#: button `railctl stop` means "stop everything"; inheriting the convenient
+#: default would stop only locomotive 3. `stop_cmd` therefore declares seven
+#: global options instead of eight - this row owns the `--address`/`-a` names
+#: for that command.
+STOP_ADDRESS_OPT = Option(
+    name="--address",
+    help="stop only this locomotive; omitted means every locomotive",
+    type="integer",
+    short="-a",
+    default=None,
+)
+_STOP = CommandMeta(
+    path="stop",
+    help="Emergency stop: all locomotives, or one with --address",
+    schema="railctl/stop/v1",
+    mutates=True,
+    exit_codes=STATION_EXIT_CODES,
+    options=(STOP_ADDRESS_OPT,),
+)
+
 # Tree order per the design spec's L2 ASCII listing: status, version, ...,
 # schema last. Each later task that adds a command rebuilds this literal in
 # full, its own row inserted where the nine-path tree order puts it - never
@@ -250,7 +354,15 @@ _SCHEMA = CommandMeta(
 # they matched. `tests/cli/test_schema.py` compares the Click tree against this tuple, so a
 # command registered out of order fails rather than quietly giving an agent and an operator
 # two different tables of contents.
-COMMANDS: Final[tuple[CommandMeta, ...]] = (_STATUS, _VERSION, _SCHEMA)
+COMMANDS: Final[tuple[CommandMeta, ...]] = (
+    _STATUS,
+    _VERSION,
+    _POWER,
+    _STOP,
+    _DRIVE,
+    _FUNCTION,
+    _SCHEMA,
+)
 
 _BY_PATH: Final[dict[str, CommandMeta]] = {c.path: c for c in COMMANDS}
 

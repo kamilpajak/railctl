@@ -88,6 +88,7 @@ PUBLISHED_ERROR_CODES: dict[str, str] = {
     "CvVerifyError": "cv_verify",
     "DecoderNoAckError": "decoder_no_ack",
     "DecoderNotRespondingError": "decoder_not_responding",
+    "FunctionGroupUnreadableError": "function_group_unreadable",
     "IndexPageRequiredError": "index_page_required",
     "LinkProtocolError": "link_protocol",
     "LinkTimeout": "link_timeout",

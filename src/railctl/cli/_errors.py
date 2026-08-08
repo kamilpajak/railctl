@@ -34,6 +34,7 @@ from railctl.cli.result import (
 from railctl.errors import (
     AbortedError,
     ConfirmationRequiredError,
+    FunctionGroupUnreadableError,
     PomReadUnsupportedError,
     RailctlError,
     exit_code_for,
@@ -61,11 +62,23 @@ class OutputContext:
 def default_suggestions(
     exc: BaseException, *, command: str, cv: int | None = None
 ) -> list[list[str]]:
-    """The two suggestions this project has actually needed (docs/probe-results.md R1: a POM
-    read the station never answers, and a confirmation nothing can ask for on a non-interactive
-    stdin). Everything else defaults to no suggestion rather than a guess that reads as
-    authoritative advice it is not.
+    """The three suggestions this project has actually needed (docs/probe-results.md R1: a POM
+    read the station never answers; a confirmation nothing can ask for on a non-interactive
+    stdin; and a function group whose current state could not be read). Everything else
+    defaults to no suggestion rather than a guess that reads as authoritative advice it is not.
+
+    `FunctionGroupUnreadableError` is the one whose argv this function cannot build. It is
+    keyed by exception type plus at most a `cv`, and the retry command needs the function token
+    (`"f2"`) and the state token (`"on"`) the operator actually typed - neither of which is
+    anywhere in the exception's type. So the raiser (`cli/commands/throttle.py`) assembles the
+    array and this reads it back, rather than the table guessing at a command-specific shape.
     """
+    if isinstance(exc, FunctionGroupUnreadableError):
+        # `getattr` and `_argv_arrays`, not a bare `exc.retry_argv`: the manifest builder
+        # (`_meta._class_error_row`) and the error-tree tests probe every class with
+        # `klass.__new__(klass)`, which runs no `__init__` at all, so the attribute may be
+        # absent. `report_for` reaches for `cv` with the same default for the same reason.
+        return _argv_arrays([getattr(exc, "retry_argv", None)])
     if isinstance(exc, PomReadUnsupportedError):
         suggestions = [["railctl", "doctor"]]
         if cv is not None:

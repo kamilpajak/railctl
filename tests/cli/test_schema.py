@@ -168,7 +168,15 @@ def test_typer_argument_required_uses_ellipsis_and_optional_uses_none():
 def test_manifest_with_no_path_returns_the_tree_shape():
     payload = manifest(None)
     assert payload["schema"] == "railctl/schema/v1"
-    assert [c["path"] for c in payload["commands"]] == ["status", "version", "schema"]
+    assert [c["path"] for c in payload["commands"]] == [
+        "status",
+        "version",
+        "power",
+        "stop",
+        "drive",
+        "function",
+        "schema",
+    ]
     assert {o["name"] for o in payload["global_options"]} == {o.name for o in GLOBAL_OPTIONS}
 
 
@@ -315,7 +323,7 @@ def test_error_codes_list_exactly_the_exception_tree_plus_the_two_reserved_codes
     published = {row["code"] for row in error_codes()}
     assert published == set(PUBLISHED_ERROR_CODES.values()) | RESERVED_CODES
     assert len(error_codes()) == len(published)  # no duplicate rows
-    assert len(published) == 33
+    assert len(published) == 34
 
 
 def test_error_code_rows_read_their_facts_off_the_class():
@@ -379,7 +387,15 @@ def test_build_schema_returns_the_tree_when_no_path_is_given():
     result = build_schema(None)
     assert result.schema == "railctl/schema/v1"
     assert result.command == "schema"
-    assert [c["path"] for c in result.result["commands"]] == ["status", "version", "schema"]
+    assert [c["path"] for c in result.result["commands"]] == [
+        "status",
+        "version",
+        "power",
+        "stop",
+        "drive",
+        "function",
+        "schema",
+    ]
 
 
 def test_build_schema_raises_value_error_for_an_unknown_path():
@@ -415,7 +431,8 @@ from railctl.cli._meta import CommandMeta  # noqa: E402
 from railctl.cli.main import app  # noqa: E402
 from railctl.errors import UnsupportedCommandError  # noqa: E402
 from railctl.station import Station  # noqa: E402
-from railctl.xbus.replies import StationStatus, StationVersion  # noqa: E402
+from railctl.xbus.replies import LocoInfo, StationStatus, StationVersion  # noqa: E402
+from railctl.xbus.speed import Direction  # noqa: E402
 
 runner = CliRunner()
 
@@ -436,22 +453,68 @@ def _isolated_environment(monkeypatch, tmp_path):
         monkeypatch.delenv(key)
 
 
+_STANDING_LOCO = LocoInfo(
+    raw_ident=0b10000100,
+    raw_speed=0x80,
+    speed_steps=128,
+    in_use_by_other=False,
+    function_bits=(False,) * 13,
+    speed=0,
+    direction=Direction.FORWARD,
+    emergency_stopped=False,
+)
+
+
 class _FakeStatusStation:
-    """Bare stand-in for the `status`-based invocation-order tests below.
-    `status` is the pinned example (not `schema`), because it is the one
+    """Bare stand-in for the invocation-order tests below.
+
+    `status` is the pinned example (not `schema`), because it was the first
     command in this file that actually opens a `Station` - proving the
     --format-position parity on a command that never touches a port would not
     catch a per-command global-option block that forgot to route through the
     real `open_station`/`run()` plumbing.
+
+    The mutating half answers every throttle call and records nothing: what
+    this file checks is the CLI contract - exit codes, the envelope, the
+    parameter surface - and `tests/cli/test_throttle.py` owns the question of
+    which facade method each command calls, in what order, with what arguments.
+    `raw_status` is settable so a test can drive a pre-flight refusal without a
+    second fake class; it defaults to a healthy powered track.
     """
 
     identity = "serial:7010A0001194:3"
 
+    def __init__(self, raw_status: int = 0x00) -> None:
+        self.raw_status = raw_status
+
     def status(self) -> StationStatus:
-        return StationStatus.from_raw(0x00)
+        return StationStatus.from_raw(self.raw_status)
 
     def version(self) -> StationVersion:
         return StationVersion(raw=0x40, station_id=0x12)
+
+    def power_on(self) -> None:
+        pass
+
+    def power_off(self) -> None:
+        pass
+
+    def emergency_stop(self, address: int | None = None) -> None:
+        pass
+
+    def drive(self, address: int, speed: int, direction: Direction) -> None:
+        pass
+
+    def loco_info(self, address: int) -> LocoInfo:
+        return _STANDING_LOCO
+
+    def function_set(
+        self, address: int, function: int, on: bool, *, force_group: bool = False
+    ) -> None:
+        pass
+
+    def function_toggle(self, address: int, function: int, *, force_group: bool = False) -> bool:
+        return True
 
     def close(self) -> None:
         pass
@@ -460,6 +523,22 @@ class _FakeStatusStation:
 @pytest.fixture
 def fake_station(monkeypatch):
     monkeypatch.setattr(Station, "open", staticmethod(lambda *a, **k: _FakeStatusStation()))
+
+
+# The required positional arguments each command needs before it can run at
+# all, plus the `--address` the two throttle commands refuse to guess. Written
+# once: three tests below drive every row of COMMANDS, and a fourth drives the
+# two with a pre-flight. `drive` uses a POSITIVE speed on purpose - speed 0
+# skips the pre-flight, so a 0 here would make the refusal drives prove nothing.
+_EXTRA_ARGV: dict[str, list[str]] = {
+    "power": ["off"],
+    "drive": ["30", "--address", "3"],
+    "function": ["f2", "on", "--address", "3"],
+}
+
+
+def _invocation(meta: CommandMeta) -> list[str]:
+    return [meta.path, *_EXTRA_ARGV.get(meta.path, [])]
 
 
 def registered_paths(app: typer.Typer) -> set[str]:
@@ -579,7 +658,8 @@ def test_the_observed_exit_code_is_one_the_command_publishes(meta: CommandMeta):
     subset check over hand-written literals cannot see that; only running the thing can.
     """
     result = runner.invoke(
-        app, [meta.path, "--target", "z21:1.2.3.4", "--format", "json", "--non-interactive"]
+        app,
+        [*_invocation(meta), "--target", "z21:1.2.3.4", "--format", "json", "--non-interactive"],
     )
     # Not 0: this target is deliberately one nothing can serve, so a success here would
     # mean the invocation never reached the station and the check below proved nothing.
@@ -618,10 +698,59 @@ def test_a_station_that_refuses_exits_with_a_code_the_command_publishes(meta, mo
             pass
 
     monkeypatch.setattr(Station, "open", staticmethod(lambda *a, **k: Refusing()))
-    result = runner.invoke(app, [meta.path, "--format", "json", "--non-interactive"])
+    result = runner.invoke(app, [*_invocation(meta), "--format", "json", "--non-interactive"])
     assert result.exit_code == 6, result.stderr
     assert result.exit_code in meta.exit_codes
     assert json.loads(result.stderr)["code"] == "unsupported_command"
+
+
+PREFLIGHT_COMMANDS = [c for c in COMMANDS if c.path in ("drive", "function")]
+
+
+@pytest.mark.parametrize("meta", PREFLIGHT_COMMANDS, ids=lambda m: m.path)
+@pytest.mark.parametrize(
+    ("raw_status", "expected_exit"),
+    [(0x02, 20), (0x01, 20), (0x08, 12)],
+    ids=["emergency-off", "emergency-stop", "service-mode"],
+)
+def test_a_preflight_refusal_exits_with_a_code_the_command_publishes(
+    monkeypatch, meta: CommandMeta, raw_status: int, expected_exit: int
+):
+    """The third and fourth reachable codes, and the reason two drives are not enough.
+
+    `drive SPEED>0` and `function` refuse on emergency off (20), emergency stop (20) and an
+    active service-mode session (12). None of those can arrive through the `z21:` target or
+    through a station that refuses everything, so without this drive both codes could be
+    dropped from `THROTTLE_EXIT_CODES` with the whole suite still green - the same silent
+    omission that once shipped for 6 and 7.
+
+    Bits 0 and 1 are the MEASURED order on this hardware, the reverse of the Lenz spec
+    (docs/probe-results.md), so 0x01 is emergency stop and 0x02 is emergency off. This is a
+    check on our own refusal paths and their exit codes; it is not a measurement of the
+    station, and no locomotive was watched not moving.
+    """
+    monkeypatch.setattr(
+        Station, "open", staticmethod(lambda *a, **k: _FakeStatusStation(raw_status))
+    )
+    result = runner.invoke(app, [*_invocation(meta), "--format", "json", "--non-interactive"])
+    assert result.exit_code == expected_exit, result.stderr
+    assert result.exit_code in meta.exit_codes
+    assert json.loads(result.stderr)["exit_code"] == result.exit_code
+
+
+def test_a_stop_is_never_refused_by_the_state_that_refuses_every_other_speed(monkeypatch):
+    """`drive 0` on the same station that produced exit 20 above.
+
+    The pre-flight is skipped outright for speed 0, so this exits 0. A stop that needs
+    permission is not a stop, and the refusal tests above are exactly the thing that could
+    grow a condition swallowing this one.
+    """
+    monkeypatch.setattr(Station, "open", staticmethod(lambda *a, **k: _FakeStatusStation(0x02)))
+    result = runner.invoke(
+        app, ["drive", "0", "--address", "3", "--format", "json", "--non-interactive"]
+    )
+    assert result.exit_code == 0, result.stderr
+    assert json.loads(result.stdout)["result"]["speed"] == 0
 
 
 def test_the_root_group_carries_the_global_options_and_no_positionals():
@@ -640,7 +769,15 @@ def test_schema_json_prints_one_envelope_with_the_registered_paths_in_tree_order
     assert result.exit_code == 0
     payload = json.loads(result.stdout)["result"]
     assert payload["schema"] == "railctl/schema/v1"
-    assert [c["path"] for c in payload["commands"]] == ["status", "version", "schema"]
+    assert [c["path"] for c in payload["commands"]] == [
+        "status",
+        "version",
+        "power",
+        "stop",
+        "drive",
+        "function",
+        "schema",
+    ]
 
 
 def test_schema_for_a_not_yet_implemented_command_is_exit_2_with_near_misses():
@@ -650,7 +787,10 @@ def test_schema_for_a_not_yet_implemented_command_is_exit_2_with_near_misses():
     payload = json.loads(result.stderr)
     assert payload["code"] == "usage"
     assert "power on" in payload["message"]
-    assert "status" in payload["message"]  # one of the three known paths, named
+    # A near miss is named, so the operator sees what the tool does know. `power`
+    # is a registered path and `power on` is not - the design's tree has no
+    # sub-group under `power`, the state is a positional argument.
+    assert "power" in payload["message"]
     # A runnable argv array, not recovery advice buried in prose: `UsageProblem` carries
     # it, `usage_report` publishes it, and a bare ValueError published `[]`.
     assert payload["suggestions"] == [["railctl", "schema"]]
@@ -787,8 +927,8 @@ def test_the_envelope_carries_the_schema_string_the_manifest_publishes(
     # The manifest says what a command emits; the envelope says what it emitted.
     # Written as two literals, a bump to `/v2` in one of them leaves a consumer
     # keyed on `schema` matching nothing, with no test saying so.
-    result = runner.invoke(app, [meta.path, "--format", "json"])
-    assert result.exit_code == 0
+    result = runner.invoke(app, [*_invocation(meta), "--format", "json"])
+    assert result.exit_code == 0, result.stderr
     assert json.loads(result.stdout)["schema"] == meta.schema
 
 

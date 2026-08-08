@@ -1,0 +1,392 @@
+# src/railctl/cli/commands/throttle.py
+"""The `drive` and `function` commands, and the `preflight` guard a later
+task's `cv` commands import too.
+
+Nothing here holds an opcode, a framing byte or CV arithmetic: every mutation
+goes through a `Station` facade method, and the only wire-adjacent names are
+`Direction` and an integer function number, both of which the design allows
+through `cli/` (tests/test_layering.py rule 1).
+
+`status()` is read as a decoded `StationStatus` and never as a raw byte
+compared against a literal mask. The measured bit order on this hardware is
+bit 0 emergency stop, bit 1 emergency off - the reverse of the Lenz spec - and
+that fact is written down exactly once, in `xbus/replies.py`. This module reads
+the field names, so a correction there reaches the refusals below without an
+edit.
+"""
+
+from __future__ import annotations
+
+from typing import Any, Final, Literal
+
+import typer
+
+from railctl.cli._errors import run
+from railctl.cli._meta import (
+    DRIVE_REVERSE_OPT,
+    DRIVE_SPEED_ARG,
+    FUNCTION_FORCE_GROUP_OPT,
+    FUNCTION_FUNC_ARG,
+    FUNCTION_STATE_ARG,
+    command_meta,
+    global_option,
+    help_epilog,
+    typer_argument,
+    typer_option,
+)
+from railctl.cli.config import capabilities_path
+from railctl.cli.deps import merged_output, open_station, require_address
+from railctl.cli.result import CommandResult, tri_state
+from railctl.errors import (
+    FunctionGroupUnreadableError,
+    StationBusyError,
+    StationError,
+    TrackPowerError,
+)
+from railctl.station import Station
+from railctl.xbus.replies import LocoInfo, StationStatus
+from railctl.xbus.speed import Direction
+
+_DRIVE_META = command_meta("drive")
+_FUNCTION_META = command_meta("function")
+
+# Read off the metadata row, never retyped - the manifest says what a command
+# emits and the envelope says what it emitted, and two literals drift.
+DRIVE_SCHEMA: Final[str] = _DRIVE_META.schema
+FUNCTION_SCHEMA: Final[str] = _FUNCTION_META.schema
+
+FUNCTION_ALIASES: Final[dict[str, int]] = {"light": 0, "lights": 0, "headlight": 0}
+RUNNING_NOTICE: Final[str] = (
+    "loco {address} is running at step {speed} {direction}; "
+    "it keeps running after this command exits"
+)
+
+MAX_FUNCTION: Final[int] = 28
+_DIRECTION_TEXT: Final[dict[Direction, str]] = {
+    Direction.FORWARD: "forward",
+    Direction.REVERSE: "reverse",
+}
+#: Printed instead of a direction word when the reply carried none. A 14/27/28
+#: step reply leaves `direction` None because `speed.py` decodes only the
+#: 128-step layout; saying "forward" there would report a decode this tool
+#: never performed as a measured fact.
+_UNKNOWN_DIRECTION: Final[str] = "unknown direction"
+
+# Built once, at import time, into names the signatures below reference - a
+# call to `global_option(...)`/`typer_option(...)`/`typer_argument(...)`
+# written directly as a parameter default would trip Ruff's B008 (function call
+# in a default argument); its built-in allowlist covers a literal
+# `typer.Option(...)`/`typer.Argument(...)` call, not a wrapper around one.
+_TARGET = global_option("--target")
+_ADDRESS = global_option("--address")
+_FORMAT = global_option("--format")
+_JSON = global_option("--json")
+_VERBOSE = global_option("--verbose")
+_COLOR = global_option("--color")
+_YES = global_option("--yes")
+_NON_INTERACTIVE = global_option("--non-interactive")
+
+_SPEED_ARG = typer_argument(DRIVE_SPEED_ARG)
+_REVERSE = typer_option(DRIVE_REVERSE_OPT)
+_FUNC_ARG = typer_argument(FUNCTION_FUNC_ARG)
+_STATE_ARG = typer_argument(FUNCTION_STATE_ARG)
+_FORCE_GROUP = typer_option(FUNCTION_FORCE_GROUP_OPT)
+
+
+def preflight(station: Station, *, speed: int | None) -> StationStatus:
+    """Guard for anything that could start or continue motion: `drive SPEED>0`,
+    `function`, and (from a later task) every POM `cv` command.
+
+    Never called for `drive 0` - the caller below skips it outright, because a
+    stop must never be refused by a status this check dislikes. `speed` is only
+    used to phrase the refusal; it is None for `function`, where there is no
+    single speed value to name.
+
+    The reason this exists at all is that a refused command is not the same as
+    a command that did nothing. Without the power check the speed is accepted
+    into the station's refresh buffer and the locomotive starts by itself the
+    moment power returns - which is what happened to the doctor's D3 run
+    (docs/probe-results.md).
+    """
+    status = station.status()
+    if status.emergency_off or status.emergency_stop:
+        target = f"speed {speed}" if speed is not None else "this command"
+        raise TrackPowerError(
+            f"track power is off or the layout is in emergency stop; refusing to send "
+            f"{target}. Run `railctl power on` first."
+        )
+    if status.service_mode:
+        raise StationBusyError(
+            "a service-mode programming session is active on this station; it must "
+            "finish or be cancelled before a throttle command can run"
+        )
+    return status
+
+
+def parse_function(token: str) -> int:
+    """`"f2"`, `"2"` or an alias in `FUNCTION_ALIASES` -> 0..28."""
+    lowered = token.strip().lower()
+    if lowered in FUNCTION_ALIASES:
+        return FUNCTION_ALIASES[lowered]
+    digits = lowered[1:] if lowered.startswith("f") else lowered
+    if not digits.isdigit():
+        raise ValueError(
+            f"'{token}' is not a function: use f0..f{MAX_FUNCTION}, a bare number in "
+            f"0..{MAX_FUNCTION}, or one of {sorted(FUNCTION_ALIASES)}"
+        )
+    value = int(digits)
+    if not 0 <= value <= MAX_FUNCTION:
+        raise ValueError(f"function {value} is out of range 0..{MAX_FUNCTION}")
+    return value
+
+
+def parse_state(token: str | None) -> Literal["on", "off", "toggle"]:
+    """`None` (the argument was omitted) defaults to `"on"`."""
+    if token is None:
+        return "on"
+    lowered = token.strip().lower()
+    if lowered not in ("on", "off", "toggle"):
+        raise ValueError(f"'{token}' is not a state: use on, off or toggle")
+    return lowered  # type: ignore[return-value]
+
+
+def build_drive(
+    address: int, speed: int, direction: Direction, *, was: LocoInfo | None
+) -> CommandResult:
+    if was is None:
+        changed: bool | None = None
+        previous_speed_decoded: bool | None = None
+    elif was.speed is None:
+        # `was.speed` is None exactly when `was.speed_steps != 128` - speed.py
+        # defines only the 128-step layout and replies.py leaves the rest
+        # UNKNOWN rather than decode it wrong. Reporting a number here would be
+        # the capability-recorded-as-absent failure this project exists to
+        # avoid, aimed at `changed` instead of at a CV read.
+        changed = None
+        previous_speed_decoded = False
+    else:
+        changed = (was.speed, was.direction) != (speed, direction)
+        previous_speed_decoded = True
+
+    direction_text = _DIRECTION_TEXT[direction]
+    outcome = CommandResult(schema=DRIVE_SCHEMA, command="drive")
+    outcome.result = {
+        "address": address,
+        "speed": speed,
+        "direction": direction_text,
+        "changed": changed,
+        "previous_speed_decoded": previous_speed_decoded,
+    }
+    outcome.say(
+        f"loco {address} set to speed {speed} {direction_text} ({tri_state(changed)} changed)"
+    )
+    if previous_speed_decoded is False:
+        outcome.say(
+            "the locomotive's previous speed step mode is not 128-step and was not "
+            "decoded, so whether this changed its speed is unknown"
+        )
+    elif previous_speed_decoded is None:
+        outcome.say("the locomotive's previous state could not be read")
+    return outcome
+
+
+def build_function(address: int, function: int, state: str, *, now_on: bool) -> CommandResult:
+    outcome = CommandResult(schema=FUNCTION_SCHEMA, command="function")
+    outcome.result = {
+        "address": address,
+        "function": function,
+        "requested": state,
+        "now_on": now_on,
+    }
+    outcome.say(
+        f"loco {address} F{function} is now {'on' if now_on else 'off'} (requested {state})"
+    )
+    return outcome
+
+
+def _read_loco(station: Station, address: int) -> LocoInfo | None:
+    """The locomotive's current state, or None when the station could not say.
+
+    None means UNKNOWN, never "standing still": every caller below branches on
+    it separately rather than folding it into a default speed of 0.
+    """
+    try:
+        return station.loco_info(address)
+    except StationError:
+        return None
+
+
+def _direction_for(reverse: bool | None, was: LocoInfo | None) -> Direction:
+    """`--reverse` given means reverse. Omitted means keep whatever direction
+    the locomotive is already running (the spec's worked example: `railctl
+    drive 30 --address 3  # keeps current direction`), and forward only when
+    there is no current direction to keep - either the locomotive could not be
+    read at all, or its reply was not in the one step mode railctl decodes.
+    """
+    if reverse:
+        return Direction.REVERSE
+    if was is not None and was.direction is not None:
+        return was.direction
+    return Direction.FORWARD
+
+
+def _warn_if_running(info: LocoInfo | None, address: int, stderr: Any) -> None:
+    """The running reminder, on stderr, whenever a command leaves a locomotive
+    moving. stdout carries the result only, so this never reaches the envelope
+    in any format."""
+    if info is None or not info.speed:
+        return
+    direction_text = (
+        _DIRECTION_TEXT[info.direction] if info.direction is not None else _UNKNOWN_DIRECTION
+    )
+    print(
+        RUNNING_NOTICE.format(address=address, speed=info.speed, direction=direction_text),
+        file=stderr,
+    )
+
+
+def register(app: typer.Typer) -> None:
+    """Attach `drive` and `function` to `app`, in that order.
+
+    Both redeclare all eight global options alongside their own arguments -
+    Click parses a subcommand's own options anywhere after its name, but a
+    `@app.callback()` group option only before it, and the spec's own worked
+    session types `--address` after `drive`. `global_option` builds each one
+    with a `None`/`False`/`0` sentinel default and no envvar (the root callback
+    already resolved the environment once), and `merged_output` layers only the
+    ones actually typed here over `ctx.obj.settings` before rebuilding the
+    output context from the result.
+    """
+
+    @app.command("drive", help=_DRIVE_META.help, epilog=help_epilog(_DRIVE_META))
+    def drive_command(
+        ctx: typer.Context,
+        speed: int = _SPEED_ARG,
+        reverse: bool | None = _REVERSE,
+        target: str | None = _TARGET,
+        address: int | None = _ADDRESS,
+        format_: str | None = _FORMAT,
+        json_flag: bool = _JSON,
+        verbose: int = _VERBOSE,
+        color: str | None = _COLOR,
+        yes: bool = _YES,
+        non_interactive: bool = _NON_INTERACTIVE,
+    ) -> None:
+        cli_ctx = ctx.obj
+        settings, output = merged_output(
+            cli_ctx.settings,
+            cli_ctx.output,
+            target=target,
+            address=address,
+            fmt=format_,
+            json_flag=json_flag,
+            verbose=verbose,
+            color=color,
+            yes=yes,
+            non_interactive=non_interactive,
+        )
+
+        def work() -> CommandResult:
+            resolved = require_address(settings, argv_hint=["railctl", "drive", str(speed)])
+            station = open_station(settings, capabilities_path=capabilities_path())
+            try:
+                was = _read_loco(station, resolved)
+                direction = _direction_for(reverse, was)
+                # THE ONE BRANCH THAT MUST NOT ACQUIRE A CONDITION: speed 0 is
+                # sent whatever the station's status says. A stop that needs
+                # permission is not a stop.
+                if speed > 0:
+                    preflight(station, speed=speed)
+                station.drive(resolved, speed, direction)
+                if speed:
+                    print(
+                        RUNNING_NOTICE.format(
+                            address=resolved,
+                            speed=speed,
+                            direction=_DIRECTION_TEXT[direction],
+                        ),
+                        file=output.stderr,
+                    )
+                return build_drive(resolved, speed, direction, was=was)
+            finally:
+                station.close()
+
+        run("drive", output, work)
+
+    @app.command("function", help=_FUNCTION_META.help, epilog=help_epilog(_FUNCTION_META))
+    def function_command(
+        ctx: typer.Context,
+        function: str = _FUNC_ARG,
+        state: str | None = _STATE_ARG,
+        force_group: bool = _FORCE_GROUP,
+        target: str | None = _TARGET,
+        address: int | None = _ADDRESS,
+        format_: str | None = _FORMAT,
+        json_flag: bool = _JSON,
+        verbose: int = _VERBOSE,
+        color: str | None = _COLOR,
+        yes: bool = _YES,
+        non_interactive: bool = _NON_INTERACTIVE,
+    ) -> None:
+        cli_ctx = ctx.obj
+        settings, output = merged_output(
+            cli_ctx.settings,
+            cli_ctx.output,
+            target=target,
+            address=address,
+            fmt=format_,
+            json_flag=json_flag,
+            verbose=verbose,
+            color=color,
+            yes=yes,
+            non_interactive=non_interactive,
+        )
+
+        def work() -> CommandResult:
+            func_num = parse_function(function)
+            wanted_state = parse_state(state)
+            resolved = require_address(
+                settings, argv_hint=["railctl", "function", function, wanted_state]
+            )
+            station = open_station(settings, capabilities_path=capabilities_path())
+            try:
+                preflight(station, speed=None)
+                try:
+                    if wanted_state == "toggle":
+                        now_on = station.function_toggle(
+                            resolved, func_num, force_group=force_group
+                        )
+                    else:
+                        on = wanted_state == "on"
+                        station.function_set(resolved, func_num, on, force_group=force_group)
+                        now_on = on
+                except StationError as exc:
+                    # The facade reads the current group before flipping one
+                    # bit, because a group command carries every bit of its
+                    # group and setting one function without reading the rest
+                    # would silently clear them. It raises a bare StationError
+                    # with no structured retry information; this CLI layer is
+                    # what attaches the --force-group escape as a
+                    # machine-readable suggestion, since `default_suggestions`
+                    # is keyed by exception type and never sees the function or
+                    # state tokens the operator typed.
+                    raise FunctionGroupUnreadableError(
+                        f"could not read the current state of F{func_num} on loco "
+                        f"{resolved}: {exc}",
+                        retry_argv=[
+                            "railctl",
+                            "function",
+                            function,
+                            wanted_state,
+                            "--address",
+                            str(resolved),
+                            "--force-group",
+                        ],
+                    ) from exc
+                result = build_function(resolved, func_num, wanted_state, now_on=now_on)
+                _warn_if_running(_read_loco(station, resolved), resolved, output.stderr)
+                return result
+            finally:
+                station.close()
+
+        run("function", output, work)

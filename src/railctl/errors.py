@@ -195,6 +195,36 @@ class TrackPowerError(StationError):
     code: ClassVar[str] = "track_power"
 
 
+class FunctionGroupUnreadableError(StationError):
+    """`function` could not read a group's current state before flipping one bit.
+
+    `Station.function_set`/`function_toggle` refuse to blind-write a group
+    rather than seed it all-zeros, because a group command carries every bit of
+    its group and a wrong zero switches off a function nobody touched. This
+    class carries the CLI's own retry command - the function and state tokens
+    the operator actually typed, plus `--force-group` - since
+    `cli/_errors.default_suggestions` is keyed by exception type and could not
+    reconstruct that argv from the exception alone.
+
+    No row in `EXIT_CODES`: like its `StationError` parent it resolves to the
+    base 9, which is what the design spec's L6 safety rules already say this
+    failure exits with.
+    """
+
+    code: ClassVar[str] = "function_group_unreadable"
+
+    def __init__(
+        self,
+        message: str,
+        *,
+        hint: str | None = None,
+        details: dict[str, object] | None = None,
+        retry_argv: list[str],
+    ) -> None:
+        super().__init__(message, hint=hint, details=details)
+        self.retry_argv = retry_argv
+
+
 class ProgrammingError(StationError):
     """Base for CV operations. Carries the human (1-based) CV number when known."""
 
