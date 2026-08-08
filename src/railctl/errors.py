@@ -15,9 +15,13 @@ They are three classes with three exit codes (5, 6, 7) because collapsing them
 is exactly how milestone M1 recorded four capabilities as absent when the
 instrument, not the hardware, was at fault.
 
-These sixteen exit codes are a versioned public contract. Within a major version
-no code may be renumbered, repurposed, or retired; a new error class claims an
-unused code above 20 instead of reusing one of these. A future JSON envelope (M5
+These exit codes are a versioned public contract. Within a major version no code
+may be renumbered, repurposed, or retired; a new error class claims an unused
+code above 20 instead of reusing one of these. The one code below that range is
+`ConfirmationRequiredError: 2`, and it is not an exception to the rule so much as
+the rule's other half: 2 is the CLI's documented *usage* code, shared with a
+malformed argument, because both tell a script the same thing - fix the
+invocation, do not retry. A domain failure never claims a low code. A future JSON envelope (M5
 and later) can carry a stable machine-readable `error.code` string alongside the
 process exit status, and that is where new domain detail belongs, not in a new
 exit code.
@@ -195,6 +199,14 @@ class IndexPageRequiredError(ProgrammingError):
     """The CV lives behind an index page that could not be selected."""
 
 
+class AbortedError(RailctlError):
+    """The operator interrupted the run. Cleanup ran; exit 9."""
+
+
+class ConfirmationRequiredError(RailctlError):
+    """A confirmation was needed and could not be asked for."""
+
+
 EXIT_CODES: Final[dict[type[RailctlError], int]] = {
     TransportError: 3,
     ProtocolError: 4,
@@ -213,6 +225,7 @@ EXIT_CODES: Final[dict[type[RailctlError], int]] = {
     ServiceEncodingUnknownError: 18,
     ProgrammingError: 19,
     TrackPowerError: 20,
+    ConfirmationRequiredError: 2,
 }
 
 UNMAPPED_EXIT_CODE: Final[int] = 1

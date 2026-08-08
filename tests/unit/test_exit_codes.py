@@ -11,7 +11,9 @@ from railctl import errors
 from railctl.errors import (
     EXIT_CODES,
     UNMAPPED_EXIT_CODE,
+    AbortedError,
     AmbiguousPort,
+    ConfirmationRequiredError,
     CvOutOfRangeError,
     CvVerifyError,
     DecoderNoAckError,
@@ -70,6 +72,7 @@ def _tree(root: type[RailctlError] = RailctlError) -> set[type[RailctlError]]:
         (ServiceEncodingUnknownError("x"), 18),
         (ProgrammingError("x"), 19),
         (TrackPowerError("x"), 20),
+        (ConfirmationRequiredError("x"), 2),
     ],
 )
 def test_every_documented_exit_code_row(exc: RailctlError, code: int):
@@ -90,6 +93,7 @@ def test_every_documented_exit_code_row(exc: RailctlError, code: int):
         (XBusChecksumError("x"), 4),
         (LinkProtocolError("x"), 4),
         (StationError("x"), 9),
+        (AbortedError("x"), 9),
     ],
 )
 def test_subclasses_without_their_own_row_inherit_the_parent_code(exc: RailctlError, code: int):
