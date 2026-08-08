@@ -39,9 +39,17 @@ class CliContext:
 
 
 def context_for(settings: Settings, *, stdout: TextIO, stderr: TextIO) -> OutputContext:
+    """One `--color` value, but `want_color` is asked once per stream.
+
+    The design spec requires stdout and stderr to be tested separately. Deciding once off
+    stdout and painting both is how `railctl status 2> errors.log` run from a terminal ends
+    up writing escape codes into the log; the converse - stdout redirected, stderr still on
+    the operator's terminal - strips the colour off the one line they are meant to read.
+    """
     return OutputContext(
         fmt=settings.fmt,
-        color=want_color(settings.color, stdout, os.environ),
+        stdout_color=want_color(settings.color, stdout, os.environ),
+        stderr_color=want_color(settings.color, stderr, os.environ),
         stdout=stdout,
         stderr=stderr,
     )

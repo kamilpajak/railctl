@@ -41,8 +41,18 @@ from railctl.errors import (
 
 @dataclass(frozen=True, slots=True)
 class OutputContext:
+    """Two colour decisions, never one.
+
+    `stdout_color` and `stderr_color` are separate fields, and neither has a default, because
+    the single `color` flag they replaced was what let `railctl status 2> errors.log` from a
+    terminal write escape codes into the log: stdout was a terminal, so stderr got painted too,
+    and `grep '^error:'` over that file then matched nothing. A default value here is what would
+    let a construction site silently go back to answering the question once.
+    """
+
     fmt: Format
-    color: bool
+    stdout_color: bool
+    stderr_color: bool
     stdout: TextIO
     stderr: TextIO
 
@@ -179,8 +189,8 @@ def run(command: str, ctx: OutputContext, work: Callable[[], CommandResult]) -> 
         # command that only measured its own body would miss the argv-parsing and station-open
         # time a script comparing two invocations actually cares about.
         result.elapsed_ms = round((time.monotonic() - start) * 1000)
-        render(result, fmt=ctx.fmt, stdout=ctx.stdout, color=ctx.color)
+        render(result, fmt=ctx.fmt, stdout=ctx.stdout, color=ctx.stdout_color)
         raise typer.Exit(code=result.exit_code)
 
-    render_error(report, stderr=ctx.stderr, fmt=ctx.fmt, color=ctx.color)
+    render_error(report, stderr=ctx.stderr, fmt=ctx.fmt, color=ctx.stderr_color)
     raise typer.Exit(code=report.exit_code)

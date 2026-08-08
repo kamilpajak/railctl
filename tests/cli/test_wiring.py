@@ -35,6 +35,7 @@ from railctl.cli.deps import (
     require_address,
     station_info,
 )
+from railctl.cli.result import CommandResult
 from railctl.errors import AbortedError, ConfirmationRequiredError, TransportError
 from railctl.station import TIMING, Station
 from railctl.xbus.replies import StationStatus, StationVersion
@@ -408,7 +409,13 @@ def test_a_usage_problems_argv_suggestion_survives_into_the_json_envelope():
     # Asserting `caught.value.suggestions` at the raise site (above) passes even when
     # `run()` drops the array on the way out, which is what made `UsageProblem` decoration
     # rather than a contract. This asserts the array a script actually receives.
-    ctx = OutputContext(fmt="json", color=False, stdout=io.StringIO(), stderr=io.StringIO())
+    ctx = OutputContext(
+        fmt="json",
+        stdout_color=False,
+        stderr_color=False,
+        stdout=io.StringIO(),
+        stderr=io.StringIO(),
+    )
 
     def work():
         return require_address(_settings(address=None), argv_hint=["railctl", "drive", "40"])
@@ -791,6 +798,61 @@ def test_a_railctl_error_out_of_the_callback_keeps_its_own_exit_code(monkeypatch
     payload = json.loads(captured.err)
     assert payload["code"] == "transport"
     assert payload["exit_code"] == 3
+
+
+class _ColourStream(io.StringIO):
+    """A stream that answers `isatty()` the way the test asks it to."""
+
+    def __init__(self, *, terminal: bool) -> None:
+        super().__init__()
+        self._terminal = terminal
+
+    def isatty(self) -> bool:
+        return self._terminal
+
+
+def _streams_after(settings, *, stdout_terminal: bool, stderr_terminal: bool, work):
+    stdout = _ColourStream(terminal=stdout_terminal)
+    stderr = _ColourStream(terminal=stderr_terminal)
+    ctx = cli_main.context_for(settings, stdout=stdout, stderr=stderr)
+    with pytest.raises(typer.Exit):
+        run("status", ctx, work)
+    return stdout.getvalue(), stderr.getvalue()
+
+
+def test_context_for_decides_colour_for_each_stream_separately(monkeypatch):
+    # `railctl status 2> errors.log` from a terminal must leave the log greppable, and the
+    # converse - stdout to a pipe, stderr still on the terminal - must keep the error painted.
+    # One shared flag fails one of the two whichever stream it is read from.
+    monkeypatch.delenv("NO_COLOR", raising=False)
+    monkeypatch.setenv("TERM", "xterm")
+    settings = _settings(fmt="human", color="auto")
+
+    def fail():
+        raise TransportError("the port vanished")
+
+    def succeed():
+        return CommandResult(schema=STATUS_SCHEMA, command="status")
+
+    _, quiet_stderr = _streams_after(
+        settings, stdout_terminal=True, stderr_terminal=False, work=fail
+    )
+    assert "\x1b" not in quiet_stderr
+
+    _, painted_stderr = _streams_after(
+        settings, stdout_terminal=False, stderr_terminal=True, work=fail
+    )
+    assert "\x1b" in painted_stderr
+
+    painted_stdout, _ = _streams_after(
+        settings, stdout_terminal=True, stderr_terminal=False, work=succeed
+    )
+    assert "\x1b" in painted_stdout
+
+    quiet_stdout, _ = _streams_after(
+        settings, stdout_terminal=False, stderr_terminal=True, work=succeed
+    )
+    assert "\x1b" not in quiet_stdout
 
 
 def test_dunder_main_module_calls_main(monkeypatch):
