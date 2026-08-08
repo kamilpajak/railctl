@@ -44,6 +44,7 @@ from railctl.cli.deps import (
     merged_output,
     open_station,
     read_loco,
+    read_loco_result,
     require_address,
 )
 from railctl.cli.result import CommandResult, tri_state
@@ -335,7 +336,12 @@ def _typed_direction(
 
 
 def _direction_for(
-    typed: Direction | None, was: LocoInfo | None, *, address: int, argv_hint: list[str]
+    typed: Direction | None,
+    was: LocoInfo | None,
+    *,
+    address: int,
+    argv_hint: list[str],
+    read_error: str | None = None,
 ) -> Direction:
     """The direction a POSITIVE speed goes out with: what the operator typed,
     or the direction the locomotive is already running (the spec's worked
@@ -361,7 +367,15 @@ def _direction_for(
             f"loco {address}'s current direction could not be read, so there is no direction "
             f"to keep; pass --forward or --reverse to say which way this speed runs"
         )
-        details: dict[str, object] = {"reason": "direction_unread", "speed_steps": None}
+        details: dict[str, object] = {
+            "reason": "direction_unread",
+            "speed_steps": None,
+            # WHICH failure hid the direction. Without it a link that timed out, a
+            # station that refused with `61 82` and one garbled frame all reached the
+            # caller as the same non-retryable usage error, and a wrapper branching on
+            # `retryable` gave up on a fault a second attempt would have cleared.
+            "read_error": read_error,
+        }
     else:
         message = (
             f"the station answered for loco {address} in {_steps_text(was)} speed steps, and "
@@ -472,12 +486,14 @@ def register(app: typer.Typer) -> None:
                 was: LocoInfo | None = None
                 if speed > 0:
                     preflight(station, speed=speed)
-                    was = read_loco(station, resolved)
+                    read = read_loco_result(station, resolved)
+                    was = read.info
                     direction = _direction_for(
                         typed,
                         was,
                         address=resolved,
                         argv_hint=[*argv_hint, "--address", str(resolved)],
+                        read_error=read.error,
                     )
                     source = DIRECTION_FROM_FLAG if typed is not None else DIRECTION_KEPT
                 elif typed is not None:

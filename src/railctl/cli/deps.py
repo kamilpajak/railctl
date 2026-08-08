@@ -22,7 +22,7 @@ from railctl import errors
 from railctl.cli._errors import OutputContext
 from railctl.cli.config import DEFAULT_TARGET, VERBOSE_ENV, Config, pick
 from railctl.cli.render import want_color
-from railctl.cli.result import Format, LinkInfo, StationInfo
+from railctl.cli.result import Format, LinkInfo, StationInfo, error_code
 from railctl.station import TIMING, Station
 from railctl.xbus.address import LOCO_ADDR_MAX, LOCO_ADDR_MIN
 from railctl.xbus.replies import LocoInfo
@@ -460,6 +460,40 @@ def read_loco(station: Station, address: int) -> LocoInfo | None:
         return station.loco_info(address)
     except errors.RailctlError:
         return None
+
+
+@dataclass(frozen=True, slots=True)
+class LocoRead:
+    """What `read_loco_result` learned, including why it learned nothing.
+
+    `info is None` is UNKNOWN, exactly as before. What this adds is `error`: the
+    published code of the exception that was swallowed, or `None` when the read
+    itself succeeded. Without it, three unlike causes reached the caller as one
+    answer - a link that timed out, a station that refused the loco-info request
+    with `61 82`, and one garbled reply frame all became a bare `None`, and the
+    refusal built from it published `retryable: false` for a fault that a retry
+    might well clear.
+
+    The code string is the same one the error envelope publishes, so a caller
+    can branch on `details.read_error == "link_timeout"` with the vocabulary it
+    already has from `railctl schema`.
+    """
+
+    info: LocoInfo | None
+    error: str | None
+
+
+def read_loco_result(station: Station, address: int) -> LocoRead:
+    """`read_loco`, but it says why when it comes back empty.
+
+    Same catch and the same guarantee: no read that reaches here may decide
+    whether a mutation goes out. `ValueError` from an out-of-range address is
+    still not caught - see `read_loco`.
+    """
+    try:
+        return LocoRead(info=station.loco_info(address), error=None)
+    except errors.RailctlError as exc:
+        return LocoRead(info=None, error=error_code(exc))
 
 
 def link_info(station: Station, settings: Settings) -> LinkInfo:

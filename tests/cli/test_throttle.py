@@ -676,7 +676,45 @@ def test_drive_refuses_a_positive_speed_when_the_locomotive_cannot_be_read(monke
     assert result.exit_code == 2
     assert "drive" not in station.call_names
     error = json.loads(result.stderr)
-    assert error["details"] == {"reason": "direction_unread", "speed_steps": None}
+    assert error["details"] == {
+        "reason": "direction_unread",
+        "speed_steps": None,
+        # `loco_info=None` makes the fake raise `StationError`, so the swallowed cause is
+        # named rather than lost. The parametrized test below covers the four classes that
+        # do NOT subclass `StationError` and used to be indistinguishable from this one.
+        "read_error": "station",
+    }
+
+
+@pytest.mark.parametrize(
+    ("raised", "expected_code"),
+    [
+        (LinkTimeout("no reply in 5.0 s"), "link_timeout"),
+        (TransportError("the port vanished"), "transport"),
+        (XBusChecksumError("the XOR byte disagrees"), "xbus_checksum"),
+        (UnsupportedCommandError("station answered 61 82"), "unsupported_command"),
+    ],
+)
+def test_the_refusal_names_which_failure_hid_the_direction(monkeypatch, raised, expected_code):
+    """Four unlike causes must not arrive as one answer.
+
+    Refusing is right - the earlier defect sent `Direction.FORWARD` to the track when the
+    direction was unknown. But the refusal is exit 2, `usage`, `retryable: false`, and a link
+    that timed out is none of those things: a second attempt may well clear it. Without
+    `read_error` a wrapper branching on `retryable` gives up on a transient fault and treats
+    a `61 82` refusal, a garbled frame and a dead port as the same mistake by the operator.
+
+    This is the project's founding rule at the reporting layer rather than the wire: a cause
+    that was distinguishable when it happened must stay distinguishable when it is published.
+    """
+    station = FakeStation(loco_info_raises=raised)
+    app = _app(station, monkeypatch, fmt="json")
+    result = runner.invoke(app, ["drive", "30"])
+    assert result.exit_code == 2
+    assert "drive" not in station.call_names
+    details = json.loads(result.stderr)["details"]
+    assert details["reason"] == "direction_unread"
+    assert details["read_error"] == expected_code
 
 
 @pytest.mark.parametrize("flag", ["--forward", "--reverse"])
