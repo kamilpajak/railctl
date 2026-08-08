@@ -28,10 +28,12 @@ from railctl.cli._meta import (
     typer_argument,
     typer_option,
 )
-from railctl.cli.result import RESERVED_CODES, RETRYABLE_CODES
+from railctl.cli.result import PARTIAL_EXIT_CODE, RESERVED_CODES, RETRYABLE_CODES
 from railctl.errors import EXIT_CODES
 
-KNOWN_CODES = set(BASE_EXIT_CODES) | set(EXIT_CODES.values())
+# `PARTIAL_EXIT_CODE` names no exception class - a partial run is a RESULT, not an
+# error - so it reaches this set from `result.py` rather than from the exit-code map.
+KNOWN_CODES = set(BASE_EXIT_CODES) | set(EXIT_CODES.values()) | {PARTIAL_EXIT_CODE}
 
 
 def test_command_meta_returns_the_row_for_a_known_path():
@@ -429,7 +431,7 @@ from typer.testing import CliRunner  # noqa: E402
 
 from railctl.cli._meta import CommandMeta  # noqa: E402
 from railctl.cli.main import app  # noqa: E402
-from railctl.errors import UnsupportedCommandError  # noqa: E402
+from railctl.errors import LinkTimeout, UnsupportedCommandError  # noqa: E402
 from railctl.station import Station  # noqa: E402
 from railctl.xbus.replies import LocoInfo, StationStatus, StationVersion  # noqa: E402
 from railctl.xbus.speed import Direction  # noqa: E402
@@ -751,6 +753,35 @@ def test_a_stop_is_never_refused_by_the_state_that_refuses_every_other_speed(mon
     )
     assert result.exit_code == 0, result.stderr
     assert json.loads(result.stdout)["result"]["speed"] == 0
+
+
+def test_power_on_reaches_the_partial_exit_code_it_publishes(monkeypatch):
+    """`POWER_EXIT_CODES` publishes 8, so something has to be able to produce it.
+
+    A published code nobody drives is the omission the two tests above were written for,
+    running the other way: the tuple says a caller may see 8, and only a run says they can.
+    """
+
+    class _DiesAfterPowerOn(_FakeStatusStation):
+        def status(self) -> StationStatus:
+            if self.powered_on:
+                raise LinkTimeout("no status reply after track power on")
+            return super().status()
+
+        powered_on = False
+
+        def power_on(self) -> None:
+            self.powered_on = True
+
+    monkeypatch.setattr(Station, "open", staticmethod(lambda *a, **k: _DiesAfterPowerOn()))
+    result = runner.invoke(
+        app, ["power", "on", "--address", "3", "--format", "json", "--non-interactive"]
+    )
+    assert result.exit_code == PARTIAL_EXIT_CODE, result.stderr
+    assert result.exit_code in command_meta("power").exit_codes
+    payload = json.loads(result.stdout)
+    assert payload["exit_code"] == result.exit_code
+    assert payload["ok"] is False
 
 
 def test_the_root_group_carries_the_global_options_and_no_positionals():

@@ -45,6 +45,7 @@ from railctl.cli.result import (
     ERROR_SCHEMA,
     INTERNAL_CODE,
     INTERNAL_EXIT_CODE,
+    PARTIAL_EXIT_CODE,
     RESERVED_CODES,
     RETRYABLE_CODES,
     USAGE_CODE,
@@ -211,8 +212,10 @@ STATION_EXIT_CODES: Final[tuple[int, ...]] = (0, 1, 2, 3, 4, 5, 6, 7, 9)
 
 # `power on`/`power off` go through `Station._settle_power`, which raises
 # `TrackPowerError` (20) when the station still disagrees after the settle
-# pause. That is the one code the station set above does not already carry.
-POWER_EXIT_CODES: Final[tuple[int, ...]] = (*STATION_EXIT_CODES, 20)
+# pause. `power on` also publishes the partial code: it runs three mutations in
+# sequence, and a failure after the second leaves the track live, which is a
+# different thing from the command having done nothing.
+POWER_EXIT_CODES: Final[tuple[int, ...]] = (*STATION_EXIT_CODES, PARTIAL_EXIT_CODE, 20)
 
 # `drive SPEED>0` and `function` both run `throttle.preflight`, which refuses
 # with `TrackPowerError` (20) on emergency off or emergency stop and with
@@ -478,6 +481,10 @@ _BASE_EXIT_MEANINGS: Final[dict[int, str]] = {
     0: "success",
     1: "unhandled internal error",
     2: "usage error - a bad flag, value, or missing argument",
+    PARTIAL_EXIT_CODE: (
+        "partial - some steps of this command completed and a later one failed; the result "
+        "names which"
+    ),
 }
 
 # The two published codes that name no class in the exception tree, so these two sentences

@@ -81,10 +81,6 @@ LOCO_STANDING = replace(LOCO_128, speed=0)
 #: whose own telegram had not been sent yet. Two of them describe a WORKING
 #: link: `61 82` is the station refusing this one request, and a checksum fault
 #: is one garbled reply frame.
-#: What `Station._function_set_group_path` says when it will not blind-write a
-#: group whose other bits it has not read.
-GROUP_UNREADABLE_MESSAGE = "F2 shares group G1 with F[1], whose state has not been read"
-
 COSMETIC_READ_FAILURES = [
     LinkTimeout("no reply to the loco-info request within 0.5 s"),
     TransportError("the port went away mid-exchange"),
@@ -92,6 +88,10 @@ COSMETIC_READ_FAILURES = [
     XBusChecksumError("the trailing XOR byte does not match the telegram body"),
     UnsupportedCommandError("station answered 61 82 to the loco-info request"),
 ]
+
+#: What `Station._function_set_group_path` says when it will not blind-write a
+#: group whose other bits it has not read.
+GROUP_UNREADABLE_MESSAGE = "F2 shares group G1 with F[1], whose state has not been read"
 
 
 class FakeStation:
@@ -406,21 +406,27 @@ def test_build_function_says_off_when_the_resulting_bit_is_off():
 
 
 def test_build_power_reports_manual_start_mode_when_bit_2_is_clear():
-    result = power.build_power("on", CLEAR_STATUS, changed=True, idled=None)
+    result = power.build_power(
+        "on", CLEAR_STATUS, changed=True, idled=None, completed=[power.STEP_READ_STATUS]
+    )
     assert result.result["auto_start_mode"] is False
     assert any("manual" in line for line in result.lines)
     assert not any("speed 0" in line for line in result.lines)
 
 
 def test_build_power_reports_the_track_as_off_and_unchanged():
-    result = power.build_power("off", EMERGENCY_OFF_STATUS, changed=False, idled=None)
+    result = power.build_power(
+        "off", EMERGENCY_OFF_STATUS, changed=False, idled=None, completed=[power.STEP_READ_STATUS]
+    )
     assert result.result["track_power"] is False
     assert "track power is off (no change)" in result.lines[0]
 
 
 def test_build_power_names_the_direction_the_idle_telegram_carried():
     idled = power.Idled(address=3, direction=Direction.REVERSE, direction_preserved=True)
-    result = power.build_power("on", AUTO_START_STATUS, changed=True, idled=idled)
+    result = power.build_power(
+        "on", AUTO_START_STATUS, changed=True, idled=idled, completed=[power.STEP_READ_STATUS]
+    )
     assert result.result["idled_address"] == 3
     assert result.result["idled_direction"] == "reverse"
     assert result.result["idled_direction_preserved"] is True
@@ -432,7 +438,9 @@ def test_build_power_warns_when_the_idle_telegram_may_have_changed_the_direction
     """`power on` writes to a locomotive. When it could not read which way that
     locomotive was pointing, the forward it sent is a choice, not a copy."""
     idled = power.Idled(address=3, direction=Direction.FORWARD, direction_preserved=False)
-    result = power.build_power("on", AUTO_START_STATUS, changed=True, idled=idled)
+    result = power.build_power(
+        "on", AUTO_START_STATUS, changed=True, idled=idled, completed=[power.STEP_READ_STATUS]
+    )
     assert result.result["idled_direction_preserved"] is False
     assert [w.name for w in result.warnings] == ["direction_not_preserved"]
     assert result.warnings[0].details == {"address": 3, "sent": "forward"}
@@ -442,7 +450,9 @@ def test_build_power_publishes_the_two_bits_that_decide_whether_anything_can_mov
     """Emergency stop leaves the track POWERED, so `track_power: true` on its
     own reads as success while every locomotive is held at standstill. Both
     bits were read and then discarded."""
-    result = power.build_power("on", EMERGENCY_STOP_STATUS, changed=True, idled=None)
+    result = power.build_power(
+        "on", EMERGENCY_STOP_STATUS, changed=True, idled=None, completed=[power.STEP_READ_STATUS]
+    )
     assert result.result["track_power"] is True
     assert result.result["emergency_stop"] is True
     assert result.result["emergency_off"] is False
@@ -452,7 +462,9 @@ def test_build_power_publishes_the_two_bits_that_decide_whether_anything_can_mov
 
 
 def test_build_power_reports_emergency_off_too():
-    result = power.build_power("on", EMERGENCY_OFF_STATUS, changed=True, idled=None)
+    result = power.build_power(
+        "on", EMERGENCY_OFF_STATUS, changed=True, idled=None, completed=[power.STEP_READ_STATUS]
+    )
     assert result.result["emergency_off"] is True
     assert any("emergency off is active" in line for line in result.lines)
 
@@ -460,7 +472,9 @@ def test_build_power_reports_emergency_off_too():
 def test_power_off_reporting_an_emergency_state_is_not_a_warning():
     """`power off` is meant to leave the track dead, so the same bits are the
     command working rather than the command failing to take effect."""
-    result = power.build_power("off", EMERGENCY_OFF_STATUS, changed=True, idled=None)
+    result = power.build_power(
+        "off", EMERGENCY_OFF_STATUS, changed=True, idled=None, completed=[power.STEP_READ_STATUS]
+    )
     assert result.result["emergency_off"] is True
     assert result.warnings == []
 
@@ -1055,6 +1069,85 @@ def test_power_on_does_not_idle_when_no_address_is_configured(monkeypatch):
     result = runner.invoke(app, ["power", "on"])
     assert result.exit_code == 0
     assert station.call_names == ["emergency_stop", "power_on", "status", "close"]
+
+
+@pytest.mark.parametrize(
+    ("failing", "completed", "failed_step"),
+    [
+        ("status", ["stop_all", "power_on"], "read_status"),
+        ("loco_info", ["stop_all", "power_on", "read_status"], "idle_address"),
+    ],
+    ids=["status-read", "idle"],
+)
+def test_power_on_reports_a_partial_run_rather_than_a_plain_failure(
+    monkeypatch, failing, completed, failed_step
+):
+    """The second step energises the track. After that, "the command failed" is
+    not the whole answer: the caller has to be able to tell "nothing happened"
+    from "the track is on but the locomotive was not idled".
+
+    BENCH CHECK: only a person at the layout can confirm the track really is
+    live after this exit code; the fake proves the CLI reports it.
+    """
+
+    class _FailsAfterPowerOn(FakeStation):
+        def status(self):
+            if failing == "status" and "power_on" in self.call_names:
+                self._record("status")
+                raise LinkTimeout("no status reply after power on")
+            return super().status()
+
+        def drive(self, address, speed, direction):
+            if failing == "loco_info":
+                self._record("drive_attempt", address)
+                raise LinkTimeout("no ack for the idle telegram")
+            return super().drive(address, speed, direction)
+
+    station = _FailsAfterPowerOn(status=AUTO_START_STATUS)
+    app = _app(station, monkeypatch, address=3, fmt="json")
+    result = runner.invoke(app, ["power", "on"])
+    assert result.exit_code == 8, result.stderr
+    assert "power_on" in station.call_names
+    payload = json.loads(result.stdout)
+    assert payload["ok"] is False
+    assert payload["exit_code"] == 8
+    assert payload["result"]["completed"] == completed
+    assert payload["result"]["failed_step"] == failed_step
+    # Never `false`: the status read is one of the steps that may have failed,
+    # and reporting a track this command just energised as unpowered is the
+    # founding rule broken inside the report of a failure to follow it.
+    assert payload["result"]["track_power"] is None
+    assert [w["name"] for w in payload["warnings"]] == ["power_on_incomplete"]
+    assert payload["warnings"][0]["details"]["error_code"] == "link_timeout"
+
+
+def test_a_failure_before_the_track_is_live_is_a_plain_error_not_a_partial(monkeypatch):
+    """The distinction is only worth having if both sides of it exist."""
+
+    class _FailsAtPowerOn(FakeStation):
+        def power_on(self):
+            self._record("power_on")
+            raise LinkTimeout("no ack for track power on")
+
+    station = _FailsAtPowerOn(status=AUTO_START_STATUS)
+    app = _app(station, monkeypatch, address=3, fmt="json")
+    result = runner.invoke(app, ["power", "on"])
+    assert result.exit_code == 5
+    assert result.stdout == ""
+    assert json.loads(result.stderr)["code"] == "link_timeout"
+
+
+def test_a_complete_power_run_names_the_steps_it_ran(monkeypatch):
+    station = FakeStation(status=AUTO_START_STATUS)
+    app = _app(station, monkeypatch, address=3, fmt="json")
+    payload = json.loads(runner.invoke(app, ["power", "on"]).stdout)
+    assert payload["result"]["completed"] == [
+        "stop_all",
+        "power_on",
+        "read_status",
+        "idle_address",
+    ]
+    assert payload["result"]["failed_step"] is None
 
 
 def test_power_off_reports_changed_false_when_already_off(monkeypatch):

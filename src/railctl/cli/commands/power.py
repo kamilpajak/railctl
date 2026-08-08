@@ -12,6 +12,7 @@ convenient default would stop only locomotive 3. `stop` therefore ignores
 
 from __future__ import annotations
 
+from collections.abc import Sequence
 from dataclasses import dataclass
 from typing import Final
 
@@ -35,7 +36,8 @@ from railctl.cli.deps import (
     open_station,
     read_loco,
 )
-from railctl.cli.result import CommandResult
+from railctl.cli.result import PARTIAL_EXIT_CODE, CommandResult, error_code
+from railctl.errors import RailctlError
 from railctl.station import Station
 from railctl.xbus.replies import StationStatus
 from railctl.xbus.speed import Direction
@@ -86,7 +88,12 @@ class Idled:
 
 
 def build_power(
-    state: str, status: StationStatus, *, changed: bool, idled: Idled | None
+    state: str,
+    status: StationStatus,
+    *,
+    changed: bool,
+    idled: Idled | None,
+    completed: Sequence[str],
 ) -> CommandResult:
     outcome = CommandResult(schema=POWER_SCHEMA, command="power")
     outcome.result = {
@@ -105,6 +112,11 @@ def build_power(
         "idled_address": None if idled is None else idled.address,
         "idled_direction": None if idled is None else DIRECTION_TEXT[idled.direction],
         "idled_direction_preserved": None if idled is None else idled.direction_preserved,
+        # The same two keys `build_power_partial` fills in, so one schema
+        # describes both endings and a caller reads "what ran" off the same
+        # field whichever it got.
+        "completed": list(completed),
+        "failed_step": None,
     }
     outcome.say(
         f"track power is {'on' if status.track_power else 'off'} "
@@ -166,11 +178,106 @@ def _say_emergency_state(outcome: CommandResult, state: str, status: StationStat
         )
 
 
+def build_power_partial(*, completed: Sequence[str], failure: BaseException) -> CommandResult:
+    """`power on` got past `power_on()` and then failed. Exit 8, not 9.
+
+    Three mutations run in sequence and the second one energises the track. A
+    failure after that went to `run()`'s generic handler, which told the caller
+    the command failed - while the layout was now live and possibly with a
+    locomotive not yet idled. Those are different situations and a script has
+    to be able to act on the difference, so this is a RESULT carrying what
+    completed, not an error carrying a message about what did not.
+
+    `track_power` and the status bits are `null`, never `false`: the status
+    read is one of the steps that may have failed, and reporting a track this
+    command just energised as unpowered would be the founding rule broken in
+    the report of a failure to follow it.
+    """
+    failed_step = STEP_READ_STATUS if STEP_READ_STATUS not in completed else STEP_IDLE_ADDRESS
+    outcome = CommandResult(
+        schema=POWER_SCHEMA, command="power", ok=False, exit_code=PARTIAL_EXIT_CODE
+    )
+    outcome.result = {
+        "state": "on",
+        "track_power": None,
+        "emergency_stop": None,
+        "emergency_off": None,
+        "auto_start_mode": None,
+        "changed": True,
+        "idled_address": None,
+        "idled_direction": None,
+        "idled_direction_preserved": None,
+        "completed": list(completed),
+        "failed_step": failed_step,
+    }
+    outcome.warn(
+        "power_on_incomplete",
+        f"the track was switched on and then {failed_step} failed: {failure}",
+        completed=list(completed),
+        failed_step=failed_step,
+        error_code=error_code(failure),
+    )
+    outcome.say(f"track power was switched on; {failed_step} did not complete")
+    return outcome
+
+
 def build_stop(address: int | None) -> CommandResult:
     outcome = CommandResult(schema=STOP_SCHEMA, command="stop")
     outcome.result = {"address": address, "scope": "single" if address is not None else "all"}
     outcome.say(f"loco {address} stopped" if address is not None else "all locomotives stopped")
     return outcome
+
+
+#: The steps `power on` and `power off` run, named so the envelope can report
+#: which of them completed. `power on` is the one that needs it: its second
+#: step energises the track, so "the command failed" stops being the whole
+#: answer from that point on.
+STEP_STOP_ALL: Final[str] = "stop_all"
+STEP_POWER_ON: Final[str] = "power_on"
+STEP_READ_STATUS: Final[str] = "read_status"
+STEP_IDLE_ADDRESS: Final[str] = "idle_address"
+STEP_POWER_OFF: Final[str] = "power_off"
+
+
+def _power_on(station: Station, address: int | None) -> CommandResult:
+    # MEASURED (docs/probe-results.md): this station's start mode is automatic,
+    # and a stored speed does resume when power returns - that is what the
+    # doctor's D3 run drove a locomotive with, and what the backup relay note
+    # warns about. NOT MEASURED: whether the stop-all prefix is what clears
+    # that stored speed. Nobody has captured what the station's refresh buffer
+    # holds across a power cycle, so the prefix is a precaution taken on the
+    # strength of the first fact, not a proven remedy. Only the last step below
+    # - speed 0 to the resolved address - is proven.
+    station.emergency_stop(address=None)
+    station.power_on()
+    completed = [STEP_STOP_ALL, STEP_POWER_ON]
+    # The track is live from here. Anything that fails below is PARTIAL, and
+    # the caller has to be able to tell that from "nothing happened".
+    try:
+        status = station.status()
+        completed.append(STEP_READ_STATUS)
+        idled = _idle(station, address)
+        if idled is not None:
+            completed.append(STEP_IDLE_ADDRESS)
+    except RailctlError as exc:
+        return build_power_partial(completed=completed, failure=exc)
+    return build_power("on", status, changed=True, idled=idled, completed=completed)
+
+
+def _power_off(station: Station) -> CommandResult:
+    """The one of the two that reads status first: skipping its only mutation
+    when nothing needs doing is exactly what `changed: false` is for. `power
+    on` cannot do the same, because its own first call is the stop-all."""
+    before = station.status()
+    completed = [STEP_READ_STATUS]
+    was_on = before.track_power
+    if was_on:
+        station.power_off()
+        completed.append(STEP_POWER_OFF)
+        after = station.status()
+    else:
+        after = before
+    return build_power("off", after, changed=was_on, idled=None, completed=completed)
 
 
 def _idle(station: Station, address: int | None) -> Idled | None:
@@ -248,34 +355,8 @@ def register(app: typer.Typer) -> None:
             station = open_station(settings, capabilities_path=capabilities_path())
             try:
                 if wanted == "on":
-                    # MEASURED (docs/probe-results.md): this station's start
-                    # mode is automatic, and a stored speed does resume when
-                    # power returns - that is what the doctor's D3 run drove a
-                    # locomotive with, and what the backup relay note warns
-                    # about. NOT MEASURED: whether the stop-all prefix is what
-                    # clears that stored speed. Nobody has captured what the
-                    # station's refresh buffer holds across a power cycle, so
-                    # the prefix is a precaution taken on the strength of the
-                    # first fact, not a proven remedy. Only the last step
-                    # below - speed 0 to the resolved address - is proven.
-                    station.emergency_stop(address=None)
-                    station.power_on()
-                    status = station.status()
-                    return build_power(
-                        "on", status, changed=True, idled=_idle(station, settings.address)
-                    )
-                # `power off` is the one of the two that reads status first:
-                # skipping its only mutation when nothing needs doing is
-                # exactly what `changed: false` is for. `power on` cannot do
-                # the same, because its own first call is the stop-all above.
-                before = station.status()
-                was_on = before.track_power
-                if was_on:
-                    station.power_off()
-                    after = station.status()
-                else:
-                    after = before
-                return build_power("off", after, changed=was_on, idled=None)
+                    return _power_on(station, settings.address)
+                return _power_off(station)
             finally:
                 station.close()
 
