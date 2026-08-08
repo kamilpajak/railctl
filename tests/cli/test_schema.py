@@ -495,6 +495,54 @@ def test_help_still_works_when_the_config_file_is_unreadable(tmp_path):
     assert "EXIT CODES" in result.stdout
 
 
+def _broken_config(tmp_path) -> None:
+    broken = tmp_path / "railctl" / "config.toml"
+    broken.parent.mkdir(parents=True, exist_ok=True)
+    broken.write_text("target = [oops\n", encoding="utf-8")
+
+
+def test_schema_prints_the_manifest_when_the_config_file_cannot_be_parsed(tmp_path):
+    # The manifest is a compile-time constant, and `schema` is what an agent runs
+    # first, on a machine with nothing plugged in and possibly nothing configured.
+    # A stray bracket in `config.toml` used to take down that one command.
+    _broken_config(tmp_path)
+    result = runner.invoke(app, ["schema", "--format=json"])
+    assert result.exit_code == 0
+    assert json.loads(result.stdout)["result"]["schema"] == "railctl/schema/v1"
+
+
+def test_schema_prints_the_manifest_when_the_config_file_cannot_be_read(tmp_path):
+    if os.geteuid() == 0:  # pragma: no cover - the suite does not run as root
+        pytest.skip("mode 000 does not stop root from reading the file")
+    unreadable = tmp_path / "railctl" / "config.toml"
+    unreadable.parent.mkdir(parents=True, exist_ok=True)
+    unreadable.write_text("target = 'auto'\n", encoding="utf-8")
+    unreadable.chmod(0o000)
+    try:
+        result = runner.invoke(app, ["schema", "--format=json"])
+    finally:
+        unreadable.chmod(0o600)
+    assert result.exit_code == 0
+    assert json.loads(result.stdout)["result"]["schema"] == "railctl/schema/v1"
+
+
+def test_a_command_that_does_read_the_config_file_still_reports_a_broken_one(
+    monkeypatch, capsys, tmp_path, fake_station
+):
+    # The other half: `schema` skipping the file is a property of `schema`, not the
+    # config file quietly ceasing to be checked for everything else.
+    import railctl.cli.main as cli_main
+
+    _broken_config(tmp_path)
+    monkeypatch.setattr(sys, "argv", ["railctl", "status", "--format=json"])
+    with pytest.raises(SystemExit) as caught:
+        cli_main.main()
+    assert caught.value.code == 2
+    payload = json.loads(capsys.readouterr().err)
+    assert payload["code"] == "usage"
+    assert "config.toml" in payload["message"]
+
+
 @pytest.mark.parametrize("path", ["status", "version", "schema"])
 def test_none_of_the_registered_commands_mutates_anything(path: str):
     assert command_meta(path).mutates is False

@@ -1,8 +1,9 @@
 # src/railctl/cli/commands/schema.py
 """`railctl schema`: the manifest generated from `railctl.cli._meta`'s table.
 
-Opens no `Station` and touches no port - the one command an agent can use to
-discover the whole CLI with the layout unplugged. Its only failure mode is an
+Opens no `Station`, touches no port and reads no `config.toml` - the one
+command an agent can use to discover the whole CLI with the layout unplugged
+and nothing configured. Its only failure mode is an
 unresolved command path, and that is a plain `ValueError` from `_meta.manifest`
 left to propagate: `run()` (Task 8/9) already turns any `ValueError` into the
 standard `railctl/error/v1` exit-2 envelope, so this module raises nothing of
@@ -81,9 +82,14 @@ def register(app: typer.Typer) -> None:
         non_interactive: bool = _NON_INTERACTIVE,
     ) -> None:
         cli_ctx = ctx.obj
+        # `_without_config_file`, unlike every other command: the manifest is a compile-time
+        # constant, so nothing in `config.toml` can change this answer, and reading the file
+        # to print it puts the one command that must always work behind a file that may be
+        # broken or unreadable. `--format`/`--color` and their environment variables are
+        # still resolved and still validated - see `main.CliContext`.
         _, output = merged_output(
-            cli_ctx.settings,
-            cli_ctx.output,
+            cli_ctx.settings_without_config_file,
+            cli_ctx.output_without_config_file,
             target=target,
             address=address,
             fmt=format_,
