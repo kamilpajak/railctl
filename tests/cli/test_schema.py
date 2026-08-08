@@ -376,15 +376,43 @@ def _leaf_command(path: str):
     return click_app
 
 
-def _long_option_names(command) -> set[str]:
-    # `param.param_type_name`, not `isinstance(param, click.Option)`: Typer 0.27
-    # vendors Click as the private `typer._click`, and importing from a private
-    # module is how this file would break on a Typer upgrade that moves it.
-    names: set[str] = set()
+def _parsed_surface(command) -> dict[str, object]:
+    """Every parameter Click will actually parse for `command`.
+
+    Long names alone left two thirds of the surface compared against nothing: the
+    manifest could advertise a positional that does not exist, omit one that does, or
+    name the wrong short flag, and no test would say so. Positionals are a LIST, not a
+    set - the order is what decides which word of `railctl cv read 8 3` is the CV.
+
+    `param.param_type_name`, not `isinstance(param, click.Option)`: Typer 0.27 vendors
+    Click as the private `typer._click`, and importing from a private module is how this
+    file would break on a Typer upgrade that moves it.
+    """
+    long_names: set[str] = set()
+    shorts: set[str] = set()
+    positionals: list[tuple[str, bool]] = []
     for param in command.params:
         if param.param_type_name == "option":
-            names.update(opt for opt in param.opts if opt.startswith("--"))
-    return names
+            for opt in param.opts:
+                target = long_names if opt.startswith("--") else shorts
+                target.add(opt)
+        else:
+            positionals.append((param.name, param.required))
+    return {
+        "long": long_names - {"--help"},
+        "short": shorts,
+        "positional": positionals,
+    }
+
+
+def _declared_surface(meta: CommandMeta) -> dict[str, object]:
+    """The same three facts, read off the metadata row - the manifest's own claim."""
+    options = (*meta.options, *GLOBAL_OPTIONS)
+    return {
+        "long": {o.name for o in options},
+        "short": {o.short for o in options if o.short is not None},
+        "positional": [(a.name, a.required) for a in meta.arguments],
+    }
 
 
 def test_every_registered_command_has_a_metadata_row_and_vice_versa():
@@ -410,14 +438,13 @@ def test_a_missing_registration_would_fail_the_drift_check():
 
 
 @pytest.mark.parametrize("meta", COMMANDS, ids=lambda m: m.path)
-def test_option_names_match_between_typer_and_metadata(meta: CommandMeta):
+def test_the_whole_parameter_surface_matches_between_typer_and_metadata(meta: CommandMeta):
     # Every registered command declares its own metadata options PLUS the
     # eight global ones a second time (see the per-command global-option
     # note in `_meta.global_option`) - a command that forgot that block would
     # otherwise look complete against only its own (possibly empty) option
     # list, so the union with GLOBAL_OPTIONS is what makes an omission fail.
-    typer_names = _long_option_names(_leaf_command(meta.path)) - {"--help"}
-    assert typer_names == {o.name for o in meta.options} | {o.name for o in GLOBAL_OPTIONS}
+    assert _parsed_surface(_leaf_command(meta.path)) == _declared_surface(meta)
 
 
 @pytest.mark.parametrize("meta", [c for c in COMMANDS if c.path != "schema"], ids=lambda m: m.path)
@@ -440,10 +467,15 @@ def test_the_observed_exit_code_is_one_the_command_publishes(meta: CommandMeta):
     assert json.loads(result.stderr)["exit_code"] == result.exit_code
 
 
-def test_global_options_match_the_root_group():
+def test_the_root_group_carries_the_global_options_and_no_positionals():
     root = typer.main.get_command(app)
-    typer_names = _long_option_names(root) - {"--help"}
-    assert typer_names == {o.name for o in GLOBAL_OPTIONS}
+    assert _parsed_surface(root) == {
+        "long": {o.name for o in GLOBAL_OPTIONS},
+        "short": {o.short for o in GLOBAL_OPTIONS if o.short is not None},
+        # The root takes the verb and nothing else; a positional here would swallow
+        # the subcommand name.
+        "positional": [],
+    }
 
 
 def test_schema_json_prints_one_envelope_with_the_registered_paths_in_tree_order():
