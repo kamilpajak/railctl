@@ -20,13 +20,23 @@ never a silent edit to what `v1` means.
 
 from __future__ import annotations
 
-import re
 from dataclasses import dataclass, field
 from typing import Final, Literal
+
+from railctl.errors import RailctlError
 
 Format = Literal["human", "json", "ndjson"]
 
 ERROR_SCHEMA: Final[str] = "railctl/error/v1"
+
+# The two codes that name something other than a class in the exception tree, kept here
+# rather than written as bare literals at their call sites in `_errors.py`. `usage` is a
+# malformed invocation, `internal` is a bug in this tool. Both are as much a part of the
+# published contract as any declared code, so `RESERVED_CODES` is what a test checks the
+# tree against to be sure no exception ever claims one of these names for itself.
+USAGE_CODE: Final[str] = "usage"
+INTERNAL_CODE: Final[str] = "internal"
+RESERVED_CODES: Final[frozenset[str]] = frozenset({USAGE_CODE, INTERNAL_CODE})
 
 # Exactly these three: a script that retries on any other code is retrying a real answer
 # (UnsupportedCommandError) or a bug (everything else), neither of which gets better on retry.
@@ -35,22 +45,30 @@ RETRYABLE_CODES: Final[frozenset[str]] = frozenset({"link_timeout", "station_bus
 USAGE_EXIT_CODE: Final[int] = 2
 INTERNAL_EXIT_CODE: Final[int] = 1
 
-_TRAILING_ERROR = re.compile(r"Error$")
-_WORD_BOUNDARY = re.compile(r"(?<!^)(?=[A-Z])")
-
 
 def error_code(exc: BaseException) -> str:
-    """`PomReadUnsupportedError` -> `"pom_read_unsupported"`; `LinkTimeout` -> `"link_timeout"`.
+    """The published code for `exc` - read off the class, never computed from its name.
 
-    Only a trailing "Error" is stripped, not "Timeout": the exit-code table's own class names
-    are the source of truth here, and `LinkTimeout` reads as "link_timeout" everywhere else in
-    this project's docs, never "link". Word boundaries are inserted before every capital that
-    is not the first character, then the whole name is lowercased - this is what turns
-    `CvOutOfRangeError` into `cv_out_of_range` and `PortBusy` (no "Error" suffix at all) into
-    `port_busy` with the same one rule, rather than a lookup table that silently misses a class.
+    This used to derive the string with a regex over `type(exc).__name__`, which read as one
+    tidy rule with no lookup table to fall out of date. It had two faults. A class rename
+    silently rewrote a contract string that may never be renamed; and the rule mangled the
+    project's own acronyms, publishing `x_bus_checksum` and `port_not_xpress_net` while every
+    other machine-readable field in the same output spells them `xbus` and `xpressnet`. The
+    second fault is the one that settles it: any fix needs a table of acronyms, so a table
+    exists either way - and a table of the codes themselves is the honest one, because it says
+    what is published instead of what to do to a name to arrive at it.
+
+    An exception this tool never named - a `RuntimeError`, something raised by a library -
+    publishes `internal`, the same code `run()`'s safety net gives it one layer up. Minting a
+    code on the spot from a foreign class name would put a string in the contract that appears
+    in no table and no test, and would read to a caller as a documented failure mode.
+
+    `type(exc).code`, not `exc.code`: what a class publishes must not be changeable by setting
+    an attribute on one instance of it.
     """
-    name = _TRAILING_ERROR.sub("", type(exc).__name__)
-    return _WORD_BOUNDARY.sub("_", name).lower()
+    if isinstance(exc, RailctlError):
+        return type(exc).code
+    return INTERNAL_CODE
 
 
 def tri_state(value: bool | None) -> Literal["yes", "no", "unknown"]:

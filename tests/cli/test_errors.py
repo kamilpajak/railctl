@@ -11,13 +11,22 @@ from __future__ import annotations
 
 import io
 import json
+import re
+from itertools import pairwise
+from pathlib import Path
 
 import pytest
 import typer
 
 from railctl.cli._errors import OutputContext, default_suggestions, report_for, run
 from railctl.cli.render import render_error
-from railctl.cli.result import CommandResult, ErrorReport, error_code
+from railctl.cli.result import (
+    INTERNAL_CODE,
+    RESERVED_CODES,
+    CommandResult,
+    ErrorReport,
+    error_code,
+)
 from railctl.errors import (
     AbortedError,
     ConfirmationRequiredError,
@@ -30,11 +39,21 @@ from railctl.errors import (
     StationBusyError,
     TrackPowerError,
     UnsupportedCommandError,
+    XBusDecodeError,
 )
 
 
 def _tree(root: type[RailctlError] = RailctlError) -> set[type[RailctlError]]:
-    found = {root}
+    """Every exception class railctl defines, and ONLY those.
+
+    The `__module__` filter is load-bearing, not tidiness. CPython registers a class with its
+    bases BEFORE running `__init_subclass__`, so a class whose hook raises stays in
+    `__subclasses__()` as a zombie: defined enough to be walked, never finished enough to have
+    a `code`. This file plants exactly that kind of class on purpose (see the guard tests
+    below), and without the filter those zombies would leak into every other test that walks
+    the tree - making the uniqueness and declaration checks pass or fail on test ORDER.
+    """
+    found = {root} if root.__module__ == "railctl.errors" else set()
     for sub in root.__subclasses__():
         found |= _tree(sub)
     return found
@@ -57,17 +76,10 @@ def test_error_code_maps_the_documented_names(exc_cls: type[RailctlError], code:
     assert error_code(exc_cls.__new__(exc_cls)) == code
 
 
-#: Every published error code, frozen. `error_code()` derives these from the Python class
-#: name, but the code is a PUBLIC CONTRACT string that may never be renamed inside a major
-#: version - so renaming a class silently renames a contract field, and only the eight rows
-#: pinned above would have noticed. This table closes that gap: any rename, and any new
-#: exception class, has to come here and be looked at on purpose.
-#:
-#: Two entries read oddly and are frozen deliberately rather than quietly improved:
-#: `x_bus_checksum` (not `xbus_checksum`) and `port_not_xpress_net` (not `port_not_xpressnet`).
-#: The regex splits on every capital, and `XBus`/`XpressNet` are spelled with two. Changing
-#: them now is free and would cost a major version later; if they are to change, this is the
-#: moment, and it is a decision to take rather than a diff to wave through.
+#: Every published error code, frozen. Each one is DECLARED on its class in `errors.py`; this
+#: table is the second copy, and its whole job is to make any edit to the first copy show up
+#: in a diff as a contract change rather than a refactor. A code is public and may never be
+#: renamed inside a major version, so the two copies disagreeing is the alarm, not the bug.
 PUBLISHED_ERROR_CODES: dict[str, str] = {
     "AbortedError": "aborted",
     "AmbiguousPort": "ambiguous_port",
@@ -84,7 +96,7 @@ PUBLISHED_ERROR_CODES: dict[str, str] = {
     "PortConfigError": "port_config",
     "PortNotFound": "port_not_found",
     "PortNotOpen": "port_not_open",
-    "PortNotXpressNet": "port_not_xpress_net",
+    "PortNotXpressNet": "port_not_xpressnet",
     "ProgrammingError": "programming",
     "ProtocolError": "protocol",
     "RailctlError": "railctl",
@@ -96,10 +108,10 @@ PUBLISHED_ERROR_CODES: dict[str, str] = {
     "TransportError": "transport",
     "UnsupportedCommandError": "unsupported_command",
     "UnsupportedFeatureError": "unsupported_feature",
-    "XBusChecksumError": "x_bus_checksum",
-    "XBusDecodeError": "x_bus_decode",
-    "XBusEncodeError": "x_bus_encode",
-    "XBusIncompleteError": "x_bus_incomplete",
+    "XBusChecksumError": "xbus_checksum",
+    "XBusDecodeError": "xbus_decode",
+    "XBusEncodeError": "xbus_encode",
+    "XBusIncompleteError": "xbus_incomplete",
 }
 
 
@@ -109,6 +121,106 @@ def test_every_published_error_code_is_exactly_what_it_was():
     """
     live = {k.__name__: error_code(k.__new__(k)) for k in _tree()}
     assert live == PUBLISHED_ERROR_CODES
+
+
+def test_defining_a_subclass_with_no_code_fails_at_class_definition():
+    """The primary guard is not a test - it is `RailctlError.__init_subclass__`, which raises
+    while the module is still importing. An exception class that forgot its code cannot reach
+    a test run, a review or a release; it stops the interpreter at the line that defines it.
+    This is the tripwire proving that hook is still armed.
+    """
+    with pytest.raises(TypeError, match="declares no `code`"):
+
+        class Undeclared(RailctlError):
+            pass
+
+
+def test_a_subclass_may_not_silently_inherit_its_parents_code():
+    """The one mistake declaring a code introduces that deriving one could not make. A subclass
+    inherits `code` as an attribute, so a hook written with `hasattr` would be satisfied by a
+    class that declared nothing - and it would publish its parent's code: a wrong answer, not a
+    missing one. `XBusDecodeError` is the parent here on purpose, because it is two levels down;
+    a hook that only guarded the direct children of `RailctlError` would pass this and should not.
+    """
+    with pytest.raises(TypeError, match="declares no `code`"):
+
+        class SilentlyInherits(XBusDecodeError):
+            pass
+
+
+def test_every_class_in_the_error_tree_declares_its_own_code():
+    """Unfailable while the hook above is intact, and that is the point: it is the tripwire on
+    the hook, and it covers `RailctlError` itself, which `__init_subclass__` never runs for.
+    Do not read it as independent coverage of the 31 declarations.
+    """
+    undeclared = sorted(k.__name__ for k in _tree() if "code" not in k.__dict__)
+    assert undeclared == []
+
+
+def test_no_exception_claims_a_reserved_code():
+    """`usage` and `internal` describe a malformed invocation and a bug in this tool. An
+    exception answering to either would make a real domain failure indistinguishable from one
+    of those two, and a caller has no second field to break the tie.
+    """
+    clashing = sorted(k.__name__ for k in _tree() if k.code in RESERVED_CODES)
+    assert clashing == []
+
+
+def test_an_exception_this_tool_never_named_publishes_internal():
+    """A foreign exception must not mint a contract string from its class name. `internal` is
+    what `run()`'s safety net already publishes for the same event, so the two agree.
+    """
+
+    class DefinedByATest(Exception):
+        pass
+
+    assert error_code(DefinedByATest("x")) == INTERNAL_CODE
+    assert error_code(RuntimeError("x")) == INTERNAL_CODE
+
+
+def _package_sources() -> str:
+    """Every line of the package's own Python, as one blob to search."""
+    root = Path(__file__).resolve().parents[2] / "src" / "railctl"
+    return "\n".join(path.read_text(encoding="utf-8") for path in sorted(root.rglob("*.py")))
+
+
+def test_no_published_code_splits_a_word_this_package_spells_as_one():
+    """The guard on the bug that started this: `x_bus_checksum` was unique, snake_case and
+    entirely wrong, and every other check in this file was happy with it.
+
+    The question it asks is not "is this spelled nicely" but "does the package itself write
+    these letters as one word anywhere in its own source". `xbus` appears in 45 places and
+    `xpressnet` in 4, so `x_bus_` and `xpress_net_` were this tool recording one fact two ways
+    - in `code` split, in the status envelope's `"protocol": "xpressnet"` glued. A machine
+    consumer cannot tell those are the same word.
+    """
+    sources = _package_sources()
+    offenders = []
+    for klass in _tree():
+        parts = klass.code.split("_")
+        for left, right in pairwise(parts):
+            glued = f"{left}{right}"
+            if len(glued) >= 4 and re.search(rf"\b{glued}\b", sources):
+                offenders.append(f"{klass.__name__}.code={klass.code!r} splits {glued!r}")
+    assert offenders == [], (
+        f"{offenders} - the package spells these as one word in its own source. Either spell "
+        f"the declared code the same way, or establish the split spelling in the package first."
+    )
+
+
+def test_the_spelling_scan_would_catch_the_bug_it_was_written_for():
+    """Proves the scan above by running it against the code this project actually shipped for
+    one commit. Without this, a scan that silently matched nothing would look identical to a
+    scan that found nothing wrong.
+    """
+    sources = _package_sources()
+    parts = "x_bus_checksum".split("_")
+    glued = [
+        f"{a}{b}"
+        for a, b in pairwise(parts)
+        if len(f"{a}{b}") >= 4 and re.search(rf"\b{a}{b}\b", sources)
+    ]
+    assert glued == ["xbus"]
 
 
 def test_every_class_in_the_error_tree_gets_a_unique_code():

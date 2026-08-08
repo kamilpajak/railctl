@@ -68,12 +68,13 @@ def test_a_doctor_capability_keeps_its_tri_state_in_json_and_uses_the_helper_onl
 def test_error_code_is_reexported_from_result():
     # error_code has its own dedicated coverage in tests/cli/test_errors.py; this only
     # confirms result.py re-exports it, since render.py and _errors.py both import it from here.
-    # Breaks if error_code is moved out of result.py without updating this import, or if the
-    # function stops handling a plain (non-RailctlError) exception the same way.
+    # An exception this tool never named publishes "internal" - the same code run()'s safety
+    # net gives it one layer up - rather than a contract string invented from a foreign class
+    # name, which would appear in no table and read to a caller as a documented failure mode.
     class Boom(Exception):
         pass
 
-    assert error_code(Boom("x")) == "boom"
+    assert error_code(Boom("x")) == "internal"
 
 
 def test_warn_appends_a_result_warning_with_its_details():

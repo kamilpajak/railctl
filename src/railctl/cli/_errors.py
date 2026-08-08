@@ -20,8 +20,10 @@ import typer
 
 from railctl.cli.render import render, render_error
 from railctl.cli.result import (
+    INTERNAL_CODE,
     INTERNAL_EXIT_CODE,
     RETRYABLE_CODES,
+    USAGE_CODE,
     USAGE_EXIT_CODE,
     CommandResult,
     ErrorReport,
@@ -111,7 +113,7 @@ def _internal_report(exc: BaseException, ctx: OutputContext) -> ErrorReport:
     if _verbose():
         traceback.print_exc(file=ctx.stderr)
     return ErrorReport(
-        code="internal",
+        code=INTERNAL_CODE,
         message=str(exc),
         retryable=False,
         exit_code=INTERNAL_EXIT_CODE,
@@ -143,7 +145,7 @@ def run(command: str, ctx: OutputContext, work: Callable[[], CommandResult]) -> 
         report = _internal_report(exc, ctx)
     except ValueError as exc:
         report = ErrorReport(
-            code="usage",
+            code=USAGE_CODE,
             message=str(exc),
             retryable=False,
             exit_code=USAGE_EXIT_CODE,
