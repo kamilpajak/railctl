@@ -36,11 +36,17 @@ from railctl.cli._meta import (
     typer_option,
 )
 from railctl.cli.config import capabilities_path
-from railctl.cli.deps import UsageProblem, merged_output, open_station, require_address
+from railctl.cli.deps import (
+    DIRECTION_TEXT,
+    UsageProblem,
+    merged_output,
+    open_station,
+    read_loco,
+    require_address,
+)
 from railctl.cli.result import CommandResult, tri_state
 from railctl.errors import (
     FunctionGroupUnreadableError,
-    RailctlError,
     StationBusyError,
     StationError,
     TrackPowerError,
@@ -64,10 +70,6 @@ RUNNING_NOTICE: Final[str] = (
 )
 
 MAX_FUNCTION: Final[int] = 28
-_DIRECTION_TEXT: Final[dict[Direction, str]] = {
-    Direction.FORWARD: "forward",
-    Direction.REVERSE: "reverse",
-}
 #: Printed instead of a direction word when the reply carried none. A 14/27/28
 #: step reply leaves `direction` None because `speed.py` decodes only the
 #: 128-step layout; saying "forward" there would report a decode this tool
@@ -194,7 +196,7 @@ def build_drive(
         changed = (was.speed, was.direction) != (speed, direction)
         previous_speed_decoded = True
 
-    direction_text = _DIRECTION_TEXT[direction]
+    direction_text = DIRECTION_TEXT[direction]
     outcome = CommandResult(schema=DRIVE_SCHEMA, command="drive")
     outcome.result = {
         "address": address,
@@ -234,32 +236,6 @@ def build_function(address: int, function: int, state: str, *, now_on: bool) -> 
         f"loco {address} F{function} is now {'on' if now_on else 'off'} (requested {state})"
     )
     return outcome
-
-
-def _read_loco(station: Station, address: int) -> LocoInfo | None:
-    """The locomotive's current state, or None when the station could not say.
-
-    None means UNKNOWN, never "standing still": every caller below branches on
-    it separately rather than folding it into a default speed of 0.
-
-    The catch is `RailctlError`, not `StationError`. Every read that reaches
-    this function is cosmetic - a `changed` field, a direction to keep, a
-    running notice - and none of it may decide whether a mutation goes out.
-    `LinkTimeout`, `TransportError`, `ProtocolError`, `XBusChecksumError` and
-    `UnsupportedCommandError` all subclass `RailctlError` directly rather than
-    `StationError`, so the narrower catch let a `61 82` refusal of the loco-info
-    request - a working link, a healthy track - abort a command whose own
-    telegram would have gone straight through.
-
-    NOT `except Exception`. An address outside 1..9999 raises `ValueError` from
-    `Station._validate_address`, and that has to keep failing: it says the
-    caller asked about a locomotive that cannot exist, which is a different
-    answer from the station declining to describe one that can.
-    """
-    try:
-        return station.loco_info(address)
-    except RailctlError:
-        return None
 
 
 def _steps_text(info: LocoInfo) -> str:
@@ -349,7 +325,7 @@ def _warn_if_running(info: LocoInfo | None, address: int, stderr: Any) -> None:
     if info.speed == 0:
         return
     direction_text = (
-        _DIRECTION_TEXT[info.direction] if info.direction is not None else _UNKNOWN_DIRECTION
+        DIRECTION_TEXT[info.direction] if info.direction is not None else _UNKNOWN_DIRECTION
     )
     print(
         RUNNING_NOTICE.format(address=address, speed=info.speed, direction=direction_text),
@@ -422,7 +398,7 @@ def register(app: typer.Typer) -> None:
                 was: LocoInfo | None = None
                 if speed > 0:
                     preflight(station, speed=speed)
-                    was = _read_loco(station, resolved)
+                    was = read_loco(station, resolved)
                     direction = _direction_for(
                         typed,
                         was,
@@ -445,7 +421,7 @@ def register(app: typer.Typer) -> None:
                         RUNNING_NOTICE.format(
                             address=resolved,
                             speed=speed,
-                            direction=_DIRECTION_TEXT[direction],
+                            direction=DIRECTION_TEXT[direction],
                         ),
                         file=output.stderr,
                     )
@@ -526,7 +502,7 @@ def register(app: typer.Typer) -> None:
                         ],
                     ) from exc
                 result = build_function(resolved, func_num, wanted_state, now_on=now_on)
-                _warn_if_running(_read_loco(station, resolved), resolved, output.stderr)
+                _warn_if_running(read_loco(station, resolved), resolved, output.stderr)
                 return result
             finally:
                 station.close()

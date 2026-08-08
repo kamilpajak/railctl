@@ -392,16 +392,36 @@ def test_build_function_says_off_when_the_resulting_bit_is_off():
 
 
 def test_build_power_reports_manual_start_mode_when_bit_2_is_clear():
-    result = power.build_power("on", CLEAR_STATUS, changed=True, idled_address=None)
+    result = power.build_power("on", CLEAR_STATUS, changed=True, idled=None)
     assert result.result["auto_start_mode"] is False
     assert any("manual" in line for line in result.lines)
-    assert not any("was set to speed 0" in line for line in result.lines)
+    assert not any("speed 0" in line for line in result.lines)
 
 
 def test_build_power_reports_the_track_as_off_and_unchanged():
-    result = power.build_power("off", EMERGENCY_OFF_STATUS, changed=False, idled_address=None)
+    result = power.build_power("off", EMERGENCY_OFF_STATUS, changed=False, idled=None)
     assert result.result["track_power"] is False
     assert "track power is off (no change)" in result.lines[0]
+
+
+def test_build_power_names_the_direction_the_idle_telegram_carried():
+    idled = power.Idled(address=3, direction=Direction.REVERSE, direction_preserved=True)
+    result = power.build_power("on", AUTO_START_STATUS, changed=True, idled=idled)
+    assert result.result["idled_address"] == 3
+    assert result.result["idled_direction"] == "reverse"
+    assert result.result["idled_direction_preserved"] is True
+    assert "loco 3 was sent speed 0 reverse" in result.lines[-1]
+    assert result.warnings == []
+
+
+def test_build_power_warns_when_the_idle_telegram_may_have_changed_the_direction():
+    """`power on` writes to a locomotive. When it could not read which way that
+    locomotive was pointing, the forward it sent is a choice, not a copy."""
+    idled = power.Idled(address=3, direction=Direction.FORWARD, direction_preserved=False)
+    result = power.build_power("on", AUTO_START_STATUS, changed=True, idled=idled)
+    assert result.result["idled_direction_preserved"] is False
+    assert [w.name for w in result.warnings] == ["direction_not_preserved"]
+    assert result.warnings[0].details == {"address": 3, "sent": "forward"}
 
 
 def test_build_stop_reports_scope_all_when_no_address_is_given():
@@ -890,9 +910,64 @@ def test_power_on_runs_stop_all_then_power_on_then_status_then_idles_address(mon
     app = _app(station, monkeypatch, address=3)
     result = runner.invoke(app, ["power", "on"])
     assert result.exit_code == 0
-    assert station.call_names == ["emergency_stop", "power_on", "status", "drive", "close"]
+    assert station.call_names == [
+        "emergency_stop",
+        "power_on",
+        "status",
+        "loco_info",
+        "drive",
+        "close",
+    ]
     assert station.calls[0] == ("emergency_stop", (), {"address": None})
     assert station.calls[-2] == ("drive", (3, 0, Direction.FORWARD), {})
+
+
+def test_power_on_keeps_the_stored_direction_of_the_locomotive_it_idles(monkeypatch):
+    """Speed 0 is the point of that telegram; the direction never was.
+
+    `power on` sent `Direction.FORWARD` unconditionally, so a locomotive stored
+    in reverse came back forward - from a command whose name, help text and
+    envelope said nothing about direction.
+
+    BENCH CHECK: store a reverse speed for loco 3, cut power, run `railctl
+    power on`, then drive it and watch which way it goes. Only that settles
+    whether the decoder kept the direction; this reads a call list.
+    """
+    station = FakeStation(
+        status=AUTO_START_STATUS, loco_info=replace(LOCO_128, direction=Direction.REVERSE)
+    )
+    app = _app(station, monkeypatch, address=3, fmt="json")
+    result = runner.invoke(app, ["power", "on"])
+    assert result.exit_code == 0
+    assert station.calls[-2] == ("drive", (3, 0, Direction.REVERSE), {})
+    payload = json.loads(result.stdout)
+    assert payload["result"]["idled_direction"] == "reverse"
+    assert payload["result"]["idled_direction_preserved"] is True
+
+
+@pytest.mark.parametrize("failure", COSMETIC_READ_FAILURES, ids=lambda exc: type(exc).__name__)
+def test_power_on_still_idles_and_says_so_when_the_direction_cannot_be_read(monkeypatch, failure):
+    """The idle is a safety telegram: a direction that cannot be read must not
+    cost the operator the speed 0 that stops a locomotive resuming by itself.
+    So it goes out forward, and the envelope and a warning both say the stored
+    direction was not preserved rather than presenting forward as measured."""
+    station = FakeStation(status=AUTO_START_STATUS, loco_info_raises=failure)
+    app = _app(station, monkeypatch, address=3, fmt="json")
+    result = runner.invoke(app, ["power", "on"])
+    assert result.exit_code == 0, result.stderr
+    assert station.calls[-2] == ("drive", (3, 0, Direction.FORWARD), {})
+    payload = json.loads(result.stdout)
+    assert payload["result"]["idled_direction_preserved"] is False
+    assert [w["name"] for w in payload["warnings"]] == ["direction_not_preserved"]
+
+
+def test_power_on_does_not_preserve_a_direction_the_reply_never_decoded(monkeypatch):
+    station = FakeStation(status=AUTO_START_STATUS, loco_info=LOCO_14_STEP)
+    app = _app(station, monkeypatch, address=3, fmt="json")
+    result = runner.invoke(app, ["power", "on"])
+    assert result.exit_code == 0
+    assert station.calls[-2] == ("drive", (3, 0, Direction.FORWARD), {})
+    assert json.loads(result.stdout)["result"]["idled_direction_preserved"] is False
 
 
 def test_power_on_does_not_idle_when_no_address_is_configured(monkeypatch):

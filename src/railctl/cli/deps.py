@@ -25,6 +25,17 @@ from railctl.cli.render import want_color
 from railctl.cli.result import Format, LinkInfo, StationInfo
 from railctl.station import TIMING, Station
 from railctl.xbus.address import LOCO_ADDR_MAX, LOCO_ADDR_MIN
+from railctl.xbus.replies import LocoInfo
+from railctl.xbus.speed import Direction
+
+#: A direction is a word in every rendering, never a wire value, and it is
+#: spelled here once. `drive` and `power` both report one, and two private
+#: copies of this table are how they start disagreeing about the spelling a
+#: script matches on.
+DIRECTION_TEXT: Final[dict[Direction, str]] = {
+    Direction.FORWARD: "forward",
+    Direction.REVERSE: "reverse",
+}
 
 # Public, not `_ALLOWED_*`, because `cli/_meta.py` publishes these exact tuples as the
 # `enum` list of `--format` and `--color` in `railctl schema`'s manifest. Read there, never
@@ -375,6 +386,37 @@ def open_station(settings: Settings, *, capabilities_path: Path | None) -> Stati
         capabilities_path=capabilities_path,
         timing=TIMING,
     )
+
+
+def read_loco(station: Station, address: int) -> LocoInfo | None:
+    """The locomotive's current state, or None when the station could not say.
+
+    None means UNKNOWN, never "standing still": every caller branches on it
+    separately rather than folding it into a default speed of 0.
+
+    The catch is `RailctlError`, not `StationError`. Every read that reaches
+    this function is cosmetic - a `changed` field, a direction to preserve, a
+    running notice - and none of it may decide whether a mutation goes out.
+    `LinkTimeout`, `TransportError`, `ProtocolError`, `XBusChecksumError` and
+    `UnsupportedCommandError` all subclass `RailctlError` directly rather than
+    `StationError`, so the narrower catch let a `61 82` refusal of the loco-info
+    request - a working link, a healthy track - abort a command whose own
+    telegram would have gone straight through.
+
+    NOT `except Exception`. An address outside 1..9999 raises `ValueError` from
+    `Station._validate_address`, and that has to keep failing: it says the
+    caller asked about a locomotive that cannot exist, which is a different
+    answer from the station declining to describe one that can.
+
+    Lives here rather than in `commands/throttle.py` because `commands/power.py`
+    needs the same guarantee for the direction it preserves, and one command
+    module importing another is how the two copies start disagreeing about
+    which exceptions are cosmetic.
+    """
+    try:
+        return station.loco_info(address)
+    except errors.RailctlError:
+        return None
 
 
 def link_info(station: Station, settings: Settings) -> LinkInfo:

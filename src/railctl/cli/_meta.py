@@ -322,9 +322,19 @@ _FUNCTION = CommandMeta(
 #: `typer_option` attaches no `callback=`: a `typer.BadParameter` exits through
 #: Click's own usage box and never emits the `railctl/error/v1` envelope.
 POWER_STATE_ARG = Argument(name="state", help="on or off", type="enum", enum=("on", "off"))
+#: Named in the row rather than only in the source, because a caller cannot see
+#: it from the command's name and nothing else published it: `power on` sends a
+#: speed-0 telegram to `--address`. That telegram is why the locomotive does
+#: not resume its stored speed when the track comes back (start mode is
+#: automatic on this station - docs/probe-results.md), and it is also a write
+#: to a locomotive from a command called "power".
+_POWER_HELP: Final[str] = (
+    "Track power on or off; `power on` also sends speed 0 to --address, keeping its stored "
+    "direction where the station reports one, so it does not resume by itself"
+)
 _POWER = CommandMeta(
     path="power",
-    help="Track power on or off",
+    help=_POWER_HELP,
     schema="railctl/power/v1",
     mutates=True,
     exit_codes=POWER_EXIT_CODES,

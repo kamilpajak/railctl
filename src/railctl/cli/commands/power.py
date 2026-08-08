@@ -12,6 +12,7 @@ convenient default would stop only locomotive 3. `stop` therefore ignores
 
 from __future__ import annotations
 
+from dataclasses import dataclass
 from typing import Final
 
 import typer
@@ -27,8 +28,15 @@ from railctl.cli._meta import (
     typer_option,
 )
 from railctl.cli.config import capabilities_path
-from railctl.cli.deps import UsageProblem, merged_output, open_station
+from railctl.cli.deps import (
+    DIRECTION_TEXT,
+    UsageProblem,
+    merged_output,
+    open_station,
+    read_loco,
+)
 from railctl.cli.result import CommandResult
+from railctl.station import Station
 from railctl.xbus.replies import StationStatus
 from railctl.xbus.speed import Direction
 
@@ -60,8 +68,25 @@ _STATE_ARG = typer_argument(POWER_STATE_ARG)
 _STOP_ADDRESS = typer_option(STOP_ADDRESS_OPT)
 
 
+@dataclass(frozen=True, slots=True)
+class Idled:
+    """What the speed-0 telegram `power on` sends to `--address` carried.
+
+    `direction_preserved` is the honest half. `power on` used to send
+    `Direction.FORWARD` unconditionally, so a locomotive stored in reverse came
+    back forward - a change nobody asked for, from a command whose name says
+    nothing about direction. It is preserved when the station answers with one,
+    and when it does not this says so instead of presenting the fallback as the
+    locomotive's own direction.
+    """
+
+    address: int
+    direction: Direction
+    direction_preserved: bool
+
+
 def build_power(
-    state: str, status: StationStatus, *, changed: bool, idled_address: int | None
+    state: str, status: StationStatus, *, changed: bool, idled: Idled | None
 ) -> CommandResult:
     outcome = CommandResult(schema=POWER_SCHEMA, command="power")
     outcome.result = {
@@ -69,7 +94,9 @@ def build_power(
         "track_power": status.track_power,
         "auto_start_mode": status.auto_start_mode,
         "changed": changed,
-        "idled_address": idled_address,
+        "idled_address": None if idled is None else idled.address,
+        "idled_direction": None if idled is None else DIRECTION_TEXT[idled.direction],
+        "idled_direction_preserved": None if idled is None else idled.direction_preserved,
     }
     outcome.say(
         f"track power is {'on' if status.track_power else 'off'} "
@@ -86,8 +113,20 @@ def build_power(
         )
     else:
         outcome.say("start mode is manual: locomotives stay stopped until driven")
-    if idled_address is not None:
-        outcome.say(f"loco {idled_address} was set to speed 0 so it does not move on its own")
+    if idled is not None:
+        direction_text = DIRECTION_TEXT[idled.direction]
+        outcome.say(
+            f"loco {idled.address} was sent speed 0 {direction_text} so it does not move on its own"
+        )
+        if not idled.direction_preserved:
+            outcome.warn(
+                "direction_not_preserved",
+                f"loco {idled.address}'s stored direction could not be read, so the speed-0 "
+                f"telegram went out {direction_text}; if it was running the other way, that "
+                f"is now changed",
+                address=idled.address,
+                sent=direction_text,
+            )
     return outcome
 
 
@@ -96,6 +135,29 @@ def build_stop(address: int | None) -> CommandResult:
     outcome.result = {"address": address, "scope": "single" if address is not None else "all"}
     outcome.say(f"loco {address} stopped" if address is not None else "all locomotives stopped")
     return outcome
+
+
+def _idle(station: Station, address: int | None) -> Idled | None:
+    """Send speed 0 to `address`, keeping its stored direction where one can be
+    read. `None` when no address is configured: there is nothing to idle.
+
+    Speed 0 is the point of this telegram - the station's start mode is
+    automatic on this bench (docs/probe-results.md), so a stored speed resumes
+    the moment power returns. The direction was never the point, and sending
+    `Direction.FORWARD` unconditionally overwrote whatever the locomotive had.
+
+    The read is `read_loco`, so it can never abort the idle: a direction that
+    cannot be read is reported as not preserved, and the telegram still goes
+    out. Leaving a locomotive able to start by itself in order to protect its
+    direction would be the wrong way round.
+    """
+    if address is None:
+        return None
+    was = read_loco(station, address)
+    stored = was.direction if was is not None else None
+    direction = Direction.FORWARD if stored is None else stored
+    station.drive(address, 0, direction)
+    return Idled(address=address, direction=direction, direction_preserved=stored is not None)
 
 
 def _checked_state(state: str) -> str:
@@ -163,10 +225,9 @@ def register(app: typer.Typer) -> None:
                     station.emergency_stop(address=None)
                     station.power_on()
                     status = station.status()
-                    idled_address = settings.address
-                    if idled_address is not None:
-                        station.drive(idled_address, 0, Direction.FORWARD)
-                    return build_power("on", status, changed=True, idled_address=idled_address)
+                    return build_power(
+                        "on", status, changed=True, idled=_idle(station, settings.address)
+                    )
                 # `power off` is the one of the two that reads status first:
                 # skipping its only mutation when nothing needs doing is
                 # exactly what `changed: false` is for. `power on` cannot do
@@ -178,7 +239,7 @@ def register(app: typer.Typer) -> None:
                     after = station.status()
                 else:
                     after = before
-                return build_power("off", after, changed=was_on, idled_address=None)
+                return build_power("off", after, changed=was_on, idled=None)
             finally:
                 station.close()
 
