@@ -83,6 +83,27 @@ def test_global_options_cover_the_eight_design_flags():
     assert typer_option(by_name["--color"]).default == "auto"
 
 
+@pytest.mark.parametrize("option", GLOBAL_OPTIONS, ids=lambda o: o.name)
+def test_late_default_decides_what_click_is_handed_for_every_option(option: Option):
+    """The rule behind `late_default`, checked on every row rather than three by name.
+
+    `default` and `late_default` are two fields describing one decision, so they can drift:
+    a row could publish `default="auto"` while handing Click `"auto"` as well, and `pick()`
+    would then never see the difference between "not typed" and "typed the default" - the
+    environment and config levels would be dead for that option and nothing would say so.
+
+    The test above names `--target`, `--format` and `--verbose` individually, which is right
+    for pinning their actual values but cannot cover a ninth option added by a later task.
+    This is the invariant itself: `late_default` true means Click is handed `None`, false
+    means Click is handed the row's real default. There is no third possibility.
+    """
+    handed_to_click = typer_option(option).default
+    if option.late_default:
+        assert handed_to_click is None, option.name
+    else:
+        assert handed_to_click == option.default, option.name
+
+
 def test_config_backed_global_options_match_config_keys():
     flag_names = {o.name.lstrip("-") for o in GLOBAL_OPTIONS}
     assert set(config.CONFIG_KEYS) <= flag_names
