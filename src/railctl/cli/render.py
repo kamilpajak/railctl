@@ -104,7 +104,21 @@ class NdjsonStream:
         self._stream = stream
         self.sequence = 0
 
+    #: The two keys every NDJSON consumer routes on. `**fields` is expanded AFTER them, so a
+    #: field of either name would silently win - a `summary` line whose "type" is not
+    #: "summary" breaks every reader that filters on it, and nothing would say so. `render()`
+    #: passes a whole envelope through here, so the day a later task adds an envelope key
+    #: called "type" this must fail loudly instead of producing plausible wrong output.
+    RESERVED_KEYS = ("type", "sequence")
+
     def event(self, type_: str, **fields: object) -> None:
+        clashing = [key for key in self.RESERVED_KEYS if key in fields]
+        if clashing:
+            raise ValueError(
+                f"NDJSON field name{'s' if len(clashing) > 1 else ''} "
+                f"{', '.join(repr(k) for k in clashing)} would shadow the line's own "
+                f"{' and '.join(self.RESERVED_KEYS)}; rename the field"
+            )
         body: dict[str, object] = {"type": type_, "sequence": self.sequence, **fields}
         self._stream.write(json.dumps(body, separators=_JSON_SEPARATORS))
         self._stream.write("\n")

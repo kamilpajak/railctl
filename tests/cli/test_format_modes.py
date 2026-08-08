@@ -244,6 +244,18 @@ def test_ndjson_stream_numbers_from_zero_and_writes_compact_lines():
     assert ", " not in lines[0] and ": " not in lines[0]  # compact separators, no spaces
 
 
+@pytest.mark.parametrize("reserved", ["type", "sequence"])
+def test_ndjson_refuses_a_field_that_would_shadow_the_line_s_own_keys(reserved: str):
+    """`**fields` is expanded after "type" and "sequence", so a field of either name wins.
+    render() passes a whole envelope through here; the day a later task adds an envelope key
+    called "type", every consumer filtering on `type == "summary"` would silently stop
+    matching. Failing loudly is the only outcome that gets noticed.
+    """
+    stream = NdjsonStream(io.StringIO())
+    with pytest.raises(ValueError, match=reserved):
+        stream.event("cv", **{reserved: "hijacked"})
+
+
 def test_ndjson_summary_is_always_the_last_line_even_after_a_raised_exception():
     buf = io.StringIO()
     stream = NdjsonStream(buf)

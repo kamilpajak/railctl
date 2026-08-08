@@ -57,6 +57,60 @@ def test_error_code_maps_the_documented_names(exc_cls: type[RailctlError], code:
     assert error_code(exc_cls.__new__(exc_cls)) == code
 
 
+#: Every published error code, frozen. `error_code()` derives these from the Python class
+#: name, but the code is a PUBLIC CONTRACT string that may never be renamed inside a major
+#: version - so renaming a class silently renames a contract field, and only the eight rows
+#: pinned above would have noticed. This table closes that gap: any rename, and any new
+#: exception class, has to come here and be looked at on purpose.
+#:
+#: Two entries read oddly and are frozen deliberately rather than quietly improved:
+#: `x_bus_checksum` (not `xbus_checksum`) and `port_not_xpress_net` (not `port_not_xpressnet`).
+#: The regex splits on every capital, and `XBus`/`XpressNet` are spelled with two. Changing
+#: them now is free and would cost a major version later; if they are to change, this is the
+#: moment, and it is a decision to take rather than a diff to wave through.
+PUBLISHED_ERROR_CODES: dict[str, str] = {
+    "AbortedError": "aborted",
+    "AmbiguousPort": "ambiguous_port",
+    "ConfirmationRequiredError": "confirmation_required",
+    "CvOutOfRangeError": "cv_out_of_range",
+    "CvVerifyError": "cv_verify",
+    "DecoderNoAckError": "decoder_no_ack",
+    "DecoderNotRespondingError": "decoder_not_responding",
+    "IndexPageRequiredError": "index_page_required",
+    "LinkProtocolError": "link_protocol",
+    "LinkTimeout": "link_timeout",
+    "PomReadUnsupportedError": "pom_read_unsupported",
+    "PortBusy": "port_busy",
+    "PortConfigError": "port_config",
+    "PortNotFound": "port_not_found",
+    "PortNotOpen": "port_not_open",
+    "PortNotXpressNet": "port_not_xpress_net",
+    "ProgrammingError": "programming",
+    "ProtocolError": "protocol",
+    "RailctlError": "railctl",
+    "ServiceEncodingUnknownError": "service_encoding_unknown",
+    "ShortCircuitError": "short_circuit",
+    "StationBusyError": "station_busy",
+    "StationError": "station",
+    "TrackPowerError": "track_power",
+    "TransportError": "transport",
+    "UnsupportedCommandError": "unsupported_command",
+    "UnsupportedFeatureError": "unsupported_feature",
+    "XBusChecksumError": "x_bus_checksum",
+    "XBusDecodeError": "x_bus_decode",
+    "XBusEncodeError": "x_bus_encode",
+    "XBusIncompleteError": "x_bus_incomplete",
+}
+
+
+def test_every_published_error_code_is_exactly_what_it_was():
+    """Renaming a class renames its published code. That is a breaking API change wearing a
+    refactor's clothes, and nothing else in the suite would report it.
+    """
+    live = {k.__name__: error_code(k.__new__(k)) for k in _tree()}
+    assert live == PUBLISHED_ERROR_CODES
+
+
 def test_every_class_in_the_error_tree_gets_a_unique_code():
     """A whole-tree test, not just the eight pinned above: two exceptions sharing a code would
     let a script mistake one domain failure for another with no way to notice.
@@ -234,6 +288,49 @@ def test_run_reports_a_value_error_as_usage_exit_2():
         "details": {},
         "suggestions": [],
     }
+
+
+def test_run_lets_a_typer_exit_through_with_the_code_it_carries():
+    """`typer.Exit` inherits RuntimeError, so the generic `except Exception` would otherwise
+    catch it and publish 1/"internal" instead of the code the command chose. A deliberate exit
+    reported as an unexplained bug is this project's central failure mode, one layer up.
+    """
+    ctx = _ctx()
+
+    def work() -> CommandResult:
+        raise typer.Exit(code=8)
+
+    with pytest.raises(typer.Exit) as caught:
+        run("backup", ctx, work)
+    assert caught.value.exit_code == 8
+    assert ctx.stderr.getvalue() == ""
+    assert ctx.stdout.getvalue() == ""
+
+
+@pytest.mark.parametrize(
+    "exc",
+    [
+        json.JSONDecodeError("Expecting value", "{bad", 1),
+        UnicodeDecodeError("utf-8", b"\xff", 0, 1, "invalid start byte"),
+    ],
+)
+def test_run_does_not_blame_the_operator_for_a_malformed_file(exc: ValueError, monkeypatch):
+    """Both are ValueError subclasses. Left to the `usage` branch they would tell a script
+    "fix your command line" when a file on disk was corrupt or mis-encoded - and exit 2 tells
+    a caller not to retry and not to look at its input. A command that reads a file owes a
+    RailctlError naming it; reaching here means one did not, so it is reported as our bug.
+    """
+    monkeypatch.delenv("RAILCTL_VERBOSE", raising=False)
+    ctx = _ctx()
+
+    def work() -> CommandResult:
+        raise exc
+
+    with pytest.raises(typer.Exit) as caught:
+        run("restore", ctx, work)
+    assert caught.value.exit_code == 1
+    body = json.loads(ctx.stderr.getvalue())
+    assert body["code"] == "internal"
 
 
 def test_run_maps_a_railctl_error_through_exit_code_for():

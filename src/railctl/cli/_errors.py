@@ -8,6 +8,7 @@ would fork the mapping errors.py already owns.
 
 from __future__ import annotations
 
+import json
 import os
 import time
 import traceback
@@ -105,12 +106,41 @@ def _verbose() -> bool:
     return os.environ.get("RAILCTL_VERBOSE", "") not in ("", "0")
 
 
+def _internal_report(exc: BaseException, ctx: OutputContext) -> ErrorReport:
+    """The safety net: this tool has a bug. Never a domain answer, never the operator's fault."""
+    if _verbose():
+        traceback.print_exc(file=ctx.stderr)
+    return ErrorReport(
+        code="internal",
+        message=str(exc),
+        retryable=False,
+        exit_code=INTERNAL_EXIT_CODE,
+        details={},
+        suggestions=[],
+        hint=None,
+    )
+
+
 def run(command: str, ctx: OutputContext, work: Callable[[], CommandResult]) -> NoReturn:
     start = time.monotonic()
     try:
         result = work()
     except KeyboardInterrupt:
         report = report_for(AbortedError("interrupted by the operator"), command=command)
+    except typer.Exit:
+        # typer.Exit inherits RuntimeError, so the generic `except Exception` below would
+        # otherwise catch it and replace whatever exit code it carries with 1/"internal" -
+        # a deliberate outcome recorded as an unexplained bug, which is this project's
+        # defining failure mode one layer up. Let it through untouched.
+        raise
+    except (json.JSONDecodeError, UnicodeDecodeError) as exc:
+        # Both are ValueError subclasses, so without this branch they would land in the
+        # `usage` case below and tell a script "you typed the command wrong" when a file on
+        # disk was malformed. Neither is a usage error, and neither is a domain answer: a
+        # command that reads a file owes the caller a RailctlError describing it (the way
+        # Capabilities.load already does). Reaching here means one did not, which is a bug
+        # in that command - so it is reported as one, where it will be noticed and fixed.
+        report = _internal_report(exc, ctx)
     except ValueError as exc:
         report = ErrorReport(
             code="usage",
@@ -124,17 +154,7 @@ def run(command: str, ctx: OutputContext, work: Callable[[], CommandResult]) -> 
     except RailctlError as exc:
         report = report_for(exc, command=command)
     except Exception as exc:  # the safety net: anything else is a bug, never a domain answer
-        if _verbose():
-            traceback.print_exc(file=ctx.stderr)
-        report = ErrorReport(
-            code="internal",
-            message=str(exc),
-            retryable=False,
-            exit_code=INTERNAL_EXIT_CODE,
-            details={},
-            suggestions=[],
-            hint=None,
-        )
+        report = _internal_report(exc, ctx)
     else:
         # Timed here, not inside build_<command> - every command gets this for free, and a
         # command that only measured its own body would miss the argv-parsing and station-open
