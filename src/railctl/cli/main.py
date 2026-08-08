@@ -11,15 +11,16 @@ from __future__ import annotations
 import os
 import sys
 from collections.abc import Callable, Sequence
-from typing import NoReturn, TextIO
+from typing import NoReturn
 
 import typer
 
 from railctl.cli._errors import OutputContext, _internal_report, report_for, usage_report
-from railctl.cli.commands import basics
-from railctl.cli.config import VERBOSE_ENV, config_path, load_config
-from railctl.cli.deps import Settings, build_settings, configure_logging
-from railctl.cli.render import render_error, want_color
+from railctl.cli._meta import GLOBAL_OPTIONS, root_epilog, typer_option
+from railctl.cli.commands import basics, schema
+from railctl.cli.config import VERBOSE_ENV, Config, config_path, load_config
+from railctl.cli.deps import Settings, build_settings, configure_logging, context_for
+from railctl.cli.render import render_error
 from railctl.cli.result import ErrorReport
 from railctl.errors import RailctlError
 
@@ -31,11 +32,25 @@ from railctl.errors import RailctlError
 app = typer.Typer(
     add_completion=False,
     context_settings={"max_content_width": 100},
+    # The design's fixed headings apply at EVERY level, and the root is the page an
+    # operator reaches first; without this it was the one `--help` in the tool with no
+    # OUTPUT / EXIT CODES / EXAMPLES at all. Generated from the same `COMMANDS` table the
+    # subcommand epilogs come from - see `_meta.root_epilog`.
+    epilog=root_epilog(),
 )
+
+# Built once, at import time, into names the callback below references. A call to
+# `typer_option(...)` written directly as a parameter default would trip Ruff's B008
+# (function call in a default argument); its built-in allowlist covers a literal
+# `typer.Option(...)` call, not a wrapper around one. Keyed by flag name rather than
+# unpacked positionally, so reordering `GLOBAL_OPTIONS` cannot silently hand a parameter
+# the wrong row.
+_ROOT_OPTIONS = {option.name: typer_option(option) for option in GLOBAL_OPTIONS}
 
 
 class CliContext:
-    """Resolved on the first read of `ctx.obj`, not while the group callback runs.
+    """Resolved on the first read of `ctx.obj`, not while the group callback runs, and in
+    two flavours: with `config.toml` folded in, and without it.
 
     Click invokes a group's callback BEFORE a subcommand's own eager `--help`, so resolving
     `config.toml` and the eight global options inside the callback made `railctl status
@@ -49,63 +64,66 @@ class CliContext:
     else, so it still fails on exactly the same error with exactly the same exit code - only
     the exception now leaves the command function instead of the callback, and `main()`
     catches it either way.
+
+    The `_without_config_file` pair is the same resolution with `Config()`'s built-in
+    defaults standing in for the file, for a command whose answer the file cannot change.
+    `railctl schema` is the one such command: its manifest is a compile-time constant, and
+    it is precisely what an agent runs first, on a machine with nothing plugged in and
+    possibly nothing configured. Reading `config.toml` to print a constant is how a stray
+    bracket in that file took down the one command that must always answer. The flag and
+    environment levels still apply - `--format`, RAILCTL_FORMAT and `--color` decide how the
+    manifest is rendered, and a bad value in either is still refused - it is only the file
+    level that is skipped, and only for a value the file could not have affected.
     """
 
-    __slots__ = ("_resolve", "_settings")
+    __slots__ = ("_bare_settings", "_resolve", "_settings")
 
-    def __init__(self, resolve: Callable[[], Settings]) -> None:
+    def __init__(self, resolve: Callable[[Config], Settings]) -> None:
         self._resolve = resolve
         self._settings: Settings | None = None
+        self._bare_settings: Settings | None = None
 
     @property
     def settings(self) -> Settings:
         if self._settings is None:
-            self._settings = self._resolve()
+            self._settings = self._resolve(load_config(config_path()))
         return self._settings
+
+    @property
+    def settings_without_config_file(self) -> Settings:
+        if self._bare_settings is None:
+            self._bare_settings = self._resolve(Config())
+        return self._bare_settings
 
     @property
     def output(self) -> OutputContext:
         # Not memoised, unlike `settings`: this is a frozen dataclass built from the cached
         # `settings` plus the two real streams, so building it twice cannot answer
         # differently, and there is no second resolution hiding behind the second call.
-        return context_for(self.settings, stdout=sys.stdout, stderr=sys.stderr)
+        return self._output_for(self.settings)
 
+    @property
+    def output_without_config_file(self) -> OutputContext:
+        return self._output_for(self.settings_without_config_file)
 
-def context_for(settings: Settings, *, stdout: TextIO, stderr: TextIO) -> OutputContext:
-    """One `--color` value, but `want_color` is asked once per stream.
-
-    The design spec requires stdout and stderr to be tested separately. Deciding once off
-    stdout and painting both is how `railctl status 2> errors.log` run from a terminal ends
-    up writing escape codes into the log; the converse - stdout redirected, stderr still on
-    the operator's terminal - strips the colour off the one line they are meant to read.
-    """
-    return OutputContext(
-        fmt=settings.fmt,
-        stdout_color=want_color(settings.color, stdout, os.environ),
-        stderr_color=want_color(settings.color, stderr, os.environ),
-        stdout=stdout,
-        stderr=stderr,
-    )
+    @staticmethod
+    def _output_for(settings: Settings) -> OutputContext:
+        return context_for(settings, stdout=sys.stdout, stderr=sys.stderr)
 
 
 @app.callback()
 def global_options(
     ctx: typer.Context,
-    target: str = typer.Option(None, "--target", help="auto, serial:<path>, or z21:<host>:<port>"),
-    address: int = typer.Option(None, "--address", "-a", help="locomotive address, 1..9999"),
-    format_: str = typer.Option(None, "--format", help="human, json, or ndjson"),
-    json_flag: bool = typer.Option(False, "--json", help="alias for --format=json"),
-    verbose: int = typer.Option(
-        None, "-v", "--verbose", count=True, help="repeatable: -v decoded frames, -vv raw bytes"
-    ),
-    color: str = typer.Option("auto", "--color", help="auto, always, or never"),
-    yes: bool = typer.Option(False, "--yes", "-y", help="answer every confirmation yes"),
-    non_interactive: bool = typer.Option(
-        False, "--non-interactive", help="never prompt, even on a real terminal"
-    ),
+    target: str = _ROOT_OPTIONS["--target"],
+    address: int = _ROOT_OPTIONS["--address"],
+    format_: str = _ROOT_OPTIONS["--format"],
+    json_flag: bool = _ROOT_OPTIONS["--json"],
+    verbose: int = _ROOT_OPTIONS["--verbose"],
+    color: str = _ROOT_OPTIONS["--color"],
+    yes: bool = _ROOT_OPTIONS["--yes"],
+    non_interactive: bool = _ROOT_OPTIONS["--non-interactive"],
 ) -> None:
-    def resolve() -> Settings:
-        config = load_config(config_path())
+    def resolve(config: Config) -> Settings:
         settings = build_settings(
             target=target,
             address=address,
@@ -134,6 +152,7 @@ def global_options(
 
 
 basics.register(app)
+schema.register(app)
 
 
 def main() -> None:
