@@ -1,9 +1,9 @@
 """Pins the command metadata table and `railctl schema`.
 
 `COMMANDS` holds one row per command this commit actually registers - see the
-note at the top of this task in the plan. `status`, `version` and `schema`
-are real; the movement commands and `doctor` extend this same tuple in their
-own later commits.
+note at the top of this task in the plan. `status`, `version`, `power`, `stop`,
+`drive`, `function` and `schema` are real; `doctor` and `monitor` extend this
+same tuple in their own later commits.
 """
 
 from __future__ import annotations
@@ -891,9 +891,23 @@ def test_a_command_that_does_read_the_config_file_still_reports_a_broken_one(
 
 
 @pytest.mark.parametrize("path", ["status", "version", "schema"])
-def test_none_of_the_registered_commands_mutates_anything(path: str):
+def test_the_read_only_commands_mutate_nothing(path: str):
     assert command_meta(path).mutates is False
     assert command_meta(path).confirms is False
+
+
+@pytest.mark.parametrize("path", ["power", "stop", "drive", "function"])
+def test_every_throttle_command_is_published_as_mutating_and_never_confirming(path: str):
+    """`mutates` is the field an agent reads to decide whether a command is safe to run
+    unattended, and all four of these change the layout's state. `confirms` is false on
+    purpose and is not an oversight: the design's L6 rule is that `power`, `drive`, `stop`
+    and `function` are never confirmed, because a prompt on every throttle change trains an
+    operator to type `-y` reflexively - which then answers yes to the `restore` and the
+    `cv write` that genuinely need asking.
+    """
+    meta = command_meta(path)
+    assert meta.mutates is True
+    assert meta.confirms is False
 
 
 def test_global_options_carry_their_env_vars_and_no_color_on_color():
