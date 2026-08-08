@@ -137,6 +137,26 @@ def check_choice(name: str, value: object, allowed: tuple[str, ...]) -> None:
         raise ValueError(f"--{name} must be one of {allowed}, got {value!r}")
 
 
+def check_address(value: int | None) -> None:
+    """Reject a locomotive address outside the bound the manifest publishes.
+
+    One function, called wherever an address ENTERS this CLI: the root
+    callback's copy through `build_settings`, a command's own `--address`
+    through `merge_settings`, and `stop`'s command-scoped `--address`, which
+    deliberately goes through neither. The check used to live only in
+    `build_settings`, so the bound the manifest advertises and the bound a
+    command enforced differed by where the flag was typed - `railctl --address
+    20000 status` was refused at exit 2 and `railctl power on --address 20000`
+    was not, and the range check `Station.drive` does on its own arrives after
+    two mutations have already gone out.
+
+    `None` passes: no address is a real answer, and `require_address` is what
+    turns "none given" into a usage error for the commands that need one.
+    """
+    if value is not None and not (LOCO_ADDR_MIN <= value <= LOCO_ADDR_MAX):
+        raise ValueError(f"--address {value} is outside {LOCO_ADDR_MIN}..{LOCO_ADDR_MAX}")
+
+
 def check_format_conflict(*, json_flag: bool, fmt: str | None) -> None:
     """`--json` is an alias for `--format=json`, so it is folded into the same CLI-flag slot
     `pick()` sees - not a second, competing source. Passing both `--format=ndjson` and
@@ -182,10 +202,7 @@ def build_settings(
     resolved_address = pick(
         address, env.get("RAILCTL_ADDRESS"), config.address, None, name="address", cast=int
     )
-    if resolved_address is not None and not (LOCO_ADDR_MIN <= resolved_address <= LOCO_ADDR_MAX):
-        raise ValueError(
-            f"--address {resolved_address} is outside {LOCO_ADDR_MIN}..{LOCO_ADDR_MAX}"
-        )
+    check_address(resolved_address)
 
     resolved_verbose = pick(
         verbose, env.get(VERBOSE_ENV), config.verbose, DEFAULT_VERBOSE, name="verbose", cast=int
@@ -252,6 +269,7 @@ def merge_settings(
     if target is not None:
         updates["target"] = target
     if address is not None:
+        check_address(address)
         updates["address"] = address
     # The union of both flag positions, not this level's copy alone: `--format` before the
     # verb and `--json` after it are one contradiction, however they are spread around the

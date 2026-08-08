@@ -32,6 +32,7 @@ from railctl.cli.config import capabilities_path
 from railctl.cli.deps import (
     DIRECTION_TEXT,
     UsageProblem,
+    check_address,
     merged_output,
     open_station,
     read_loco,
@@ -392,6 +393,12 @@ def register(app: typer.Typer) -> None:
         )
 
         def work() -> CommandResult:
+            # `stop`'s --address reaches no `Settings`, by design (see the
+            # module docstring), so `merge_settings` never sees it and it needs
+            # the bound applied here - the same function, on the same value, so
+            # the manifest's published range is the range every entry point
+            # enforces.
+            check_address(address)
             station = open_station(settings, capabilities_path=capabilities_path())
             try:
                 # Through the facade's own emergency-stop path, which keeps

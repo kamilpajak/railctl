@@ -1221,6 +1221,20 @@ def test_stop_uses_emergency_stop_facade_for_all_locomotives_when_no_address(mon
     assert station.calls == [("emergency_stop", (), {"address": None}), ("close", (), {})]
 
 
+def test_stop_refuses_an_address_outside_the_published_bound_before_opening_a_station(
+    monkeypatch,
+):
+    """`stop`'s --address deliberately reaches no `Settings`, so `merge_settings`
+    never sees it. Without its own call it was the one entry point where the
+    published 1..9999 was not enforced by this CLI at all."""
+    station = FakeStation()
+    app = _app(station, monkeypatch, fmt="json")
+    result = runner.invoke(app, ["stop", "--address", "20000"])
+    assert result.exit_code == 2
+    assert station.calls == []
+    assert json.loads(result.stderr)["code"] == "usage"
+
+
 def test_stop_human_and_json_report_the_same_facts(monkeypatch):
     station = FakeStation()
     app = _app(station, monkeypatch, fmt="json")
