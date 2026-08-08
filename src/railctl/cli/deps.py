@@ -20,7 +20,7 @@ from typing import Final, Literal, TextIO
 
 from railctl import errors
 from railctl.cli._errors import OutputContext
-from railctl.cli.config import VERBOSE_ENV, Config, pick
+from railctl.cli.config import DEFAULT_TARGET, VERBOSE_ENV, Config, pick
 from railctl.cli.render import want_color
 from railctl.cli.result import Format, LinkInfo, StationInfo
 from railctl.station import TIMING, Station
@@ -38,6 +38,15 @@ ALLOWED_FORMATS: Final[tuple[str, ...]] = ("human", "json", "ndjson")
 # and `--color=off` are accepted and silently mean "auto": a caller who asked for plain text
 # gets escape codes and an exit status that says nothing was wrong.
 ALLOWED_COLORS: Final[tuple[str, ...]] = ("auto", "always", "never")
+
+# The built-in defaults `build_settings` applies at the bottom of `pick()`, named here
+# rather than written as literals inside the call, because `cli/_meta.py` publishes them as
+# the `default` of `--format` and `--verbose` in the manifest. `--target`'s lives in
+# `config.DEFAULT_TARGET`, beside the `Config` field that carries the same value. A manifest
+# that says `null` where the CLI has a default is a documented lie about what a caller gets
+# when they type nothing.
+DEFAULT_FORMAT: Final[str] = "human"
+DEFAULT_VERBOSE: Final[int] = 0
 
 # A fixed, illustrative loco number - never derived from any real address - so
 # every "missing --address" message is reproducible and greppable. Design spec
@@ -145,7 +154,7 @@ def build_settings(
     never documents.
     """
     resolved_target = pick(
-        target, env.get("RAILCTL_TARGET"), config.target, "auto", name="target", cast=str
+        target, env.get("RAILCTL_TARGET"), config.target, DEFAULT_TARGET, name="target", cast=str
     )
 
     resolved_address = pick(
@@ -157,13 +166,13 @@ def build_settings(
         )
 
     resolved_verbose = pick(
-        verbose, env.get(VERBOSE_ENV), config.verbose, 0, name="verbose", cast=int
+        verbose, env.get(VERBOSE_ENV), config.verbose, DEFAULT_VERBOSE, name="verbose", cast=int
     )
 
     check_format_conflict(json_flag=json_flag, fmt=fmt)
     format_flag = "json" if json_flag else fmt
     resolved_format = pick(
-        format_flag, env.get("RAILCTL_FORMAT"), None, "human", name="format", cast=str
+        format_flag, env.get("RAILCTL_FORMAT"), None, DEFAULT_FORMAT, name="format", cast=str
     )
     check_choice("format", resolved_format, ALLOWED_FORMATS)
     check_choice("color", color, ALLOWED_COLORS)

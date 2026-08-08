@@ -33,8 +33,16 @@ from typing import Any, Final, Literal
 import typer
 
 from railctl import errors
-from railctl.cli.deps import ALLOWED_COLORS, ALLOWED_FORMATS
+from railctl.cli.config import DEFAULT_TARGET
+from railctl.cli.deps import (
+    ALLOWED_COLORS,
+    ALLOWED_FORMATS,
+    DEFAULT_FORMAT,
+    DEFAULT_VERBOSE,
+    UsageProblem,
+)
 from railctl.cli.result import (
+    ERROR_SCHEMA,
     INTERNAL_CODE,
     INTERNAL_EXIT_CODE,
     RESERVED_CODES,
@@ -49,13 +57,35 @@ SCHEMA_SCHEMA: Final[str] = "railctl/schema/v1"
 OptionType = Literal["string", "integer", "boolean", "enum"]
 
 
+def _one_of(values: tuple[str, ...]) -> str:
+    """ "a, b, or c" - the help-text form of an `enum` tuple, never a fourth copy of it.
+
+    `--format`'s allowed values were spelled out as a literal in its help string, again in
+    `help_epilog`'s OUTPUT section, and a third time in `ALLOWED_FORMATS` - the tuple the
+    CLI actually validates against. A fourth format added to that tuple has to reach every
+    place a caller reads the list, without an edit anywhere else.
+    """
+    return f"{', '.join(values[:-1])}, or {values[-1]}"
+
+
 @dataclass(frozen=True, slots=True)
 class Option:
     name: str
     help: str
     type: OptionType = "string"
     short: str | None = None
+    #: The default this CLI documents, and the value the manifest publishes: what a caller
+    #: gets when the flag, the environment and the config file are all silent. Never
+    #: Typer's parse-time sentinel - publishing `null` for `--format` said this CLI has no
+    #: default format, when it plainly has one, and `default` is a fact about the CLI while
+    #: the sentinel is an implementation detail of how the default is applied.
     default: object = None
+    #: True when `build_settings` applies `default` itself, at the bottom of `pick()`, so
+    #: Typer must be handed `None` instead. `pick` has to tell "nothing was typed" from
+    #: "typed the built-in default": handed the real default, Click would mark the flag
+    #: given on every invocation and the CLI level would outrank the environment and the
+    #: config file for a value nobody typed.
+    late_default: bool = False
     enum: tuple[str, ...] | None = None
     required: bool = False
     env: str | None = None
@@ -83,18 +113,17 @@ class CommandMeta:
     confirms: bool = False
 
 
-# Order and defaults are quoted from the design spec's global option table
-# (L2). `--target`/`--format`/`--verbose` default to `None`, not their eventual
-# human-readable default, because `build_settings` (Task 9) uses `None` as
-# "nothing was typed" to fall through to the environment, the config file and
-# only then the built-in default - a non-None default here would make every
-# flag look "given" on every invocation.
+# Order is quoted from the design spec's global option table (L2). Each `default` is the
+# value a caller actually gets when nothing is typed - read off the constant
+# `build_settings` applies, never retyped - and `late_default` is what says Typer must be
+# handed `None` so `pick()` can still tell "not typed" from "typed the default".
 GLOBAL_OPTIONS: Final[tuple[Option, ...]] = (
     Option(
         name="--target",
         help="auto, serial:<path>, or z21:<host>:<port>",
         type="string",
-        default=None,
+        default=DEFAULT_TARGET,
+        late_default=True,
         env="RAILCTL_TARGET",
     ),
     Option(
@@ -102,15 +131,18 @@ GLOBAL_OPTIONS: Final[tuple[Option, ...]] = (
         help="locomotive address, 1..9999",
         type="integer",
         short="-a",
+        # No address is the real default, so the published value and Typer's sentinel are
+        # the same `None` here - `late_default` would change nothing.
         default=None,
         env="RAILCTL_ADDRESS",
     ),
     Option(
         name="--format",
-        help="human, json, or ndjson",
+        help=_one_of(ALLOWED_FORMATS),
         type="enum",
         enum=ALLOWED_FORMATS,
-        default=None,
+        default=DEFAULT_FORMAT,
+        late_default=True,
         env="RAILCTL_FORMAT",
     ),
     Option(name="--json", help="alias for --format=json", type="boolean", default=False),
@@ -119,7 +151,8 @@ GLOBAL_OPTIONS: Final[tuple[Option, ...]] = (
         help="repeatable: -v decoded frames, -vv raw bytes",
         type="integer",
         short="-v",
-        default=None,
+        default=DEFAULT_VERBOSE,
+        late_default=True,
         env="RAILCTL_VERBOSE",
         repeatable=True,
     ),
@@ -130,9 +163,12 @@ GLOBAL_OPTIONS: Final[tuple[Option, ...]] = (
     # more; `typer_option` below hands no environment variable to Click.
     Option(
         name="--color",
-        help="auto, always, or never",
+        help=_one_of(ALLOWED_COLORS),
         type="enum",
         enum=ALLOWED_COLORS,
+        # Applied by Click, not by `pick()`: `--color` has no config-file level, so the
+        # root parameter carries the real default and `check_choice` sees a valid value
+        # even when the flag is absent.
         default="auto",
         env="NO_COLOR",
     ),
@@ -198,18 +234,33 @@ _SCHEMA = CommandMeta(
 # schema last. Each later task that adds a command rebuilds this literal in
 # full, its own row inserted where the nine-path tree order puts it - never
 # appended to the end - so `doctor`, added last (Task 12), still lands first.
+#
+# This tuple is the ONE place that order is decided. Typer lists commands in the order
+# `register()` calls declare them, and `railctl --help` used to say version, status, schema
+# against a manifest that said status, version, schema, with a comment right here claiming
+# they matched. `tests/cli/test_schema.py` compares the Click tree against this tuple, so a
+# command registered out of order fails rather than quietly giving an agent and an operator
+# two different tables of contents.
 COMMANDS: Final[tuple[CommandMeta, ...]] = (_STATUS, _VERSION, _SCHEMA)
 
 _BY_PATH: Final[dict[str, CommandMeta]] = {c.path: c for c in COMMANDS}
 
 
 def command_meta(path: str) -> CommandMeta:
+    """The row for `path`, or a `UsageProblem` carrying something runnable.
+
+    A bare `ValueError` published `"suggestions": []` and left the only recovery
+    information in the prose of `message`, which an agent would have to parse back apart.
+    The near misses stay in the message for a human; the array says what to RUN to get the
+    real list, which is the one answer that is right whatever the mistyped path was.
+    """
     try:
         return _BY_PATH[path]
     except KeyError:
         near = difflib.get_close_matches(path, _BY_PATH, n=3, cutoff=0.0)
-        raise ValueError(
-            f"no such command {path!r}; closest known paths: {', '.join(near)}"
+        raise UsageProblem(
+            f"no such command {path!r}; closest known paths: {', '.join(near)}",
+            suggestions=[["railctl", _SCHEMA.path]],
         ) from None
 
 
@@ -241,7 +292,7 @@ def typer_option(option: Option) -> Any:
     if option.short is not None:
         names.append(option.short)
     return typer.Option(
-        option.default,
+        None if option.late_default else option.default,
         *names,
         help=option.help,
         count=option.repeatable,
@@ -278,7 +329,7 @@ def global_option(name: str) -> Any:
     Neither copy carries an `envvar` - see `typer_option`.
     """
     row = _GLOBAL_BY_NAME[name]
-    return typer_option(replace(row, default=_bare_default(row)))
+    return typer_option(replace(row, default=_bare_default(row), late_default=False))
 
 
 _BASE_EXIT_MEANINGS: Final[dict[int, str]] = {
@@ -301,11 +352,26 @@ _RESERVED_SUMMARIES: Final[dict[str, str]] = {
 }
 
 
-def _first_line(text: str | None) -> str:
-    # The `+ "\n"` is what keeps this total: `"".splitlines()` is empty and would raise on
-    # `[0]`, and a class with no docstring must publish an empty summary rather than take
-    # the whole manifest down.
-    return ((text or "").strip() + "\n").splitlines()[0]
+def _first_paragraph(text: str | None) -> str:
+    """The opening paragraph of a docstring, rewrapped onto one line.
+
+    The first PHYSICAL line is what this used to take, which made the summary depend on
+    where the author's editor wrapped: `PortBusy`'s docstring breaks after a comma, so it
+    published "The port exists but could not be opened - another process holds it," - a
+    fragment, in the field a caller reads to find out what happened.
+
+    A paragraph rather than a first sentence, deliberately. Cutting at the first full stop
+    would publish "No reply arrived within the budget." for `LinkTimeout` and drop
+    "Silence - never a negative answer.", which is the one clause this whole project turns
+    on, and it would reduce `usage` to "The invocation was malformed." without the "do not
+    retry" a caller is meant to act on. Everything after the first blank line is the
+    reasoning behind the class, which belongs in the source and not in a manifest.
+
+    Total by construction: a class with no docstring publishes an empty summary rather than
+    taking the whole manifest down with an IndexError.
+    """
+    paragraph = (text or "").strip().split("\n\n", 1)[0]
+    return " ".join(paragraph.split())
 
 
 def _error_classes(root: type[errors.RailctlError]) -> set[type[errors.RailctlError]]:
@@ -339,7 +405,7 @@ def _class_error_row(klass: type[errors.RailctlError]) -> dict[str, object]:
         "code": code,
         "exit_code": errors.exit_code_for(probe),
         "retryable": code in RETRYABLE_CODES,
-        "summary": _first_line(klass.__doc__),
+        "summary": _first_paragraph(klass.__doc__),
     }
 
 
@@ -365,31 +431,72 @@ def error_codes() -> list[dict[str, object]]:
     return sorted(rows, key=lambda row: str(row["code"]))
 
 
+def _output_lines(schema: str) -> list[str]:
+    # `ALLOWED_FORMATS`, not the words "human, json, ndjson": the same list is already the
+    # `enum` of `--format` and the tuple `deps.check_choice` validates against, and a fourth
+    # format must not be able to reach the validator without reaching this line.
+    return ["OUTPUT", f"  schema: {schema}", f"  formats: {', '.join(ALLOWED_FORMATS)}", ""]
+
+
+def _exit_code_lines(codes: Sequence[int]) -> list[str]:
+    by_code = {code: klass for klass, code in errors.EXIT_CODES.items()}
+    lines = ["EXIT CODES"]
+    for code in codes:
+        meaning = _BASE_EXIT_MEANINGS.get(code)
+        if meaning is None:
+            meaning = _first_paragraph(by_code[code].__doc__)
+        lines.append(f"  {code}: {meaning}")
+    return [*lines, ""]
+
+
+def _example(meta: CommandMeta) -> str:
+    required_args = " ".join(f"<{a.name}>" for a in meta.arguments if a.required)
+    return " ".join(w for w in (f"railctl {meta.path}", required_args, "--format json") if w)
+
+
 def help_epilog(meta: CommandMeta) -> str:
     """The fixed `OUTPUT` / `EXIT CODES` / `EXAMPLES` sections appended as
     this command's Typer `epilog`. Click supplies `Usage:` and `Options:` on
-    its own. Built from `meta` and `errors.EXIT_CODES` alone, never a clock or
-    a terminal size, so two runs of the same command produce byte-identical
-    text - `app`'s `context_settings={"max_content_width": 100}` (Task 9)
-    makes that true regardless of what the stream is.
+    its own.
+
+    Built from `meta`, `errors.EXIT_CODES` and `ALLOWED_FORMATS` alone, never a clock or a
+    terminal size, so this STRING is byte-identical between two runs of the same command.
+    What Click then does with it is not: `app`'s
+    `context_settings={"max_content_width": 100}` (Task 9) caps the help width at 100
+    columns, it does not fix it, so a 40-column terminal still rewraps every line of the
+    text below. Determinism is a property of what this function returns, not of what the
+    terminal shows.
     """
-    by_code = {code: klass for klass, code in errors.EXIT_CODES.items()}
-    lines = [
-        "OUTPUT",
-        f"  schema: {meta.schema}",
-        "  formats: human, json, ndjson",
-        "",
-        "EXIT CODES",
-    ]
-    for code in meta.exit_codes:
-        meaning = _BASE_EXIT_MEANINGS.get(code)
-        if meaning is None:
-            meaning = _first_line(by_code[code].__doc__)
-        lines.append(f"  {code}: {meaning}")
-    required_args = " ".join(f"<{a.name}>" for a in meta.arguments if a.required)
-    example = " ".join(w for w in (f"railctl {meta.path}", required_args, "--format json") if w)
-    lines += ["", "EXAMPLES", f"  {example}"]
-    return "\n".join(lines)
+    return "\n".join(
+        [
+            *_output_lines(meta.schema),
+            *_exit_code_lines(meta.exit_codes),
+            "EXAMPLES",
+            f"  {_example(meta)}",
+        ]
+    )
+
+
+def root_epilog() -> str:
+    """The same three headings for `railctl --help`, which had none of them.
+
+    The project's rule is fixed headings at every level, and the root is the page an
+    operator reaches first. Every fact here is read off `COMMANDS`: the exit codes are the
+    union of what the registered commands publish, and there is one example per command, in
+    tree order. The root emits no result envelope of its own - a failure while resolving a
+    global option is the error envelope, and a success always belongs to some command - so
+    the OUTPUT section names `ERROR_SCHEMA` and points at the manifest for the rest.
+    """
+    codes = sorted({code for meta in COMMANDS for code in meta.exit_codes})
+    schema_line = f"{ERROR_SCHEMA} on failure; each command names its own, see railctl schema"
+    return "\n".join(
+        [
+            *_output_lines(schema_line),
+            *_exit_code_lines(codes),
+            "EXAMPLES",
+            *(f"  {_example(meta)}" for meta in COMMANDS),
+        ]
+    )
 
 
 def _option_dict(option: Option) -> dict[str, object]:

@@ -16,7 +16,7 @@ from typing import NoReturn
 import typer
 
 from railctl.cli._errors import OutputContext, _internal_report, report_for, usage_report
-from railctl.cli._meta import GLOBAL_OPTIONS, typer_option
+from railctl.cli._meta import GLOBAL_OPTIONS, root_epilog, typer_option
 from railctl.cli.commands import basics, schema
 from railctl.cli.config import VERBOSE_ENV, Config, config_path, load_config
 from railctl.cli.deps import Settings, build_settings, configure_logging, context_for
@@ -32,6 +32,11 @@ from railctl.errors import RailctlError
 app = typer.Typer(
     add_completion=False,
     context_settings={"max_content_width": 100},
+    # The design's fixed headings apply at EVERY level, and the root is the page an
+    # operator reaches first; without this it was the one `--help` in the tool with no
+    # OUTPUT / EXIT CODES / EXAMPLES at all. Generated from the same `COMMANDS` table the
+    # subcommand epilogs come from - see `_meta.root_epilog`.
+    epilog=root_epilog(),
 )
 
 # Built once, at import time, into names the callback below references. A call to

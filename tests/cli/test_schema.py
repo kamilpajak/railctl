@@ -24,6 +24,7 @@ from railctl.cli._meta import (
     global_option,
     help_epilog,
     manifest,
+    root_epilog,
     typer_argument,
     typer_option,
 )
@@ -65,13 +66,21 @@ def test_global_options_cover_the_eight_design_flags():
     assert by_name["--verbose"].short == "-v"
     assert by_name["--verbose"].repeatable is True
     assert by_name["--yes"].short == "-y"
-    # None/False defaults are what let build_settings (Task 9) tell "not given"
-    # from "given the human default" - a "helpful" non-None default here would
-    # silently break every precedence test in tests/cli/test_config.py.
-    assert by_name["--target"].default is None
-    assert by_name["--format"].default is None
-    assert by_name["--verbose"].default is None
+    # `default` is what a caller GETS when nothing is typed, which is what the manifest
+    # publishes; `late_default` is what says Typer must still be handed `None` so
+    # build_settings can tell "not given" from "given the built-in default". Publishing the
+    # sentinel instead told a consumer that three options with a default have none.
+    assert by_name["--target"].default == "auto"
+    assert by_name["--format"].default == "human"
+    assert by_name["--verbose"].default == 0
     assert by_name["--color"].default == "auto"
+    for name in ("--target", "--format", "--verbose"):
+        assert by_name[name].late_default is True, name
+        assert typer_option(by_name[name]).default is None, name
+    # `--color` has no config-file level and no `pick()` call, so Click carries its real
+    # default and `check_choice` sees a valid value even when the flag is absent.
+    assert by_name["--color"].late_default is False
+    assert typer_option(by_name["--color"]).default == "auto"
 
 
 def test_config_backed_global_options_match_config_keys():
@@ -149,6 +158,14 @@ def test_manifest_for_a_single_path_matches_the_tree_entry_shape():
     assert single["command"] == tree_entry
 
 
+# The one field of a metadata row the manifest deliberately does not publish: it says
+# whether Typer is handed `None` so `pick()` can tell "not typed" from "typed the default",
+# which is how this CLI applies a default, not a fact about the CLI a caller can act on.
+# Every other field must reach the manifest, and this set is where an exemption has to be
+# argued for in writing rather than going unnoticed.
+UNPUBLISHED_ROW_FIELDS = frozenset({"late_default"})
+
+
 def _as_published(row: object) -> dict[str, object]:
     """Every field of an `Option`/`Argument`/`CommandMeta` row, in published form.
 
@@ -160,6 +177,8 @@ def _as_published(row: object) -> dict[str, object]:
     here, and so does a published value that does not equal its source.
     """
     published = dataclasses.asdict(row)  # type: ignore[call-overload]
+    for field in UNPUBLISHED_ROW_FIELDS:
+        published.pop(field, None)
     for key, value in published.items():
         if isinstance(value, tuple):
             published[key] = list(value)
@@ -220,6 +239,35 @@ def test_help_epilog_includes_headings_and_meanings_for_every_exit_code():
     # Codes 0/1/2 have no exception class; this is the branch that does not
     # go through errors.EXIT_CODES at all.
     assert "2: usage error" in epilog
+
+
+def test_every_place_that_lists_the_allowed_values_lists_all_of_them():
+    # Four copies of one list: the tuple `deps` validates against, the manifest's `enum`,
+    # the flag's help string, and the OUTPUT section of every epilog. A value added to the
+    # tuple has to reach all of them, so this asserts membership rather than a spelling -
+    # a literal that is merely correct today passes, a literal left behind does not.
+    from railctl.cli.deps import ALLOWED_COLORS, ALLOWED_FORMATS
+
+    by_name = {o.name: o for o in GLOBAL_OPTIONS}
+    for value in ALLOWED_FORMATS:
+        assert value in by_name["--format"].help, value
+        assert value in help_epilog(command_meta("status")), value
+        assert value in root_epilog(), value
+    for value in ALLOWED_COLORS:
+        assert value in by_name["--color"].help, value
+
+
+def test_a_summary_is_a_whole_thought_not_the_first_physical_line():
+    # PortBusy's docstring wraps after a comma, and the first-line rule published the
+    # fragment "...another process holds it," as the summary a caller reads.
+    rows = {row["code"]: row for row in error_codes()}
+    assert rows["port_busy"]["summary"] == (
+        "The port exists but could not be opened - another process holds it, or permission "
+        "was denied. The message carries the OS strerror either way."
+    )
+    # And the clause this whole project turns on survives, which a first-SENTENCE rule
+    # would have cut off after "budget.".
+    assert rows["link_timeout"]["summary"].endswith("Silence - never a negative answer.")
 
 
 def test_help_epilog_names_the_required_arguments_in_its_example():
@@ -462,6 +510,15 @@ def test_every_registered_command_has_a_metadata_row_and_vice_versa():
     assert registered_paths(app) == {c.path for c in COMMANDS}
 
 
+def test_the_help_lists_the_commands_in_the_order_the_manifest_does():
+    # `railctl --help` said version, status, schema while the manifest said status,
+    # version, schema - two tables of contents for one tool, with a comment beside
+    # COMMANDS claiming they matched. Typer lists commands in registration order, so
+    # this compares the Click tree itself, not the rendered page.
+    click_app = typer.main.get_command(app)
+    assert list(click_app.commands) == [c.path for c in COMMANDS]
+
+
 def test_a_missing_registration_would_fail_the_drift_check():
     # A fresh app, deliberately NOT the shared `app` above, carrying one
     # command with no metadata row at all. Goes red if `registered_paths`
@@ -537,6 +594,9 @@ def test_schema_for_a_not_yet_implemented_command_is_exit_2_with_near_misses():
     assert payload["code"] == "usage"
     assert "power on" in payload["message"]
     assert "status" in payload["message"]  # one of the three known paths, named
+    # A runnable argv array, not recovery advice buried in prose: `UsageProblem` carries
+    # it, `usage_report` publishes it, and a bare ValueError published `[]`.
+    assert payload["suggestions"] == [["railctl", "schema"]]
 
 
 def test_schema_for_a_single_command_matches_the_tree_entry_shape():
@@ -545,16 +605,31 @@ def test_schema_for_a_single_command_matches_the_tree_entry_shape():
     entry = single["result"]["command"]
     tree_entry = next(c for c in tree["commands"] if c["path"] == "status")
     assert entry == tree_entry
-    assert set(entry) == set(tree_entry)
+    # `set(entry) == set(tree_entry)` used to sit here and could not fail - the line above
+    # had already compared the values. What the single-command shape actually claims is
+    # that it answers about ONE command while still carrying the whole error contract.
+    assert "commands" not in single["result"]
+    assert single["result"]["error_codes"] == tree["error_codes"]
 
 
-def test_help_is_deterministic_offline_and_unwrapped():
-    first = runner.invoke(app, ["schema", "--help"])
-    second = runner.invoke(app, ["schema", "--help"])
+@pytest.mark.parametrize("argv", [["--help"], ["schema", "--help"]], ids=["root", "leaf"])
+def test_help_is_deterministic_offline_and_carries_the_fixed_headings(argv: list[str]):
+    # The headings are required at EVERY level, and the root had none of them: no OUTPUT,
+    # no EXIT CODES, no EXAMPLES on the page an operator reaches first.
+    first = runner.invoke(app, argv)
+    second = runner.invoke(app, argv)
     assert first.exit_code == 0
     assert first.stdout == second.stdout  # two consecutive runs, byte-identical
-    assert "schema" in first.stdout
     assert all(heading in first.stdout for heading in ("OUTPUT", "EXIT CODES", "EXAMPLES"))
+
+
+def test_the_root_help_answers_for_every_command_and_every_exit_code():
+    epilog = root_epilog()
+    for meta in COMMANDS:
+        assert f"railctl {meta.path}" in epilog
+        for code in meta.exit_codes:
+            assert f"\n  {code}: " in epilog
+    assert "railctl/error/v1" in epilog  # the one schema a root-level failure emits
 
 
 def test_help_still_works_when_the_config_file_is_unreadable(tmp_path):

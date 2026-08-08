@@ -93,7 +93,12 @@ def build_status(status: StationStatus) -> CommandResult:
 
 
 def register(app: typer.Typer) -> None:
-    """Wire `version` and `status` onto `app`.
+    """Wire `status` and `version` onto `app`, in that order.
+
+    The order is not cosmetic: Typer lists commands in registration order, so this is what
+    decides the Commands block of `railctl --help`, and `_meta.COMMANDS` is what decides the
+    order of the manifest. Registered version-first, the two disagreed while a comment beside
+    `COMMANDS` claimed they matched. `tests/cli/test_schema.py` now compares them.
 
     Both open a `Station`, build a `CommandResult`, and close the station in
     `finally` - even when building the result raises - so a spy on
@@ -108,6 +113,44 @@ def register(app: typer.Typer) -> None:
     usage error before `status` ever runs, and the design's own examples all
     put the flag after the verb.
     """
+
+    @app.command("status", help=_STATUS_META.help, epilog=help_epilog(_STATUS_META))
+    def status_command(
+        ctx: typer.Context,
+        target: str | None = _TARGET,
+        address: int | None = _ADDRESS,
+        format_: str | None = _FORMAT,
+        json_flag: bool = _JSON,
+        verbose: int = _VERBOSE,
+        color: str | None = _COLOR,
+        yes: bool = _YES,
+        non_interactive: bool = _NON_INTERACTIVE,
+    ) -> None:
+        cli_ctx = ctx.obj
+        settings, output = merged_output(
+            cli_ctx.settings,
+            cli_ctx.output,
+            target=target,
+            address=address,
+            fmt=format_,
+            json_flag=json_flag,
+            verbose=verbose,
+            color=color,
+            yes=yes,
+            non_interactive=non_interactive,
+        )
+
+        def work() -> CommandResult:
+            station = open_station(settings, capabilities_path=capabilities_path())
+            try:
+                outcome = build_status(station.status())
+                outcome.link = link_info(station, settings)
+                outcome.station = station_info(station)
+            finally:
+                station.close()
+            return outcome
+
+        run("status", output, work)
 
     @app.command("version", help=_VERSION_META.help, epilog=help_epilog(_VERSION_META))
     def version_command(
@@ -156,41 +199,3 @@ def register(app: typer.Typer) -> None:
             return outcome
 
         run("version", output, work)
-
-    @app.command("status", help=_STATUS_META.help, epilog=help_epilog(_STATUS_META))
-    def status_command(
-        ctx: typer.Context,
-        target: str | None = _TARGET,
-        address: int | None = _ADDRESS,
-        format_: str | None = _FORMAT,
-        json_flag: bool = _JSON,
-        verbose: int = _VERBOSE,
-        color: str | None = _COLOR,
-        yes: bool = _YES,
-        non_interactive: bool = _NON_INTERACTIVE,
-    ) -> None:
-        cli_ctx = ctx.obj
-        settings, output = merged_output(
-            cli_ctx.settings,
-            cli_ctx.output,
-            target=target,
-            address=address,
-            fmt=format_,
-            json_flag=json_flag,
-            verbose=verbose,
-            color=color,
-            yes=yes,
-            non_interactive=non_interactive,
-        )
-
-        def work() -> CommandResult:
-            station = open_station(settings, capabilities_path=capabilities_path())
-            try:
-                outcome = build_status(station.status())
-                outcome.link = link_info(station, settings)
-                outcome.station = station_info(station)
-            finally:
-                station.close()
-            return outcome
-
-        run("status", output, work)
