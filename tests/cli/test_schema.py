@@ -859,6 +859,22 @@ def test_json_and_a_different_format_are_refused_wherever_the_verb_sits(
     assert "--json conflicts with --format=ndjson" in str(result.exception)
 
 
+@pytest.mark.parametrize(
+    "argv",
+    [["--format", "ndjson", "status"], ["status", "--format", "ndjson"]],
+    ids=["before", "after"],
+)
+def test_a_root_format_with_no_json_flag_still_produces_that_format(fake_station, argv):
+    # The other side of the union check: only a CONTRADICTION is refused. A format asked
+    # for on one side of the verb, with nothing contradicting it on the other, must still
+    # be the format that comes out - NDJSON, ending in the summary event a line reader
+    # waits for.
+    result = runner.invoke(app, argv)
+    assert result.exit_code == 0
+    events = [json.loads(line) for line in result.stdout.splitlines()]
+    assert events[-1]["type"] == "summary"
+
+
 def test_json_alone_after_the_verb_is_still_accepted(fake_station):
     # The reason the check reads `fmt_flag` and not `fmt`: `base.fmt` is already
     # resolved to "human" by default, so comparing `--json` against it would
