@@ -1327,7 +1327,7 @@ Every `--format=json` command prints exactly this on stdout:
                  ["railctl", "cv", "read", "8", "--mode", "service"]]}
 ```
 
-`code` is the snake_case exception class name. `retryable` is true only for `LinkTimeout`, `StationBusyError` and `PortBusy`. **Every suggestion is an argv array, never a shell string**, so an agent can execute it without a shell. A failed POM read always suggests `["railctl","doctor"]` first, because the usual cause is RailCom off or the track unpowered.
+`code` is declared on each exception class as `code: ClassVar[str]`, and `RailctlError.__init_subclass__` refuses a subclass that does not declare its own. It is a contract string, not a rendering of the class name: renaming a class never moves it. This replaces the original rule, "the snake_case exception class name", which was implemented and then withdrawn during M6 — deriving it silently rewrote the contract on every rename, and the derivation split the project's own acronyms into `x_bus_checksum` and `port_not_xpress_net` while the same output spells them `xbus` and `xpressnet` elsewhere. `retryable` is true only for `LinkTimeout`, `StationBusyError` and `PortBusy`. **Every suggestion is an argv array, never a shell string**, so an agent can execute it without a shell. A failed POM read always suggests `["railctl","doctor"]` first, because the usual cause is RailCom off or the track unpowered.
 
 **NDJSON** is mandatory for `backup`, `restore`, `diff` and any `--all` sweep, and is what makes a thousand sequential reads observable and resumable. One compact object per line on stdout, every line carrying `type` and a monotonic `sequence` starting at 0:
 
