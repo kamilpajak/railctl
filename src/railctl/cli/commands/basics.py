@@ -80,7 +80,7 @@ def register(app: typer.Typer) -> None:
     call in its own `raise typer.Exit(code=...)`.
     """
 
-    @app.command("version")
+    @app.command("version", help="Report the command station's protocol version and id.")
     def version_command(ctx: typer.Context) -> None:
         cli_ctx = ctx.obj
         settings = cli_ctx.settings
@@ -107,7 +107,7 @@ def register(app: typer.Typer) -> None:
 
         run("version", cli_ctx.output, work)
 
-    @app.command("status")
+    @app.command("status", help="Report track power and the station's emergency state.")
     def status_command(ctx: typer.Context) -> None:
         cli_ctx = ctx.obj
         settings = cli_ctx.settings
