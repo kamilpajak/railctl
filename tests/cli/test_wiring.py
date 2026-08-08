@@ -922,6 +922,61 @@ def test_a_railctl_error_out_of_the_callback_keeps_its_own_exit_code(monkeypatch
     assert payload["exit_code"] == 3
 
 
+# -- main.py: every global option, end to end through the real callback -------
+#
+# One test per option, each asserting the value a command reads off `ctx.obj.settings`.
+# Only `--format` and `--address` used to be pinned this way, and dropping any of the other
+# six from the `build_settings(...)` call left the whole suite green: `railctl --target
+# serial:auto status` would then auto-detect a different port, open the wrong station, and
+# report its status as the one that was asked for.
+
+
+def test_target_flag_reaches_the_settings_a_command_reads(monkeypatch):
+    settings = _settings_a_command_read(monkeypatch, ["--target", "z21:192.168.0.111:21105"])
+    assert settings.target == "z21:192.168.0.111:21105"
+
+
+def test_address_flag_reaches_the_settings_a_command_reads(monkeypatch):
+    settings = _settings_a_command_read(monkeypatch, ["--address", "7"])
+    assert settings.address == 7
+
+
+def test_format_flag_reaches_the_settings_a_command_reads(monkeypatch):
+    settings = _settings_a_command_read(monkeypatch, ["--format", "ndjson"])
+    assert settings.fmt == "ndjson"
+
+
+def test_json_flag_reaches_the_settings_a_command_reads(monkeypatch):
+    settings = _settings_a_command_read(monkeypatch, ["--json"])
+    assert settings.fmt == "json"
+
+
+def test_verbose_flag_reaches_the_settings_a_command_reads(monkeypatch):
+    settings = _settings_a_command_read(monkeypatch, ["-vv"])
+    assert settings.verbose == 2
+
+
+def test_color_flag_reaches_the_settings_a_command_reads(monkeypatch):
+    settings = _settings_a_command_read(monkeypatch, ["--color", "never"])
+    assert settings.color == "never"
+
+
+def test_yes_flag_reaches_the_settings_a_command_reads(monkeypatch):
+    settings = _settings_a_command_read(monkeypatch, ["--yes"])
+    assert settings.assume_yes is True
+
+
+def test_non_interactive_flag_reaches_the_settings_a_command_reads(monkeypatch):
+    # Both halves over a stdin that reports a terminal, which is the only stdin the two
+    # operands disagree on. Paired with a StringIO - `isatty()` already False - the flag can
+    # be dropped entirely and nothing changes: `railctl --non-interactive restore` over a
+    # pseudo terminal would then prompt and block on `stdin.readline()` forever.
+    forced = _settings_a_command_read(monkeypatch, ["--non-interactive"], stdin=_TerminalStdin())
+    assert forced.interactive is False
+    left_alone = _settings_a_command_read(monkeypatch, [], stdin=_TerminalStdin())
+    assert left_alone.interactive is True
+
+
 def _explode_on_open(monkeypatch):
     def explode(*a, **k):
         raise RuntimeError("something nobody predicted")
