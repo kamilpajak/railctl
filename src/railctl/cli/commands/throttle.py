@@ -87,6 +87,12 @@ UNKNOWN_SPEED_NOTICE: Final[str] = (
     "doing after this command exits"
 )
 
+#: The `hint` the facade sets on the two `StationError`s that mean "the current
+#: function group could not be read" - and on no other. `Station._expect_ack`
+#: raises the same class after the group telegram has already been sent, so the
+#: hint is what tells a failure BEFORE the write from one after it.
+FORCE_GROUP_HINT: Final[str] = "--force-group"
+
 #: Where the direction on the wire came from. Published in the envelope because
 #: "forward" alone does not say whether the station reported it, the operator
 #: typed it, or the stop path chose it without reading anything.
@@ -488,6 +494,17 @@ def register(app: typer.Typer) -> None:
                     # machine-readable suggestion, since `default_suggestions`
                     # is keyed by exception type and never sees the function or
                     # state tokens the operator typed.
+                    #
+                    # Only the READ. `Station._expect_ack` raises a bare
+                    # `StationError` too, AFTER the group telegram has gone out,
+                    # and this block reported that as "could not read the
+                    # current state" - a message about a read, for a failure in
+                    # a write, offering a retry flag that skips a read which had
+                    # already happened. `FORCE_GROUP_HINT` is what the facade
+                    # sets on the two raises this wrapper is for, and both name
+                    # the CLI flag by the name it has here.
+                    if getattr(exc, "hint", None) != FORCE_GROUP_HINT:
+                        raise
                     raise FunctionGroupUnreadableError(
                         f"could not read the current state of F{func_num} on loco "
                         f"{resolved}: {exc}",

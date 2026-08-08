@@ -81,6 +81,10 @@ LOCO_STANDING = replace(LOCO_128, speed=0)
 #: whose own telegram had not been sent yet. Two of them describe a WORKING
 #: link: `61 82` is the station refusing this one request, and a checksum fault
 #: is one garbled reply frame.
+#: What `Station._function_set_group_path` says when it will not blind-write a
+#: group whose other bits it has not read.
+GROUP_UNREADABLE_MESSAGE = "F2 shares group G1 with F[1], whose state has not been read"
+
 COSMETIC_READ_FAILURES = [
     LinkTimeout("no reply to the loco-info request within 0.5 s"),
     TransportError("the port went away mid-exchange"),
@@ -103,6 +107,7 @@ class FakeStation:
         loco_info_raises: BaseException | None = None,
         function_toggle_result: bool = True,
         function_raises: bool = False,
+        function_post_write_error: BaseException | None = None,
     ) -> None:
         self.calls: list[tuple[str, tuple[Any, ...], dict[str, Any]]] = []
         self._status = status
@@ -110,6 +115,7 @@ class FakeStation:
         self._loco_info_raises = loco_info_raises
         self._function_toggle_result = function_toggle_result
         self._function_raises = function_raises
+        self._function_post_write_error = function_post_write_error
 
     def _record(self, name: str, *args: Any, **kwargs: Any) -> None:
         self.calls.append((name, args, kwargs))
@@ -147,12 +153,20 @@ class FakeStation:
     ) -> None:
         self._record("function_set", address, function, on, force_group=force_group)
         if self._function_raises and not force_group:
-            raise StationError("could not read the current function group")
+            # `hint=` exactly as the real facade sets it on the two raises that
+            # mean "the current group could not be read". A fake that omitted it
+            # would let the CLI's wrapper fire on failures the facade marks
+            # differently, which is the defect this argument now pins.
+            raise StationError(GROUP_UNREADABLE_MESSAGE, hint="--force-group")
+        if self._function_post_write_error is not None:
+            raise self._function_post_write_error
 
     def function_toggle(self, address: int, function: int, *, force_group: bool = False) -> bool:
         self._record("function_toggle", address, function, force_group=force_group)
         if self._function_raises and not force_group:
-            raise StationError("could not read the current function group")
+            raise StationError(GROUP_UNREADABLE_MESSAGE, hint="--force-group")
+        if self._function_post_write_error is not None:
+            raise self._function_post_write_error
         return self._function_toggle_result
 
     def close(self) -> None:
@@ -788,6 +802,44 @@ def test_function_suggests_force_group_when_state_cannot_be_read(monkeypatch):
         "3",
         "--force-group",
     ]
+
+
+@pytest.mark.parametrize("state", ["on", "toggle"])
+def test_a_failure_after_the_group_telegram_is_not_reported_as_a_failed_read(monkeypatch, state):
+    """`Station._expect_ack` raises a bare `StationError` AFTER the group
+    telegram has gone out. The old `except StationError` wrapped the whole
+    write, so that arrived as "could not read the current state of F2" with a
+    `--force-group` retry that skips a read which had already happened.
+
+    The facade marks the two raises that really do mean "the group could not be
+    read" with `hint="--force-group"`; anything else passes through as itself.
+    """
+    station = FakeStation(
+        function_post_write_error=StationError("expected the generic ack, got Other(...)")
+    )
+    app = _app(station, monkeypatch, fmt="json")
+    result = runner.invoke(app, ["function", "f2", state])
+    assert result.exit_code == 9
+    error = json.loads(result.stderr)
+    assert error["code"] == "station"
+    assert "could not read" not in error["message"]
+    assert error["suggestions"] == []
+
+
+@pytest.mark.parametrize("failure", COSMETIC_READ_FAILURES, ids=lambda exc: type(exc).__name__)
+def test_the_post_action_read_can_never_change_the_functions_verdict(monkeypatch, failure):
+    """The function IS set by the time that read happens.
+
+    Reporting failure there tells a caller to retry, and the retry toggles the
+    function back. BENCH CHECK: only watching the headlight through a retry
+    settles that; this reads an exit code.
+    """
+    station = FakeStation(loco_info_raises=failure)
+    app = _app(station, monkeypatch, fmt="json")
+    result = runner.invoke(app, ["function", "f2", "on"])
+    assert result.exit_code == 0, result.stderr
+    assert ("function_set", (3, 2, True), {"force_group": False}) in station.calls
+    assert json.loads(result.stdout)["result"]["now_on"] is True
 
 
 def test_function_toggle_that_cannot_read_the_group_suggests_the_same_retry(monkeypatch):
