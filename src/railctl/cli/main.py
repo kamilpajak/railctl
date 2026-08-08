@@ -10,7 +10,7 @@ from __future__ import annotations
 
 import os
 import sys
-from collections.abc import Callable
+from collections.abc import Callable, Sequence
 from typing import NoReturn, TextIO
 
 import typer
@@ -172,7 +172,31 @@ def main() -> None:
         # The same safety net `run()` gives a command body, so the two entry paths cannot
         # answer differently. Without it an unreadable `config.toml` leaves a Python
         # traceback on stderr and no `code` field for a wrapper to branch on.
-        _fail(_internal_report(exc, _entry_output()))
+        #
+        # Verbosity is read off argv rather than the resolved settings, because nothing here
+        # HAS resolved settings: every failure this branch catches happened while producing
+        # them, before `global_options` wrote RAILCTL_VERBOSE. Consulting the variable would
+        # answer "not verbose" for exactly the failures an operator reaches for `-vv` to
+        # diagnose.
+        _fail(_internal_report(exc, _entry_output(), verbose=_verbosity_in(sys.argv)))
+
+
+def _verbosity_in(argv: Sequence[str]) -> bool:
+    """Whether argv asks for verbose output, judged before anything parses it.
+
+    Deliberately permissive: `--verbose`, `-v`, the repeated `-vv`, and a bundled short group
+    like `-yv` all count. A false positive costs one traceback nobody asked for; a false
+    negative costs the traceback someone did ask for, on a failure they cannot otherwise see.
+    A bare `--` and anything after it is not inspected - past it, `-v` is a value.
+    """
+    for arg in argv:
+        if arg == "--":
+            return False
+        if arg == "--verbose":
+            return True
+        if len(arg) > 1 and arg[0] == "-" and arg[1] != "-" and "v" in arg:
+            return True
+    return False
 
 
 def _entry_output() -> OutputContext:

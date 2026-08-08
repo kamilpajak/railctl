@@ -147,9 +147,20 @@ def _verbose() -> bool:
     return os.environ.get(VERBOSE_ENV, "") not in ("", "0")
 
 
-def _internal_report(exc: BaseException, ctx: OutputContext) -> ErrorReport:
-    """The safety net: this tool has a bug. Never a domain answer, never the operator's fault."""
-    if _verbose():
+def _internal_report(
+    exc: BaseException, ctx: OutputContext, *, verbose: bool | None = None
+) -> ErrorReport:
+    """The safety net: this tool has a bug. Never a domain answer, never the operator's fault.
+
+    `verbose` overrides the `RAILCTL_VERBOSE` lookup for the one caller that knows the answer
+    before the variable is written. `main.global_options` can only write it AFTER resolution
+    succeeds - it reads the same variable as the environment level for `--verbose`, so writing
+    first would make this process's own flag look like an inherited value - which leaves a
+    window where a failure DURING resolution has no traceback switch to consult. That window
+    holds exactly the failures `main()`'s safety net exists to report, an unreadable
+    `config.toml` among them, so `-vv` would go unanswered precisely when it was asked.
+    """
+    if _verbose() if verbose is None else verbose:
         traceback.print_exc(file=ctx.stderr)
     return ErrorReport(
         code=INTERNAL_CODE,

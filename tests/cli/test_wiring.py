@@ -15,6 +15,7 @@ import logging
 import os
 import runpy
 import sys
+from pathlib import Path
 
 import pytest
 import typer
@@ -1078,6 +1079,53 @@ def test_the_resolved_verbosity_reaches_the_environment_the_traceback_switch_rea
     # never be able to disagree, whichever of the four sources decided the number.
     _settings_a_command_read(monkeypatch, ["-v"])
     assert os.environ["RAILCTL_VERBOSE"] == "1"
+
+
+@pytest.mark.parametrize(
+    ("argv", "wants_traceback"),
+    [
+        (["-vv", "--json", "version"], True),
+        (["--verbose", "--json", "version"], True),
+        (["-yv", "--json", "version"], True),  # bundled short group
+        (["--json", "version"], False),
+    ],
+)
+def test_verbose_reaches_the_traceback_switch_even_when_resolution_itself_fails(
+    monkeypatch, tmp_path, argv: list[str], wants_traceback: bool
+):
+    """The window `RAILCTL_VERBOSE` cannot cover.
+
+    `global_options` can only write that variable AFTER resolution succeeds - it reads the
+    same name as the environment level for `--verbose`, so writing first would make this
+    process's own flag look like an inherited value. A failure DURING resolution therefore
+    never reaches the write, and consulting the variable answers "not verbose" for exactly
+    the failures `main()`'s safety net exists to report. So `-vv` on an unreadable
+    `config.toml` - the case that motivated the safety net - would print no traceback at all.
+    `main()` reads the flag off argv instead. Breaks if that read is removed or narrowed.
+    """
+
+    def unreadable(*_args, **_kwargs):
+        raise PermissionError(13, "Permission denied")
+
+    monkeypatch.setattr(Path, "read_text", unreadable)
+    _write_config(tmp_path, "address = 3\n")
+    monkeypatch.setattr(sys, "argv", ["railctl", *argv])
+    err = io.StringIO()
+    monkeypatch.setattr(sys, "stderr", err)
+    with pytest.raises(SystemExit) as caught:
+        cli_main.main()
+    assert caught.value.code == 1
+    text = err.getvalue()
+    assert ("Traceback" in text) is wants_traceback
+    # Whether or not the traceback is asked for, the envelope is still the last line.
+    assert json.loads(text.splitlines()[-1])["code"] == "internal"
+
+
+def test_a_double_dash_ends_the_verbosity_scan(monkeypatch):
+    """Past `--`, `-v` is a value someone typed, not a flag. Reading it as one would print a
+    traceback for a run that never asked for it."""
+    assert cli_main._verbosity_in(["railctl", "--", "-v"]) is False
+    assert cli_main._verbosity_in(["railctl", "-v", "--"]) is True
 
 
 def _write_config(tmp_path, body: str) -> None:
