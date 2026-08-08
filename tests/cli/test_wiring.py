@@ -16,6 +16,7 @@ import sys
 import pytest
 from typer.testing import CliRunner
 
+from railctl.cli.commands.basics import STATUS_SCHEMA, VERSION_SCHEMA, build_status, build_version
 from railctl.cli.config import Config
 from railctl.cli.deps import (
     Settings,
@@ -31,7 +32,7 @@ from railctl.cli.deps import (
 )
 from railctl.errors import AbortedError, ConfirmationRequiredError, TransportError
 from railctl.station import TIMING, Station
-from railctl.xbus.replies import StationVersion
+from railctl.xbus.replies import StationStatus, StationVersion
 
 
 def _config(**overrides) -> Config:
@@ -494,3 +495,65 @@ def test_station_info_reads_protocol_facts_from_version():
     assert info.protocol == "xpressnet"
     assert info.protocol_version == "4.0"
     assert info.command_station_id == 18
+
+
+# -- commands/basics.py: build_version / build_status ------------------------
+
+
+def test_build_version_schema_and_command_fields():
+    version = StationVersion(raw=0x40, station_id=0x12)
+    result = build_version(version, tool_version="0.1.0")
+    assert result.schema == VERSION_SCHEMA
+    assert result.command == "version"
+
+
+def test_build_version_result_and_lines_carry_the_same_three_facts():
+    version = StationVersion(raw=0x40, station_id=0x12)
+    result = build_version(version, tool_version="0.1.0")
+    joined = " ".join(result.lines)
+    for fact in ("4.0", "18", "0.1.0"):
+        assert fact in json.dumps(result.result)
+        assert fact in joined
+
+
+def test_build_status_result_and_lines_carry_the_raw_byte_and_decoded_names():
+    status = StationStatus.from_raw(0x04)  # bit 2 only: auto_start_mode
+    result = build_status(status)
+    assert result.schema == STATUS_SCHEMA
+    assert result.result["raw"] == 0x04
+    assert result.result["raw_hex"] == "0x04"
+    assert result.result["auto_start_mode"] is True
+    assert any("0x04" in line for line in result.lines)
+    assert any("start mode" in line for line in result.lines)
+
+
+def test_build_status_never_calls_bit_2_short_circuit():
+    status = StationStatus.from_raw(0x04)
+    result = build_status(status)
+    assert "short" not in json.dumps(result.result).lower()
+    assert "short" not in " ".join(result.lines).lower()
+
+
+def test_build_status_track_power_is_false_when_emergency_off_is_set():
+    # Bit 1 (0x02), NOT bit 0. The plan this test came from used the Lenz
+    # order; the measured YD7010 order is the reverse (docs/probe-results.md,
+    # and StationStatus's own docstring): bit 0 is emergency STOP, bit 1 is
+    # emergency OFF, and only emergency off cuts track power.
+    status = StationStatus.from_raw(0x02)
+    result = build_status(status)
+    assert result.result["emergency_off"] is True
+    assert result.result["emergency_stop"] is False
+    assert result.result["track_power"] is False
+    assert "track power: off" in result.lines
+
+
+def test_build_status_emergency_stop_alone_leaves_track_power_on():
+    # The state that separates the two documents: 80 80 sets bit 0 and the
+    # track stays powered. A build_status that read bit 0 as emergency off
+    # would report a live track as dead here.
+    status = StationStatus.from_raw(0x01)
+    result = build_status(status)
+    assert result.result["emergency_stop"] is True
+    assert result.result["emergency_off"] is False
+    assert result.result["track_power"] is True
+    assert "track power: on" in result.lines
