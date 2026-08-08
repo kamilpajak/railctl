@@ -346,6 +346,40 @@ def test_an_unknown_format_is_rejected_naming_the_three_that_exist():
         assert known in message
 
 
+def test_an_unknown_colour_is_rejected_naming_the_three_that_exist():
+    # `--color` is the sibling of `--format`, so it must answer a bad value the same way.
+    # Unvalidated, `--color allways version` exits 0 and paints the output anyway, because
+    # `want_color` falls through any unrecognised choice to `stream.isatty()`.
+    with pytest.raises(ValueError) as caught:
+        build_settings(
+            target=None,
+            address=None,
+            fmt=None,
+            json_flag=False,
+            verbose=None,
+            color="allways",
+            yes=False,
+            non_interactive=True,
+            env={},
+            config=_config(),
+            stdin=io.StringIO(),
+        )
+    message = str(caught.value)
+    assert "allways" in message
+    for known in ("auto", "always", "never"):
+        assert known in message
+
+
+def test_an_unknown_colour_exits_2_through_the_wired_callback(monkeypatch, capsys):
+    monkeypatch.setattr(sys, "argv", ["railctl", "--color", "allways", "version"])
+    with pytest.raises(SystemExit) as caught:
+        cli_main.main()
+    assert caught.value.code == 2
+    captured = capsys.readouterr()
+    assert captured.out == ""
+    assert json.loads(captured.err)["code"] == "usage"
+
+
 def test_merge_settings_overrides_only_the_typed_fields():
     base = _settings(target="auto", address=None, fmt="human", color="auto")
     merged = merge_settings(base, address=7, fmt="json")

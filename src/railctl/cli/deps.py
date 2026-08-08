@@ -25,6 +25,13 @@ from railctl.xbus.address import LOCO_ADDR_MAX, LOCO_ADDR_MIN
 
 _ALLOWED_FORMATS: Final[tuple[str, ...]] = ("human", "json", "ndjson")
 
+# Checked here, by the same mechanism and in the same function as `_ALLOWED_FORMATS`, because
+# `Settings.color` is declared `Literal["auto", "always", "never"]` and `want_color` falls
+# through anything it does not recognise to `stream.isatty()`. Unvalidated, `--color=nevr`
+# and `--color=off` are accepted and silently mean "auto": a caller who asked for plain text
+# gets escape codes and an exit status that says nothing was wrong.
+_ALLOWED_COLORS: Final[tuple[str, ...]] = ("auto", "always", "never")
+
 # A fixed, illustrative loco number - never derived from any real address - so
 # every "missing --address" message is reproducible and greppable. Design spec
 # L2 spells out exactly this suggestion for `railctl drive 40`.
@@ -108,6 +115,9 @@ def build_settings(
     )
     if resolved_format not in _ALLOWED_FORMATS:
         raise ValueError(f"--format must be one of {_ALLOWED_FORMATS}, got {resolved_format!r}")
+
+    if color not in _ALLOWED_COLORS:
+        raise ValueError(f"--color must be one of {_ALLOWED_COLORS}, got {color!r}")
 
     return Settings(
         target=resolved_target,
