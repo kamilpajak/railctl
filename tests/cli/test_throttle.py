@@ -749,6 +749,28 @@ def test_drive_reads_the_status_before_the_locomotive(monkeypatch):
     assert station.call_names == ["status", "loco_info", "drive", "close"]
 
 
+@pytest.mark.parametrize(
+    ("speed", "expected_exit", "reads_status"),
+    [(0, 0, False), (1, 20, True)],
+    ids=["speed-0-sent", "speed-1-refused"],
+)
+def test_speed_zero_and_speed_one_are_the_pair_that_pins_the_guard(
+    monkeypatch, speed, expected_exit, reads_status
+):
+    """`if speed > 0` had no boundary test: every guarded case used 30/20/10 and
+    the only skip-side value was 0. `>= 0` and `> 1` both stayed green.
+
+    Speed 1 is the slowest crawl a decoder takes, and the guard must treat it
+    as motion; speed 0 is the stop and must skip the guard outright.
+    """
+    station = FakeStation(status=EMERGENCY_OFF_STATUS)
+    app = _app(station, monkeypatch)
+    result = runner.invoke(app, ["drive", str(speed), "--forward"])
+    assert result.exit_code == expected_exit, result.stderr
+    assert ("status" in station.call_names) is reads_status
+    assert ("drive" in station.call_names) is (expected_exit == 0)
+
+
 def test_drive_prints_running_notice_on_stderr_only_for_nonzero_speed(monkeypatch):
     station = FakeStation()
     app = _app(station, monkeypatch)
@@ -834,6 +856,24 @@ def test_function_defaults_to_on_when_no_state_is_typed(monkeypatch):
     result = runner.invoke(app, ["function", "f2"])
     assert result.exit_code == 0
     assert ("function_set", (3, 2, True), {"force_group": False}) in station.calls
+
+
+@pytest.mark.parametrize(("state", "expected"), [("on", True), ("off", False)])
+def test_the_reported_bit_follows_the_requested_state_for_a_plain_set(monkeypatch, state, expected):
+    """`now_on = on` ties the reported state to the requested one, and nothing
+    pinned it: every wiring test asked for "on", so `now_on = True` passed.
+
+    `function_set` returns nothing, so this IS what the CLI knows - the claim
+    is "the station accepted the write", not "the bit was read back". A toggle
+    is different: the facade returns the value it computed from a real read,
+    and `test_function_toggle_uses_function_toggle_facade` covers that path.
+    """
+    station = FakeStation()
+    app = _app(station, monkeypatch, fmt="json")
+    result = runner.invoke(app, ["function", "f2", state])
+    assert result.exit_code == 0
+    assert ("function_set", (3, 2, expected), {"force_group": False}) in station.calls
+    assert json.loads(result.stdout)["result"]["now_on"] is expected
 
 
 def test_function_force_group_reaches_the_facade(monkeypatch):

@@ -431,7 +431,11 @@ from typer.testing import CliRunner  # noqa: E402
 
 from railctl.cli._meta import CommandMeta  # noqa: E402
 from railctl.cli.main import app  # noqa: E402
-from railctl.errors import LinkTimeout, UnsupportedCommandError  # noqa: E402
+from railctl.errors import (  # noqa: E402
+    LinkTimeout,
+    TrackPowerError,
+    UnsupportedCommandError,
+)
 from railctl.station import Station  # noqa: E402
 from railctl.xbus.replies import LocoInfo, StationStatus, StationVersion  # noqa: E402
 from railctl.xbus.speed import Direction  # noqa: E402
@@ -753,6 +757,32 @@ def test_a_stop_is_never_refused_by_the_state_that_refuses_every_other_speed(mon
     )
     assert result.exit_code == 0, result.stderr
     assert json.loads(result.stdout)["result"]["speed"] == 0
+
+
+@pytest.mark.parametrize("state", ["on", "off"])
+def test_power_reaches_the_track_power_exit_code_it_publishes(monkeypatch, state):
+    """`POWER_EXIT_CODES` adds 20 and no test drove `power` to it.
+
+    `Station._settle_power` raises `TrackPowerError` when the station still disagrees
+    after the settle pause, which is the only way this command produces 20 - and the
+    reachability rule the two throttle drives already follow says a published refusal
+    code needs a run, not a reading of the source.
+    """
+
+    class _WillNotSettle(_FakeStatusStation):
+        def power_on(self) -> None:
+            raise TrackPowerError("commanded track power on but the station still reports off")
+
+        def power_off(self) -> None:
+            raise TrackPowerError("commanded track power off but the station still reports on")
+
+    monkeypatch.setattr(Station, "open", staticmethod(lambda *a, **k: _WillNotSettle()))
+    result = runner.invoke(
+        app, ["power", state, "--address", "3", "--format", "json", "--non-interactive"]
+    )
+    assert result.exit_code == 20, result.stderr
+    assert result.exit_code in command_meta("power").exit_codes
+    assert json.loads(result.stderr)["code"] == "track_power"
 
 
 def test_power_on_reaches_the_partial_exit_code_it_publishes(monkeypatch):
