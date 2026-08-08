@@ -92,6 +92,14 @@ def build_power(
     outcome.result = {
         "state": state,
         "track_power": status.track_power,
+        # Read and then discarded before: `power on` decided the whole
+        # question with `track_power` and `auto_start_mode`, and these two are
+        # what decide whether anything can actually move. Bit 0 is emergency
+        # STOP and bit 1 is emergency OFF on this hardware, the reverse of the
+        # Lenz spec - measured, docs/probe-results.md. Read by field name, so a
+        # correction there reaches this envelope with no edit here.
+        "emergency_stop": status.emergency_stop,
+        "emergency_off": status.emergency_off,
         "auto_start_mode": status.auto_start_mode,
         "changed": changed,
         "idled_address": None if idled is None else idled.address,
@@ -113,6 +121,7 @@ def build_power(
         )
     else:
         outcome.say("start mode is manual: locomotives stay stopped until driven")
+    _say_emergency_state(outcome, state, status)
     if idled is not None:
         direction_text = DIRECTION_TEXT[idled.direction]
         outcome.say(
@@ -128,6 +137,33 @@ def build_power(
                 sent=direction_text,
             )
     return outcome
+
+
+def _say_emergency_state(outcome: CommandResult, state: str, status: StationStatus) -> None:
+    """The two bits that decide whether the layout can move, in the human text
+    - and as a warning when `power on` left one of them set.
+
+    Emergency stop is the one this exists for: it leaves the track powered, so
+    `track_power: true` alone reads as success while every locomotive is held
+    at standstill. An operator who runs `power on`, sees nothing move and has
+    to run a second command to find out why was told half the answer by the
+    command they already ran.
+    """
+    if status.emergency_stop:
+        outcome.say(
+            "emergency stop is active: the track has voltage and every locomotive is held "
+            "at standstill"
+        )
+    if status.emergency_off:
+        outcome.say("emergency off is active: the track has no voltage")
+    if state == "on" and (status.emergency_stop or status.emergency_off):
+        outcome.warn(
+            "layout_cannot_move",
+            "the station still reports an emergency state after power on, so nothing will "
+            "move until it is cleared",
+            emergency_stop=status.emergency_stop,
+            emergency_off=status.emergency_off,
+        )
 
 
 def build_stop(address: int | None) -> CommandResult:

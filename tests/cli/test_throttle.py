@@ -438,6 +438,33 @@ def test_build_power_warns_when_the_idle_telegram_may_have_changed_the_direction
     assert result.warnings[0].details == {"address": 3, "sent": "forward"}
 
 
+def test_build_power_publishes_the_two_bits_that_decide_whether_anything_can_move():
+    """Emergency stop leaves the track POWERED, so `track_power: true` on its
+    own reads as success while every locomotive is held at standstill. Both
+    bits were read and then discarded."""
+    result = power.build_power("on", EMERGENCY_STOP_STATUS, changed=True, idled=None)
+    assert result.result["track_power"] is True
+    assert result.result["emergency_stop"] is True
+    assert result.result["emergency_off"] is False
+    assert any("emergency stop is active" in line for line in result.lines)
+    assert [w.name for w in result.warnings] == ["layout_cannot_move"]
+    assert result.warnings[0].details == {"emergency_stop": True, "emergency_off": False}
+
+
+def test_build_power_reports_emergency_off_too():
+    result = power.build_power("on", EMERGENCY_OFF_STATUS, changed=True, idled=None)
+    assert result.result["emergency_off"] is True
+    assert any("emergency off is active" in line for line in result.lines)
+
+
+def test_power_off_reporting_an_emergency_state_is_not_a_warning():
+    """`power off` is meant to leave the track dead, so the same bits are the
+    command working rather than the command failing to take effect."""
+    result = power.build_power("off", EMERGENCY_OFF_STATUS, changed=True, idled=None)
+    assert result.result["emergency_off"] is True
+    assert result.warnings == []
+
+
 def test_build_stop_reports_scope_all_when_no_address_is_given():
     result = power.build_stop(None)
     assert result.result == {"address": None, "scope": "all"}
