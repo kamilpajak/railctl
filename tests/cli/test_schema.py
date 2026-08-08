@@ -392,6 +392,7 @@ from typer.testing import CliRunner  # noqa: E402
 
 from railctl.cli._meta import CommandMeta  # noqa: E402
 from railctl.cli.main import app  # noqa: E402
+from railctl.errors import UnsupportedCommandError  # noqa: E402
 from railctl.station import Station  # noqa: E402
 from railctl.xbus.replies import StationStatus, StationVersion  # noqa: E402
 
@@ -565,6 +566,41 @@ def test_the_observed_exit_code_is_one_the_command_publishes(meta: CommandMeta):
     assert result.exit_code in meta.exit_codes
     # The process status and the envelope are one answer, never two.
     assert json.loads(result.stderr)["exit_code"] == result.exit_code
+
+
+@pytest.mark.parametrize("meta", [c for c in COMMANDS if c.path != "schema"], ids=lambda m: m.path)
+def test_a_station_that_refuses_exits_with_a_code_the_command_publishes(meta, monkeypatch):
+    """The second reachable code, and the reason one drive is not enough.
+
+    The `z21:` run above only ever produces exit 7, so it cannot see whether 6 is published.
+    Dropping 6 from `STATION_EXIT_CODES` left the whole suite green until this test existed -
+    the same silent-omission bug the tuple already had once, one code over.
+
+    `UnsupportedCommandError` is what `Station.exchange` raises when the station answers
+    `61 82`: a real refusal, not silence. Raising it from a patched station rather than
+    scripting the bytes keeps this test about the CLI contract - that the exit code a command
+    can produce is one its own manifest row advertises. `tests/station/` already owns the
+    question of which wire reply produces this exception.
+    """
+
+    class Refusing:
+        description = "fake"
+        identity = "fake:refusing"
+
+        def __getattr__(self, name: str):
+            def refuse(*_args, **_kwargs):
+                raise UnsupportedCommandError("station answered 61 82")
+
+            return refuse
+
+        def close(self) -> None:
+            pass
+
+    monkeypatch.setattr(Station, "open", staticmethod(lambda *a, **k: Refusing()))
+    result = runner.invoke(app, [meta.path, "--format", "json", "--non-interactive"])
+    assert result.exit_code == 6, result.stderr
+    assert result.exit_code in meta.exit_codes
+    assert json.loads(result.stderr)["code"] == "unsupported_command"
 
 
 def test_the_root_group_carries_the_global_options_and_no_positionals():
