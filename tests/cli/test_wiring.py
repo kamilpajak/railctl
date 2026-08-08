@@ -339,6 +339,26 @@ def test_interactive_is_decided_by_stdin_isatty():
     )
     assert settings.interactive is False
 
+    # The discriminating half: a stdin that DOES report a terminal, with the flag set. Every
+    # other call in this file pairs `non_interactive=True` with a `StringIO` whose `isatty()`
+    # is already False, so both operands agree and `and not non_interactive` can be dropped
+    # without anything noticing - and then `railctl --non-interactive restore` over a pseudo
+    # terminal prompts and blocks on `stdin.readline()` forever instead of failing fast.
+    settings = build_settings(
+        target=None,
+        address=None,
+        fmt=None,
+        json_flag=False,
+        verbose=None,
+        color="auto",
+        yes=False,
+        non_interactive=True,
+        env={},
+        config=_config(),
+        stdin=_Terminal(),
+    )
+    assert settings.interactive is False
+
 
 # -- merge_settings -----------------------------------------------------
 #
@@ -530,13 +550,20 @@ def test_confirm_noninteractive_raises_confirmation_required_naming_yes():
     assert "--yes" in str(caught.value)
 
 
-def test_confirm_interactive_proceeds_on_y():
+def test_confirm_interactive_proceeds_on_y_and_prompts_on_stderr(capsys):
+    # The prompt itself, and the stream it goes to. Left unasserted, `print(...)` can be
+    # deleted outright - an interactive `restore` then waits with no question on screen -
+    # or moved to stdout, which breaks "stdout holds exactly one JSON value" with nothing
+    # in the suite to say so.
+    stderr = io.StringIO()
     confirm(
         "really restore?",
         settings=_settings(assume_yes=False, interactive=True),
         stdin=io.StringIO("y\n"),
-        stderr=io.StringIO(),
+        stderr=stderr,
     )
+    assert stderr.getvalue() == "really restore? [y/N] "
+    assert capsys.readouterr().out == ""
 
 
 def test_confirm_interactive_aborts_on_anything_else():
@@ -683,6 +710,11 @@ def test_build_status_track_power_is_false_when_emergency_off_is_set():
     assert result.result["emergency_stop"] is False
     assert result.result["track_power"] is False
     assert "track power: off" in result.lines
+    # The human lines too, not only `result`: these two labels are the exact bit pair this
+    # project records as REVERSED from the Lenz spec, so they are the line most likely to be
+    # wrong, and swapping the two labels leaves every `result[...]` assertion green.
+    assert "emergency off: True" in result.lines
+    assert "emergency stop: False" in result.lines
 
 
 def test_build_status_emergency_stop_alone_leaves_track_power_on():
@@ -695,6 +727,8 @@ def test_build_status_emergency_stop_alone_leaves_track_power_on():
     assert result.result["emergency_off"] is False
     assert result.result["track_power"] is True
     assert "track power: on" in result.lines
+    assert "emergency stop: True" in result.lines
+    assert "emergency off: False" in result.lines
 
 
 # -- main.py: app wiring, error paths, __main__ -------------------------------
@@ -719,9 +753,52 @@ def _patch_station(monkeypatch, station):
     monkeypatch.setattr(Station, "open", staticmethod(lambda *a, **k: station))
 
 
+class _StatusStation(_FakeStation):
+    def status(self) -> StationStatus:
+        return StationStatus.from_raw(0x04)
+
+
 class _TerminalStdin(io.StringIO):
     def isatty(self) -> bool:
         return True
+
+
+def test_both_wired_commands_open_the_station_with_the_resolved_arguments(monkeypatch, tmp_path):
+    # `_patch_station` throws every argument away, so nothing used to constrain what the two
+    # command bodies actually pass. Passing `capabilities_path=None` here is issue #15: the
+    # doctor's measurements are written to that file, and a command that opens the station
+    # without it silently discards them.
+    calls = []
+
+    def fake_open(target, *, default_address, capabilities_path, timing):
+        calls.append((target, default_address, capabilities_path, timing))
+        return _StatusStation()
+
+    monkeypatch.setattr(Station, "open", staticmethod(fake_open))
+    runner = CliRunner()
+    common = ["--target", "z21:192.168.0.111:21105", "--address", "7"]
+    for command in ("version", "status"):
+        assert runner.invoke(cli_main.app, [*common, command]).exit_code == 0
+
+    expected = (tmp_path / "railctl" / "capabilities.json",)
+    assert calls == [("z21:192.168.0.111:21105", 7, *expected, TIMING)] * 2
+
+
+def test_both_wired_commands_publish_the_link_block_that_names_the_station(monkeypatch):
+    # `link.identity` is the only thing that tells two stations on one machine apart, and a
+    # script reading `railctl --json version` reads it from here. Deleting both
+    # `outcome.link = link_info(...)` lines left every other assertion in this file green.
+    _patch_station(monkeypatch, _StatusStation(identity="serial:7010A0001194:3"))
+    runner = CliRunner()
+    for command in ("version", "status"):
+        result = runner.invoke(
+            cli_main.app, ["--target", "serial:auto", "--format", "json", command]
+        )
+        assert result.exit_code == 0
+        assert json.loads(result.stdout)["link"] == {
+            "identity": "serial:7010A0001194:3",
+            "target": "serial:auto",
+        }
 
 
 def _settings_a_command_read(monkeypatch, argv, *, stdin=None):
@@ -768,10 +845,6 @@ def test_version_command_human_output_contains_the_same_facts(monkeypatch):
 
 
 def test_status_command_json_carries_raw_byte_and_decoded_names(monkeypatch):
-    class _StatusStation(_FakeStation):
-        def status(self):
-            return StationStatus.from_raw(0x04)
-
     _patch_station(monkeypatch, _StatusStation())
     runner = CliRunner()
     result = runner.invoke(cli_main.app, ["--format", "json", "status"])
@@ -783,10 +856,6 @@ def test_status_command_json_carries_raw_byte_and_decoded_names(monkeypatch):
 
 
 def test_status_command_human_carries_raw_byte_and_decoded_names(monkeypatch):
-    class _StatusStation(_FakeStation):
-        def status(self):
-            return StationStatus.from_raw(0x04)
-
     _patch_station(monkeypatch, _StatusStation())
     runner = CliRunner()
     result = runner.invoke(cli_main.app, ["status"])

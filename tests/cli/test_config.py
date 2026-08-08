@@ -179,3 +179,28 @@ def test_pick_treats_an_exported_but_empty_environment_variable_as_unset():
     # through to the config file, not fail with "RAILCTL_ADDRESS='' is invalid".
     assert pick(None, "", 3, 0, name="address", cast=int) == 3
     assert pick(None, "", None, 0, name="address", cast=int) == 0
+
+
+def test_load_config_rejects_a_boolean_address(tmp_path: Path):
+    # `isinstance(True, int)` is True in Python, so without the explicit bool guard TOML's
+    # `address = true` is accepted and, since `True == 1`, every command silently drives
+    # locomotive address 1 - a real train, chosen by a typo.
+    path = tmp_path / "config.toml"
+    path.write_text("address = true\n", encoding="utf-8")
+    with pytest.raises(ValueError) as caught:
+        load_config(path)
+    message = str(caught.value)
+    assert "address" in message
+    assert "integer" in message
+    assert "True" in message
+
+
+def test_load_config_rejects_a_boolean_verbose(tmp_path: Path):
+    path = tmp_path / "config.toml"
+    path.write_text("verbose = true\n", encoding="utf-8")
+    with pytest.raises(ValueError) as caught:
+        load_config(path)
+    message = str(caught.value)
+    assert "verbose" in message
+    assert "integer" in message
+    assert "True" in message
