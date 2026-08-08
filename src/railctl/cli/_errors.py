@@ -37,6 +37,7 @@ from railctl.errors import (
     FunctionGroupUnreadableError,
     PomReadUnsupportedError,
     RailctlError,
+    TrackPowerError,
     exit_code_for,
 )
 
@@ -62,10 +63,11 @@ class OutputContext:
 def default_suggestions(
     exc: BaseException, *, command: str, cv: int | None = None
 ) -> list[list[str]]:
-    """The three suggestions this project has actually needed (docs/probe-results.md R1: a POM
+    """The four suggestions this project has actually needed (docs/probe-results.md R1: a POM
     read the station never answers; a confirmation nothing can ask for on a non-interactive
-    stdin; and a function group whose current state could not be read). Everything else
-    defaults to no suggestion rather than a guess that reads as authoritative advice it is not.
+    stdin; a function group whose current state could not be read; and a track this tool
+    refuses to drive because the layout is in an emergency state). Everything else defaults to
+    no suggestion rather than a guess that reads as authoritative advice it is not.
 
     `FunctionGroupUnreadableError` is the one whose argv this function cannot build. It is
     keyed by exception type plus at most a `cv`, and the retry command needs the function token
@@ -86,6 +88,15 @@ def default_suggestions(
         return suggestions
     if isinstance(exc, ConfirmationRequiredError):
         return [["railctl", *command.split(), "--yes"]]
+    if isinstance(exc, TrackPowerError):
+        # The recovery for both emergency states this tool refuses on, and the
+        # only one it has: `power on` clears emergency stop and re-energises a
+        # dead track. It sat in the prose of the refusal message, where an
+        # agent would have had to parse a sentence to find a command it can
+        # run. Listed after the two above because `TrackPowerError` is a
+        # `StationError` and neither of them is, so no ordering question
+        # arises - this is placement for reading, not for precedence.
+        return [["railctl", "power", "on"]]
     return []
 
 

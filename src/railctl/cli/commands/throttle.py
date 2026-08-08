@@ -138,18 +138,44 @@ def preflight(station: Station, *, speed: int | None) -> StationStatus:
     (docs/probe-results.md).
     """
     status = station.status()
+    target = f"speed {speed}" if speed is not None else "this command"
     if status.emergency_off or status.emergency_stop:
-        target = f"speed {speed}" if speed is not None else "this command"
+        # Two states, told apart, because the code can tell them apart and
+        # they are not the same thing on the layout: emergency OFF means the
+        # track has no voltage, emergency STOP means it has voltage and every
+        # locomotive is held at standstill. `details` says which fired, so a
+        # caller branches on a field rather than on the prose.
         raise TrackPowerError(
-            f"track power is off or the layout is in emergency stop; refusing to send "
-            f"{target}. Run `railctl power on` first."
+            f"{_emergency_reason(status)}; refusing to send {target}",
+            details={
+                "condition": ("emergency_off" if status.emergency_off else "emergency_stop"),
+                "emergency_off": status.emergency_off,
+                "emergency_stop": status.emergency_stop,
+            },
         )
     if status.service_mode:
         raise StationBusyError(
-            "a service-mode programming session is active on this station; it must "
-            "finish or be cancelled before a throttle command can run"
+            f"a service-mode programming session is active on this station; refusing to "
+            f"send {target}. It must finish or be cancelled first",
+            details={"condition": "service_mode", "service_mode": True},
         )
     return status
+
+
+def _emergency_reason(status: StationStatus) -> str:
+    """Which of the two emergency states this is, in words.
+
+    They were one sentence, "track power is off or the layout is in emergency
+    stop", offered for a status that already knows which. Bit 0 is emergency
+    stop and bit 1 is emergency off on this hardware - measured, the reverse of
+    the Lenz spec (docs/probe-results.md) - and both bits can be set at once,
+    which is why emergency off is named first rather than exclusively.
+    """
+    if status.emergency_off and status.emergency_stop:
+        return "the track has no voltage and the layout is in emergency stop"
+    if status.emergency_off:
+        return "the track has no voltage (emergency off)"
+    return "the layout is in emergency stop (the track still has voltage)"
 
 
 def parse_function(token: str) -> int:

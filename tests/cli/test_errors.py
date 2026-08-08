@@ -39,6 +39,7 @@ from railctl.errors import (
     StationBusyError,
     TrackPowerError,
     UnsupportedCommandError,
+    XBusChecksumError,
     XBusDecodeError,
 )
 
@@ -320,7 +321,16 @@ def test_report_for_reads_the_hint_off_the_exception():
 
 
 def test_default_suggestions_is_empty_for_an_exception_with_no_known_fix():
-    assert default_suggestions(TrackPowerError("track power is off"), command="drive") == []
+    # A garbled reply frame has no runnable remedy, and offering one would read as
+    # authoritative advice this project does not have.
+    assert default_suggestions(XBusChecksumError("trailing XOR byte"), command="drive") == []
+
+
+def test_default_suggestions_offers_power_on_for_a_refused_track():
+    """The pre-flight refusal names `railctl power on` in its prose. An agent should not
+    have to parse a sentence to find the one command that clears both emergency states."""
+    exc = TrackPowerError("the layout is in emergency stop (the track still has voltage)")
+    assert default_suggestions(exc, command="drive") == [["railctl", "power", "on"]]
 
 
 def test_default_suggestions_offers_yes_for_a_blocked_confirmation():

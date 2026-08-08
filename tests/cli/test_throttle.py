@@ -269,6 +269,59 @@ def test_preflight_refuses_when_service_mode_active():
         throttle.preflight(station, speed=None)
 
 
+@pytest.mark.parametrize(
+    ("status", "condition", "phrase"),
+    [
+        (EMERGENCY_OFF_STATUS, "emergency_off", "the track has no voltage"),
+        (EMERGENCY_STOP_STATUS, "emergency_stop", "the track still has voltage"),
+    ],
+    ids=["emergency-off", "emergency-stop"],
+)
+def test_the_refusal_says_which_of_the_two_states_fired(status, condition, phrase):
+    """One sentence covered both: "track power is off or the layout is in
+    emergency stop", offered for a status that already knows which.
+
+    They are not the same thing on the layout - emergency off means no voltage,
+    emergency stop means voltage with every locomotive held - and `details` is
+    what lets a caller branch on that without parsing the prose.
+    """
+    with pytest.raises(TrackPowerError) as caught:
+        throttle.preflight(FakeStation(status=status), speed=30)
+    assert phrase in str(caught.value)
+    assert caught.value.details["condition"] == condition
+
+
+def test_the_refusal_names_both_states_when_both_bits_are_set():
+    both = StationStatus.from_raw(0x03)
+    with pytest.raises(TrackPowerError) as caught:
+        throttle.preflight(FakeStation(status=both), speed=30)
+    assert caught.value.details == {
+        "condition": "emergency_off",
+        "emergency_off": True,
+        "emergency_stop": True,
+    }
+    assert "and the layout is in emergency stop" in str(caught.value)
+
+
+def test_the_service_mode_refusal_carries_its_condition_too():
+    with pytest.raises(StationBusyError) as caught:
+        throttle.preflight(FakeStation(status=SERVICE_MODE_STATUS), speed=30)
+    assert caught.value.details == {"condition": "service_mode", "service_mode": True}
+
+
+@pytest.mark.parametrize("argv", [["drive", "30"], ["function", "f2", "on"]])
+def test_a_refused_command_hands_back_a_runnable_recovery(monkeypatch, argv):
+    """`railctl power on` was named in the prose only, so an agent had to parse
+    a sentence to find the one command that clears both emergency states."""
+    station = FakeStation(status=EMERGENCY_OFF_STATUS)
+    app = _app(station, monkeypatch, fmt="json")
+    result = runner.invoke(app, argv)
+    assert result.exit_code == 20
+    error = json.loads(result.stderr)
+    assert error["suggestions"] == [["railctl", "power", "on"]]
+    assert error["details"]["condition"] == "emergency_off"
+
+
 def test_preflight_names_the_speed_it_refused_when_there_is_one():
     """`speed` only phrases the refusal, so both phrasings need a caller: a
     message naming "speed None" would be this project's own error text going
