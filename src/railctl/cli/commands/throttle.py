@@ -39,6 +39,7 @@ from railctl.cli.deps import merged_output, open_station, require_address
 from railctl.cli.result import CommandResult, tri_state
 from railctl.errors import (
     FunctionGroupUnreadableError,
+    RailctlError,
     StationBusyError,
     StationError,
     TrackPowerError,
@@ -209,10 +210,24 @@ def _read_loco(station: Station, address: int) -> LocoInfo | None:
 
     None means UNKNOWN, never "standing still": every caller below branches on
     it separately rather than folding it into a default speed of 0.
+
+    The catch is `RailctlError`, not `StationError`. Every read that reaches
+    this function is cosmetic - a `changed` field, a direction to keep, a
+    running notice - and none of it may decide whether a mutation goes out.
+    `LinkTimeout`, `TransportError`, `ProtocolError`, `XBusChecksumError` and
+    `UnsupportedCommandError` all subclass `RailctlError` directly rather than
+    `StationError`, so the narrower catch let a `61 82` refusal of the loco-info
+    request - a working link, a healthy track - abort a command whose own
+    telegram would have gone straight through.
+
+    NOT `except Exception`. An address outside 1..9999 raises `ValueError` from
+    `Station._validate_address`, and that has to keep failing: it says the
+    caller asked about a locomotive that cannot exist, which is a different
+    answer from the station declining to describe one that can.
     """
     try:
         return station.loco_info(address)
-    except StationError:
+    except RailctlError:
         return None
 
 
@@ -290,13 +305,23 @@ def register(app: typer.Typer) -> None:
             resolved = require_address(settings, argv_hint=["railctl", "drive", str(speed)])
             station = open_station(settings, capabilities_path=capabilities_path())
             try:
-                was = _read_loco(station, resolved)
-                direction = _direction_for(reverse, was)
                 # THE ONE BRANCH THAT MUST NOT ACQUIRE A CONDITION: speed 0 is
-                # sent whatever the station's status says. A stop that needs
-                # permission is not a stop.
+                # sent whatever the station's status says, and without reading
+                # anything at all first. A stop that needs permission is not a
+                # stop, and neither is one a cosmetic read can veto - the
+                # pre-read used to run above this line, so a loco-info reply
+                # the station refused or never sent aborted the panic command
+                # over a `changed` field nobody was waiting for.
+                #
+                # The pre-flight runs BEFORE the pre-read, not after it: on a
+                # station that refuses everything the operator is owed the
+                # refusal the status read produced, not a second-order "the
+                # direction could not be read".
+                was: LocoInfo | None = None
                 if speed > 0:
                     preflight(station, speed=speed)
+                    was = _read_loco(station, resolved)
+                direction = _direction_for(reverse, was)
                 station.drive(resolved, speed, direction)
                 if speed:
                     print(

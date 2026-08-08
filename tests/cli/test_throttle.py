@@ -26,9 +26,14 @@ from railctl.cli.commands import power, throttle
 from railctl.cli.deps import Settings
 from railctl.errors import (
     FunctionGroupUnreadableError,
+    LinkTimeout,
+    ProtocolError,
     StationBusyError,
     StationError,
     TrackPowerError,
+    TransportError,
+    UnsupportedCommandError,
+    XBusChecksumError,
 )
 from railctl.xbus.replies import LocoInfo, StationStatus
 from railctl.xbus.speed import Direction
@@ -69,6 +74,21 @@ LOCO_14_STEP = LocoInfo(
 )
 LOCO_STANDING = replace(LOCO_128, speed=0)
 
+#: Every exception a `loco_info` request can fail with that is NOT a
+#: `StationError`. Each one is raised by `Station.exchange` or below it, and
+#: each subclasses `RailctlError` directly - which is why a `except
+#: StationError` around the cosmetic pre-read let all five abort a command
+#: whose own telegram had not been sent yet. Two of them describe a WORKING
+#: link: `61 82` is the station refusing this one request, and a checksum fault
+#: is one garbled reply frame.
+COSMETIC_READ_FAILURES = [
+    LinkTimeout("no reply to the loco-info request within 0.5 s"),
+    TransportError("the port went away mid-exchange"),
+    ProtocolError("the reply was well framed and did not parse"),
+    XBusChecksumError("the trailing XOR byte does not match the telegram body"),
+    UnsupportedCommandError("station answered 61 82 to the loco-info request"),
+]
+
 
 class FakeStation:
     """A stand-in for `railctl.station.Station`. Records every call so a test
@@ -80,12 +100,14 @@ class FakeStation:
         *,
         status: StationStatus = CLEAR_STATUS,
         loco_info: LocoInfo | None = LOCO_128,
+        loco_info_raises: BaseException | None = None,
         function_toggle_result: bool = True,
         function_raises: bool = False,
     ) -> None:
         self.calls: list[tuple[str, tuple[Any, ...], dict[str, Any]]] = []
         self._status = status
         self._loco_info = loco_info
+        self._loco_info_raises = loco_info_raises
         self._function_toggle_result = function_toggle_result
         self._function_raises = function_raises
 
@@ -114,6 +136,8 @@ class FakeStation:
 
     def loco_info(self, address: int) -> LocoInfo:
         self._record("loco_info", address)
+        if self._loco_info_raises is not None:
+            raise self._loco_info_raises
         if self._loco_info is None:
             raise StationError(f"no loco info available for {address}")
         return self._loco_info
@@ -435,6 +459,70 @@ def test_drive_zero_skips_preflight_and_is_always_sent(monkeypatch):
     assert result.exit_code == 0
     assert "status" not in station.call_names
     assert station.calls[-2] == ("drive", (3, 0, Direction.FORWARD), {})
+
+
+@pytest.mark.parametrize("failure", COSMETIC_READ_FAILURES, ids=lambda exc: type(exc).__name__)
+def test_drive_zero_is_sent_even_when_the_loco_info_read_fails(monkeypatch, failure):
+    """The stop, driven against a station whose `loco_info` fails five ways.
+
+    Every one of these used to abort the command before `station.drive` was
+    reached, because the pre-read ran ahead of the `speed > 0` guard and was
+    wrapped in `except StationError`, which none of these five is. Two of them
+    describe a working link and a healthy track.
+
+    BENCH CHECK THIS STANDS IN FOR: unplug nothing, put the decoder in a state
+    where the station refuses the loco-info request, run `railctl drive 0` and
+    watch the locomotive stop. Only that settles whether the telegram this test
+    sees in a call list reaches the track.
+    """
+    station = FakeStation(status=EMERGENCY_OFF_STATUS, loco_info_raises=failure)
+    app = _app(station, monkeypatch)
+    result = runner.invoke(app, ["drive", "0"])
+    assert result.exit_code == 0, result.stderr
+    assert station.calls[-2] == ("drive", (3, 0, Direction.FORWARD), {})
+
+
+def test_drive_zero_reads_nothing_at_all_before_sending_the_stop(monkeypatch):
+    """Not just "the read may fail" - the stop path does not make the read.
+
+    A pre-read that cannot veto is still a round trip the panic command waits
+    on, and `LinkTimeout` costs the whole reply budget before it gives up.
+    """
+    station = FakeStation(status=EMERGENCY_OFF_STATUS)
+    app = _app(station, monkeypatch)
+    result = runner.invoke(app, ["drive", "0"])
+    assert result.exit_code == 0
+    assert station.call_names == ["drive", "close"]
+
+
+@pytest.mark.parametrize("failure", COSMETIC_READ_FAILURES, ids=lambda exc: type(exc).__name__)
+def test_a_failed_cosmetic_read_never_vetoes_a_positive_speed_either(monkeypatch, failure):
+    """The other half of the same fix: the widened catch.
+
+    `drive 0` proves nothing about it now that the stop path makes no read at
+    all, so this drives a speed that DOES read. The direction is typed, so the
+    only thing the unreadable reply could still decide is whether the command
+    runs - and it must not.
+    """
+    station = FakeStation(loco_info_raises=failure)
+    app = _app(station, monkeypatch)
+    result = runner.invoke(app, ["drive", "30", "--reverse"])
+    assert result.exit_code == 0, result.stderr
+    assert station.calls[-2] == ("drive", (3, 30, Direction.REVERSE), {})
+
+
+def test_drive_reads_the_status_before_the_locomotive(monkeypatch):
+    """Order matters for which refusal an operator is shown.
+
+    With the pre-read first, a station that refuses every request answered the
+    loco-info request first, the CLI swallowed that refusal as UNKNOWN, and the
+    operator was told about a direction rather than about the station.
+    """
+    station = FakeStation()
+    app = _app(station, monkeypatch)
+    result = runner.invoke(app, ["drive", "30"])
+    assert result.exit_code == 0
+    assert station.call_names == ["status", "loco_info", "drive", "close"]
 
 
 def test_drive_prints_running_notice_on_stderr_only_for_nonzero_speed(monkeypatch):
