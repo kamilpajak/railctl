@@ -59,7 +59,7 @@ class OutputContext:
 
 
 def default_suggestions(
-    exc: BaseException, *, command: str, address: int | None = None, cv: int | None = None
+    exc: BaseException, *, command: str, cv: int | None = None
 ) -> list[list[str]]:
     """The two suggestions this project has actually needed (docs/probe-results.md R1: a POM
     read the station never answers, and a confirmation nothing can ask for on a non-interactive
@@ -132,9 +132,33 @@ def usage_report(exc: BaseException) -> ErrorReport:
         retryable=False,
         exit_code=USAGE_EXIT_CODE,
         details={},
-        suggestions=[list(argv) for argv in getattr(exc, "suggestions", None) or []],
+        suggestions=_argv_arrays(getattr(exc, "suggestions", None)),
         hint=getattr(exc, "hint", None),
     )
+
+
+def _argv_arrays(value: object) -> list[list[str]]:
+    """`value` as a list of argv arrays, or an empty list if it is not already one.
+
+    This reads an attribute off an arbitrary `ValueError`, so the shape is whatever the
+    raiser put there - `UsageProblem` annotates `list[list[str]]` but an annotation stops
+    nothing at runtime, and any `ValueError` from any library may carry a `.suggestions` of
+    its own. Without the check, `suggestions="railctl doctor"` published
+    `[["r"], ["a"], ["i"], ["l"], ...]`: valid JSON, plausible shape, and nonsense in the one
+    field whose entire purpose is to be handed to `subprocess.run` without a shell.
+
+    A malformed value yields NO suggestion rather than a mangled one. Offering nothing costs
+    a caller one idea; offering `[["r"]]` costs them a command that runs. `UsageProblem`
+    itself rejects a bad value at the raise site, so our own code fails where the mistake is
+    and never arrives here.
+    """
+    if not isinstance(value, list):
+        return []
+    if not all(
+        isinstance(argv, list) and all(isinstance(word, str) for word in argv) for argv in value
+    ):
+        return []
+    return [list(argv) for argv in value]
 
 
 def _verbose() -> bool:

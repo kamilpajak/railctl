@@ -188,6 +188,12 @@ def _verbosity_in(argv: Sequence[str]) -> bool:
     like `-yv` all count. A false positive costs one traceback nobody asked for; a false
     negative costs the traceback someone did ask for, on a failure they cannot otherwise see.
     A bare `--` and anything after it is not inspected - past it, `-v` is a value.
+
+    The known false positive is an option VALUE that looks like a flag: in
+    `railctl --target -v`, Typer consumes `-v` as the value of `--target`, and this scan
+    counts it anyway. Telling the two apart means knowing which options take a value, which
+    is Typer's parse table - and this runs when parsing has already failed. One unasked-for
+    traceback is the price; the alternative is withholding one that was asked for.
     """
     for arg in argv:
         if arg == "--":

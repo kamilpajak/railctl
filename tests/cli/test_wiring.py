@@ -22,7 +22,7 @@ import typer
 from typer.testing import CliRunner
 
 import railctl.cli.main as cli_main
-from railctl.cli._errors import OutputContext, run
+from railctl.cli._errors import OutputContext, run, usage_report
 from railctl.cli.commands import basics
 from railctl.cli.commands.basics import STATUS_SCHEMA, VERSION_SCHEMA, build_status, build_version
 from railctl.cli.config import Config
@@ -1245,3 +1245,63 @@ def test_importing_dunder_main_as_a_module_does_not_run_main(monkeypatch):
     assert calls == []
     monkeypatch.undo()
     importlib.reload(module)
+
+
+# -- suggestions must stay runnable ------------------------------------------
+
+
+@pytest.mark.parametrize(
+    "bad",
+    [
+        "railctl doctor",  # a bare string: iterating it yields characters
+        [["railctl", 3]],  # a non-string argument
+        ["railctl doctor"],  # a shell string inside the outer list
+        {"railctl": "doctor"},
+        42,
+    ],
+)
+def test_usage_problem_rejects_anything_that_is_not_a_list_of_argv_arrays(bad):
+    """The raise site is where the mistake is, so that is where it fails.
+
+    `suggestions: list[list[str]]` is an annotation, and an annotation stops nothing at
+    runtime. Before this check `UsageProblem("x", suggestions="railctl doctor")` published
+    `[["r"], ["a"], ["i"], ["l"], ...]` - valid JSON of a plausible shape, in the one field
+    whose whole purpose is to be handed to `subprocess.run` without a shell.
+    """
+    with pytest.raises(TypeError, match="list of argv arrays"):
+        UsageProblem("bad address", suggestions=bad)
+
+
+@pytest.mark.parametrize(
+    "attribute",
+    [
+        "not an argv array",  # not a list at all
+        [["railctl", 3]],  # a list of lists, but not of strings
+        ["railctl doctor"],  # a list of strings, one level short
+    ],
+)
+def test_a_foreign_value_error_carrying_a_malformed_suggestions_publishes_none(attribute):
+    """The other half, for a `ValueError` this project did not raise.
+
+    `usage_report` reads `.suggestions` off any `ValueError`, including one from a library
+    that happens to use that attribute name for something else. It cannot fail the raise site
+    there, so it publishes nothing rather than something mangled: no suggestion costs a caller
+    one idea, a mangled one costs them a command that runs.
+
+    All three shapes are covered because they fail at different points: the first is not a
+    list, the second is a list whose inner elements are wrong, and the third is the shape a
+    reader is most likely to write by hand - one shell string per suggestion instead of one
+    argv array, which is exactly what the argv-array rule exists to forbid.
+    """
+
+    class Foreign(ValueError):
+        suggestions = attribute
+
+    assert usage_report(Foreign("x")).envelope()["suggestions"] == []
+
+
+def test_a_well_formed_suggestion_still_reaches_the_envelope_unchanged():
+    problem = UsageProblem("no address", suggestions=[["railctl", "drive", "40", "-a", "3"]])
+    assert usage_report(problem).envelope()["suggestions"] == [
+        ["railctl", "drive", "40", "-a", "3"]
+    ]

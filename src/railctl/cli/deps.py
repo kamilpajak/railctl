@@ -51,6 +51,19 @@ class UsageProblem(ValueError):
 
     def __init__(self, message: str, *, suggestions: list[list[str]]) -> None:
         super().__init__(message)
+        # Checked, not merely annotated. The envelope hands this field straight to an agent
+        # as something to run, and a bare string used to arrive there split into
+        # `[["r"], ["a"], ["i"], ["l"], ...]` - valid JSON that runs nothing. Failing here
+        # puts the error at the line that wrote the bad value; `_errors._argv_arrays` is the
+        # second half, for a `ValueError` from somewhere this project does not control.
+        if not isinstance(suggestions, list) or not all(
+            isinstance(argv, list) and all(isinstance(word, str) for word in argv)
+            for argv in suggestions
+        ):
+            raise TypeError(
+                f"suggestions must be a list of argv arrays (list[list[str]]), got "
+                f"{suggestions!r}. One list per runnable command, one string per argument."
+            )
         self.suggestions = suggestions
 
 
