@@ -22,6 +22,7 @@ from typer.testing import CliRunner
 
 from railctl.cli import deps
 from railctl.cli._errors import OutputContext
+from railctl.cli._meta import FUNCTION_STATE_ARG, POWER_STATE_ARG
 from railctl.cli.commands import power, throttle
 from railctl.cli.deps import Settings
 from railctl.errors import (
@@ -348,15 +349,48 @@ def test_parse_function_rejects_out_of_range_and_non_numeric():
             throttle.parse_function(token)
 
 
+_FUNCTION_ARGV = ["railctl", "function", "f2"]
+
+
 def test_parse_state_defaults_to_on_when_omitted():
-    assert throttle.parse_state(None) == "on"
+    assert throttle.parse_state(None, argv_prefix=_FUNCTION_ARGV) == "on"
 
 
 def test_parse_state_accepts_and_rejects():
-    assert throttle.parse_state("off") == "off"
-    assert throttle.parse_state("toggle") == "toggle"
+    assert throttle.parse_state("off", argv_prefix=_FUNCTION_ARGV) == "off"
+    assert throttle.parse_state("toggle", argv_prefix=_FUNCTION_ARGV) == "toggle"
     with pytest.raises(ValueError):
-        throttle.parse_state("sideways")
+        throttle.parse_state("sideways", argv_prefix=_FUNCTION_ARGV)
+
+
+def test_the_state_argument_is_validated_against_the_tuple_the_manifest_publishes():
+    """The published `enum` and the check that enforces it are one object, not
+    two that agree today."""
+    assert throttle.FUNCTION_STATES is FUNCTION_STATE_ARG.enum
+    assert power.POWER_STATES is POWER_STATE_ARG.enum
+
+
+def test_a_mistyped_function_state_is_refused_through_our_envelope(monkeypatch):
+    """Not through Click's usage box: a `typer.BadParameter` would exit outside
+    `railctl/error/v1` entirely, which is why `typer_argument` attaches no
+    check and the command body carries it."""
+    station = FakeStation()
+    app = _app(station, monkeypatch, fmt="json")
+    result = runner.invoke(app, ["function", "f2", "sideways"])
+    assert result.exit_code == 2
+    assert station.calls == []
+    error = json.loads(result.stderr)
+    assert error["code"] == "usage"
+    assert error["details"] == {
+        "argument": "state",
+        "allowed": ["on", "off", "toggle"],
+        "got": "sideways",
+    }
+    assert error["suggestions"] == [
+        ["railctl", "function", "f2", "on"],
+        ["railctl", "function", "f2", "off"],
+        ["railctl", "function", "f2", "toggle"],
+    ]
 
 
 # --- build_drive ---
@@ -1317,6 +1351,7 @@ def test_power_rejects_a_state_that_is_neither_on_nor_off(monkeypatch):
     assert station.calls == []
     error = json.loads(result.stderr)
     assert error["code"] == "usage"
+    assert error["details"] == {"argument": "state", "allowed": ["on", "off"], "got": "sideways"}
     assert error["suggestions"] == [["railctl", "power", "on"], ["railctl", "power", "off"]]
 
 

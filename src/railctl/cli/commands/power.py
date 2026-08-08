@@ -31,8 +31,8 @@ from railctl.cli._meta import (
 from railctl.cli.config import capabilities_path
 from railctl.cli.deps import (
     DIRECTION_TEXT,
-    UsageProblem,
     check_address,
+    checked_enum,
     merged_output,
     open_station,
     read_loco,
@@ -305,10 +305,10 @@ def _idle(station: Station, address: int | None) -> Idled | None:
 
 
 def _checked_state(state: str) -> str:
-    if state in POWER_STATES:
-        return state
-    raise UsageProblem(
-        f"power takes {' or '.join(POWER_STATES)}, not {state!r}",
+    return checked_enum(
+        state,
+        name=POWER_STATE_ARG.name,
+        allowed=POWER_STATES,
         suggestions=[["railctl", "power", value] for value in POWER_STATES],
     )
 

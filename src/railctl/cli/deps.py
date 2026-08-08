@@ -13,7 +13,7 @@ from __future__ import annotations
 import dataclasses
 import logging
 import os
-from collections.abc import Mapping
+from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Final, Literal, TextIO
@@ -135,6 +135,31 @@ def check_choice(name: str, value: object, allowed: tuple[str, ...]) -> None:
     """
     if value not in allowed:
         raise ValueError(f"--{name} must be one of {allowed}, got {value!r}")
+
+
+def checked_enum(
+    value: str, *, name: str, allowed: Sequence[str], suggestions: list[list[str]]
+) -> str:
+    """A positional enum, validated HERE and refused through OUR envelope.
+
+    `typer_argument` attaches no Click-level check, for the same reason
+    `typer_option` attaches no `callback=`: a `typer.BadParameter` exits through
+    Click's own usage box and never emits `railctl/error/v1`. That leaves the
+    check to the command body, and `power sideways` was silently running `power
+    off` until someone noticed - the enum was published metadata that nothing
+    enforced.
+
+    `allowed` is passed in from the `Argument` row's own `enum` tuple, never
+    retyped, so the list a caller reads out of `railctl schema` is the list this
+    function compares against.
+    """
+    if value in allowed:
+        return value
+    raise UsageProblem(
+        f"{name} takes {' or '.join(allowed)}, not {value!r}",
+        suggestions=suggestions,
+        details={"argument": name, "allowed": list(allowed), "got": value},
+    )
 
 
 def check_address(value: int | None) -> None:

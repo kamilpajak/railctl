@@ -133,6 +133,21 @@ def test_the_enum_rows_are_the_same_tuples_deps_validates_against():
     assert by_name["--color"].enum is ALLOWED_COLORS
 
 
+def test_every_row_with_a_fixed_set_of_values_publishes_it_as_an_enum():
+    """`type` and `enum` are two fields describing one fact, so they can drift.
+
+    `FUNCTION_STATE_ARG` published `type: "string", enum: null` while `parse_state`
+    accepted exactly on, off and toggle - an agent reading the manifest was told to
+    discover the list by trying one and reading the error.
+    """
+    rows = [
+        *GLOBAL_OPTIONS,
+        *(row for meta in COMMANDS for row in (*meta.arguments, *meta.options)),
+    ]
+    for row in rows:
+        assert (row.type == "enum") == (row.enum is not None), row.name
+
+
 def test_typer_option_attaches_no_click_level_callback():
     # An enum is published metadata, not a Click-level check. A `callback=` that
     # raised `typer.BadParameter` would make a bad `--format` exit through

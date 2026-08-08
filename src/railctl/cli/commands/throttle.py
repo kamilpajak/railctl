@@ -17,6 +17,7 @@ edit.
 
 from __future__ import annotations
 
+from collections.abc import Sequence
 from typing import Any, Final, Literal
 
 import typer
@@ -39,6 +40,7 @@ from railctl.cli.config import capabilities_path
 from railctl.cli.deps import (
     DIRECTION_TEXT,
     UsageProblem,
+    checked_enum,
     merged_output,
     open_station,
     read_loco,
@@ -70,6 +72,15 @@ RUNNING_NOTICE: Final[str] = (
 )
 
 MAX_FUNCTION: Final[int] = 28
+
+#: The three states `function` accepts, read off the metadata row so the
+#: manifest's `enum` and the check that enforces it are one tuple. Published as
+#: `type: "string", enum: null` before, which told an agent to discover them by
+#: trying one and reading the error.
+FUNCTION_STATES: Final[tuple[str, ...]] = FUNCTION_STATE_ARG.enum or ()
+#: What an omitted `state` argument means. First of the tuple is not a rule -
+#: this names the default so the row's order stays free to change.
+DEFAULT_FUNCTION_STATE: Final[Literal["on", "off", "toggle"]] = "on"
 #: Printed instead of a direction word when the reply carried none. A 14/27/28
 #: step reply leaves `direction` None because `speed.py` decodes only the
 #: 128-step layout; saying "forward" there would report a decode this tool
@@ -195,14 +206,25 @@ def parse_function(token: str) -> int:
     return value
 
 
-def parse_state(token: str | None) -> Literal["on", "off", "toggle"]:
-    """`None` (the argument was omitted) defaults to `"on"`."""
+def parse_state(token: str | None, *, argv_prefix: Sequence[str]) -> Literal["on", "off", "toggle"]:
+    """`None` (the argument was omitted) defaults to `"on"`.
+
+    The three states are read off `FUNCTION_STATE_ARG.enum`, the same tuple the
+    manifest publishes, and a value outside it is refused through
+    `checked_enum` - so the positional argument is validated by the same
+    mechanism, with the same envelope and the same runnable suggestions, as an
+    option's enum. `argv_prefix` is `["railctl", "function", <the token the
+    operator typed>]`, so each suggestion is a command they can run.
+    """
     if token is None:
-        return "on"
-    lowered = token.strip().lower()
-    if lowered not in ("on", "off", "toggle"):
-        raise ValueError(f"'{token}' is not a state: use on, off or toggle")
-    return lowered  # type: ignore[return-value]
+        return DEFAULT_FUNCTION_STATE
+    checked = checked_enum(
+        token.strip().lower(),
+        name=FUNCTION_STATE_ARG.name,
+        allowed=FUNCTION_STATES,
+        suggestions=[[*argv_prefix, value] for value in FUNCTION_STATES],
+    )
+    return checked  # type: ignore[return-value]
 
 
 def build_drive(
@@ -506,7 +528,7 @@ def register(app: typer.Typer) -> None:
 
         def work() -> CommandResult:
             func_num = parse_function(function)
-            wanted_state = parse_state(state)
+            wanted_state = parse_state(state, argv_prefix=["railctl", "function", function])
             resolved = require_address(
                 settings, argv_hint=["railctl", "function", function, wanted_state]
             )

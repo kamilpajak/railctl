@@ -298,10 +298,15 @@ FUNCTION_FUNC_ARG = Argument(
     help="f0-f28, a bare number, or an alias such as 'light'",
     type="string",
 )
+#: Published as an `enum` row, not a bare string. `parse_state` has always
+#: accepted exactly these three, and publishing `type: "string", enum: null`
+#: told an agent to discover them by trying. `commands/throttle.parse_state`
+#: reads this tuple, so the manifest's list and the check are one object.
 FUNCTION_STATE_ARG = Argument(
     name="state",
     help="on, off or toggle - defaults to on",
-    type="string",
+    type="enum",
+    enum=("on", "off", "toggle"),
     required=False,
 )
 FUNCTION_FORCE_GROUP_OPT = Option(
