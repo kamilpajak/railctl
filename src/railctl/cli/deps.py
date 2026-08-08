@@ -18,7 +18,7 @@ from pathlib import Path
 from typing import Final, Literal, TextIO
 
 from railctl import errors
-from railctl.cli.config import Config, pick
+from railctl.cli.config import VERBOSE_ENV, Config, pick
 from railctl.cli.result import Format, LinkInfo, StationInfo
 from railctl.station import TIMING, Station
 from railctl.xbus.address import LOCO_ADDR_MAX, LOCO_ADDR_MIN
@@ -99,7 +99,7 @@ def build_settings(
         )
 
     resolved_verbose = pick(
-        verbose, env.get("RAILCTL_VERBOSE"), config.verbose, 0, name="verbose", cast=int
+        verbose, env.get(VERBOSE_ENV), config.verbose, 0, name="verbose", cast=int
     )
 
     # `--json` is an alias for `--format=json`, so it is folded into the same

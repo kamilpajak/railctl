@@ -127,14 +127,17 @@ def test_verbose_precedence_cli_over_env_over_config_over_default():
         "non_interactive": True,
         "stdin": io.StringIO(),
     }
+    # One distinct value per source, the way the other three keys already do it. With env
+    # and config both at 1 the second and third assertions read the same number, so neither
+    # can tell which source produced it and dropping the config level went unnoticed.
     all_four = dict(
-        verbose=2,
-        env={"RAILCTL_VERBOSE": "1"},
+        verbose=3,
+        env={"RAILCTL_VERBOSE": "2"},
         config=_config(verbose=1),
         **common,
     )
-    assert build_settings(**all_four).verbose == 2
-    assert build_settings(**{**all_four, "verbose": None}).verbose == 1
+    assert build_settings(**all_four).verbose == 3
+    assert build_settings(**{**all_four, "verbose": None}).verbose == 2
     assert build_settings(**{**all_four, "verbose": None, "env": {}}).verbose == 1
     assert (
         build_settings(
@@ -704,7 +707,12 @@ def _isolated_config_dir(monkeypatch, tmp_path):
     # ever touch a developer's real ~/.config/railctl.
     monkeypatch.setenv("XDG_CONFIG_HOME", str(tmp_path))
     for key in ("RAILCTL_TARGET", "RAILCTL_ADDRESS", "RAILCTL_VERBOSE", "RAILCTL_FORMAT"):
-        monkeypatch.delenv(key, raising=False)
+        # setenv then delenv, not delenv alone: `global_options` WRITES RAILCTL_VERBOSE, and
+        # monkeypatch can only undo a variable it recorded a value for. A bare
+        # `delenv(..., raising=False)` on an absent key records nothing, so that write would
+        # survive into the next test and be read there as an inherited environment value.
+        monkeypatch.setenv(key, "")
+        monkeypatch.delenv(key)
 
 
 def _patch_station(monkeypatch, station):
@@ -912,6 +920,40 @@ def test_a_railctl_error_out_of_the_callback_keeps_its_own_exit_code(monkeypatch
     payload = json.loads(captured.err)
     assert payload["code"] == "transport"
     assert payload["exit_code"] == 3
+
+
+def _explode_on_open(monkeypatch):
+    def explode(*a, **k):
+        raise RuntimeError("something nobody predicted")
+
+    monkeypatch.setattr(Station, "open", staticmethod(explode))
+
+
+def test_double_verbose_puts_a_traceback_on_stderr_for_an_unexpected_exception(monkeypatch):
+    # `-vv` is the documented way to get a traceback. Before `global_options` wrote the
+    # resolved verbosity into RAILCTL_VERBOSE, the flag configured logging and nothing else,
+    # and the only way to reach the traceback switch was a variable no help text mentions.
+    _explode_on_open(monkeypatch)
+    result = CliRunner().invoke(cli_main.app, ["-vv", "--json", "version"])
+    assert result.exit_code == 1
+    assert "Traceback" in result.stderr
+    # The traceback is extra diagnostics on stderr, never a replacement for the envelope.
+    assert json.loads(result.stderr.splitlines()[-1])["code"] == "internal"
+
+
+def test_without_verbose_the_same_failure_is_one_envelope_and_no_traceback(monkeypatch):
+    _explode_on_open(monkeypatch)
+    result = CliRunner().invoke(cli_main.app, ["version"])
+    assert result.exit_code == 1
+    assert "Traceback" not in result.stderr
+    assert result.stdout == ""
+
+
+def test_the_resolved_verbosity_reaches_the_environment_the_traceback_switch_reads(monkeypatch):
+    # The write itself, pinned separately from its effect: `-v` and RAILCTL_VERBOSE must
+    # never be able to disagree, whichever of the four sources decided the number.
+    _settings_a_command_read(monkeypatch, ["-v"])
+    assert os.environ["RAILCTL_VERBOSE"] == "1"
 
 
 def _write_config(tmp_path, body: str) -> None:

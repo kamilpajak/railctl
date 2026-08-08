@@ -18,6 +18,7 @@ from typing import NoReturn, TextIO
 
 import typer
 
+from railctl.cli.config import VERBOSE_ENV
 from railctl.cli.render import render, render_error
 from railctl.cli.result import (
     INTERNAL_CODE,
@@ -138,9 +139,12 @@ def usage_report(exc: BaseException) -> ErrorReport:
 
 def _verbose() -> bool:
     # The one place this package reads an environment variable directly: RAILCTL_VERBOSE is
-    # the global --verbose flag's env fallback (design L2), and Task 9's Typer wiring sets it
-    # before calling run() rather than every command re-deriving verbosity on its own.
-    return os.environ.get("RAILCTL_VERBOSE", "") not in ("", "0")
+    # the global --verbose flag's env fallback (design L2), and `main.global_options` writes
+    # the RESOLVED verbosity back into it before any command body runs, rather than every
+    # command re-deriving verbosity on its own. That write is what makes `railctl -vv status`
+    # print a traceback for an internal error; without it the flag and this switch disagree
+    # and the only way to get one is an environment variable no help text mentions.
+    return os.environ.get(VERBOSE_ENV, "") not in ("", "0")
 
 
 def _internal_report(exc: BaseException, ctx: OutputContext) -> ErrorReport:

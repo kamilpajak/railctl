@@ -17,7 +17,7 @@ import typer
 
 from railctl.cli._errors import OutputContext, _internal_report, report_for, usage_report
 from railctl.cli.commands import basics
-from railctl.cli.config import config_path, load_config
+from railctl.cli.config import VERBOSE_ENV, config_path, load_config
 from railctl.cli.deps import Settings, build_settings, configure_logging
 from railctl.cli.render import render_error, want_color
 from railctl.cli.result import ErrorReport
@@ -120,6 +120,14 @@ def global_options(
             stdin=sys.stdin,
         )
         configure_logging(settings.verbose, sys.stderr)
+        # `_errors._verbose()` reads this variable to decide whether an internal error
+        # prints a traceback, so the flag and the variable must not be able to disagree:
+        # before this write, `railctl -vv status` configured logging and then printed the
+        # one-line envelope with no traceback, and the only way to get one was a variable
+        # no help text mentions. Written AFTER resolution, never before - `build_settings`
+        # reads the same variable as the environment level for `verbose`, and writing first
+        # would make this process's own flag look like an inherited environment value.
+        os.environ[VERBOSE_ENV] = str(settings.verbose)
         return settings
 
     ctx.obj = CliContext(resolve)

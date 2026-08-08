@@ -26,6 +26,13 @@ from typing import Final
 from railctl.xbus.address import LOCO_ADDR_MAX, LOCO_ADDR_MIN
 
 CONFIG_KEYS: Final[tuple[str, ...]] = ("target", "address", "verbose")
+
+# Named here, in the module that owns the flag/env/file/default precedence, because three
+# other places have to agree on the spelling: `deps.build_settings` reads it as the
+# environment level for `verbose`, `main.global_options` writes the resolved value back into
+# it, and `_errors._verbose()` reads it to decide whether an internal error prints a
+# traceback. Three string literals is how `-vv` and the traceback switch drift apart.
+VERBOSE_ENV: Final[str] = "RAILCTL_VERBOSE"
 DEFAULT_TARGET: Final[str] = "auto"
 
 _APP_DIRNAME: Final[str] = "railctl"
