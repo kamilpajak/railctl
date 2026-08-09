@@ -492,7 +492,7 @@ import sys  # noqa: E402
 import typer  # noqa: E402
 from typer.testing import CliRunner  # noqa: E402
 
-from railctl.cli._meta import CommandMeta  # noqa: E402
+from railctl.cli._meta import _COMMAND_EXIT_MEANINGS, CommandMeta  # noqa: E402
 from railctl.cli.main import app  # noqa: E402
 from railctl.errors import (  # noqa: E402
     LinkTimeout,
@@ -1419,3 +1419,20 @@ def test_double_verbose_after_the_subcommand_reaches_the_traceback_switch(fake_s
     # resolved and inert: no decoded diagnostics, no traceback.
     runner.invoke(app, ["status", "-vv"])
     assert os.environ["RAILCTL_VERBOSE"] == "2"
+
+
+@pytest.mark.parametrize("path", sorted(_COMMAND_EXIT_MEANINGS))
+def test_a_command_specific_exit_meaning_reaches_that_command_s_help(path: str):
+    """Every override in the table is printed, and printed for the right command.
+
+    `_COMMAND_EXIT_MEANINGS` exists because the class docstring behind an exit code is
+    not always what the code means for a particular command - `drive` exits 12 because a
+    service-mode session is open, not because "a programming operation is already
+    running". Nothing constrained the table: renaming a key left the whole suite green,
+    so an override could be added, misspelled, and silently never used.
+    """
+    meta = command_meta(path)
+    epilog = help_epilog(meta)
+    for code, meaning in _COMMAND_EXIT_MEANINGS[path].items():
+        assert code in meta.exit_codes, f"{path} overrides {code} but does not publish it"
+        assert meaning in epilog, f"{path}'s override for {code} never reaches its help"

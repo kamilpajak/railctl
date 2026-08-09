@@ -447,3 +447,30 @@ def test_the_human_stream_flushes_each_event_as_it_arrives(monkeypatch, tmp_path
     monitor._work(settings, output, 2)
 
     assert stdout.flushes == 2
+
+
+def test_the_buffered_path_stops_at_the_limit_rather_than_draining_the_source(
+    monkeypatch, tmp_path
+):
+    """The `break` on the buffered path, pinned by supplying MORE events than the limit.
+
+    Every other test of this path hands over exactly as many events as the limit, so the
+    generator exhausts on its own and the check never has to fire: replacing it with
+    `if False:` left the whole suite green. On hardware `Station.events()` polls forever
+    and never exhausts, so an unconstrained break means `railctl monitor --limit 5
+    --format json` runs until the operator interrupts it - the one thing `--limit` exists
+    to prevent.
+    """
+    events = [
+        StationEvent(at=float(n), name="power.on", detail=f"event {n}", payload={})
+        for n in range(1, 6)
+    ]
+    station = _EventStation(events)
+    app = _wire(monkeypatch, station, tmp_path)
+    result = CliRunner().invoke(app, ["monitor", "--limit", "2", "--format", "json"])
+    assert result.exit_code == 0, result.stderr
+    body = json.loads(result.stdout)
+    assert body["result"]["count"] == 2
+    # Not just the reported count: the three later events must not appear anywhere.
+    assert "event 3" not in result.stdout
+    assert body["result"]["events"][-1]["detail"] == "event 2"
