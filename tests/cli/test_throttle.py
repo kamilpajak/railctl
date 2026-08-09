@@ -25,6 +25,7 @@ from railctl.cli._errors import OutputContext
 from railctl.cli._meta import FUNCTION_STATE_ARG, POWER_STATE_ARG
 from railctl.cli.commands import power, throttle
 from railctl.cli.deps import Settings
+from railctl.cli.result import PARTIAL_EXIT_CODE
 from railctl.errors import (
     FunctionGroupUnreadableError,
     LinkTimeout,
@@ -59,6 +60,10 @@ SERVICE_MODE_STATUS = StationStatus.from_raw(0x08)
 #: stop set, automatic start mode. `0x05` is the byte the 2026-08-09 bench run
 #: read while the layout was held (docs/probe-results.md, run 6).
 HELD_STATUS = StationStatus.from_raw(0x05)
+#: Emergency stop AND emergency off together, plus automatic start mode. `0x07`
+#: is what the YD7010 reads on power-up (docs/probe-results.md), and it is the
+#: state the two emergency sentences used to contradict each other in.
+BOTH_EMERGENCY_STATUS = StationStatus.from_raw(0x07)
 
 LOCO_128 = LocoInfo(
     raw_ident=0b10000100,
@@ -667,6 +672,31 @@ def test_power_on_warns_when_the_station_reports_no_hold_at_all():
     assert result.warnings[0].details == {"emergency_stop": False, "track_power": True}
 
 
+def test_a_hold_that_was_not_confirmed_does_not_report_success():
+    """`CommandResult.warn` touches neither `ok` nor `exit_code`, so the one case this
+    guard exists for used to exit 0 with `ok: true`.
+
+    A script branching on `$?` was told the layout was held while the station had
+    reported no hold at all - and on this station a live track with no hold is the
+    runaway of runs 1 and 2. A command that did not do what it says has not succeeded.
+    """
+    result = power.build_power(
+        "on", AUTO_START_STATUS, changed=True, idled=None, completed=[power.STEP_READ_STATUS]
+    )
+    assert result.ok is False
+    assert result.exit_code == PARTIAL_EXIT_CODE
+
+
+def test_a_confirmed_hold_still_reports_success():
+    """The other side of it: the intended ending must stay exit 0, or the guard above
+    would just be a command that always fails."""
+    result = power.build_power(
+        "on", HELD_STATUS, changed=True, idled=None, completed=[power.STEP_READ_STATUS]
+    )
+    assert result.ok is True
+    assert result.exit_code == 0
+
+
 def test_power_resume_warns_that_stored_speeds_may_now_move():
     """Where the hazard lives now.
 
@@ -737,6 +767,31 @@ def test_build_power_reports_emergency_off_too():
     # `layout_cannot_move` warning stays.
     assert [w.name for w in result.warnings] == ["layout_cannot_move"]
     assert "after power on" in result.warnings[0].message
+
+
+def test_both_emergency_bits_set_do_not_produce_two_lines_that_contradict_each_other():
+    """`0x07` is a state this bench really sits in, and it read as both.
+
+    "The track has voltage" was hardcoded into the emergency-stop sentence, and the
+    emergency-off sentence printed independently, so the operator got "the track has
+    voltage" immediately followed by "the track has no voltage". Voltage is
+    `track_power`, and `emergency_off` is that bit read the other way round, so with both
+    set there is exactly one true answer: no voltage.
+    """
+    result = power.build_power(
+        "off",
+        BOTH_EMERGENCY_STATUS,
+        changed=True,
+        idled=None,
+        completed=[power.STEP_READ_STATUS],
+    )
+    assert result.result["emergency_stop"] is True
+    assert result.result["emergency_off"] is True
+    assert result.result["track_power"] is False
+    voltage_lines = [line for line in result.lines if "voltage" in line]
+    assert len(voltage_lines) == 1
+    assert "has no voltage" in voltage_lines[0]
+    assert not any("the track has voltage" in line for line in result.lines)
 
 
 def test_power_off_reporting_an_emergency_state_is_not_a_warning():
@@ -1351,13 +1406,19 @@ def test_power_on_energises_then_holds_the_layout_then_idles_the_address(monkeyp
         "status",
         "power_on",
         "emergency_stop",
-        "status",
         "loco_info",
         "drive",
+        "status",
         "close",
     ]
     assert station.calls[2] == ("emergency_stop", (), {"address": None})
-    assert station.calls[-2] == ("drive", (3, 0, Direction.FORWARD), {})
+    assert station.calls[-3] == ("drive", (3, 0, Direction.FORWARD), {})
+    # The confirming read is the LAST call before close, after every telegram
+    # this command sends. Run 7 (docs/probe-results.md) measured that the
+    # speed-0 telegram leaves the station-wide hold set, so the answer does not
+    # change on this station - but the read that decides what to claim now
+    # happens after the last thing the command does, not before it.
+    assert station.call_names[-2] == "status"
 
 
 def test_power_on_keeps_the_stored_direction_of_the_locomotive_it_idles(monkeypatch):
@@ -1377,7 +1438,7 @@ def test_power_on_keeps_the_stored_direction_of_the_locomotive_it_idles(monkeypa
     app = _app(station, monkeypatch, address=3, fmt="json")
     result = runner.invoke(app, ["power", "on"])
     assert result.exit_code == 0
-    assert station.calls[-2] == ("drive", (3, 0, Direction.REVERSE), {})
+    assert station.calls[-3] == ("drive", (3, 0, Direction.REVERSE), {})
     payload = json.loads(result.stdout)
     assert payload["result"]["idled_direction"] == "reverse"
     assert payload["result"]["idled_direction_preserved"] is True
@@ -1393,7 +1454,7 @@ def test_power_on_still_idles_and_says_so_when_the_direction_cannot_be_read(monk
     app = _app(station, monkeypatch, address=3, fmt="json")
     result = runner.invoke(app, ["power", "on"])
     assert result.exit_code == 0, result.stderr
-    assert station.calls[-2] == ("drive", (3, 0, Direction.FORWARD), {})
+    assert station.calls[-3] == ("drive", (3, 0, Direction.FORWARD), {})
     payload = json.loads(result.stdout)
     assert payload["result"]["idled_direction_preserved"] is False
     assert [w["name"] for w in payload["warnings"]] == ["direction_not_preserved"]
@@ -1404,7 +1465,7 @@ def test_power_on_does_not_preserve_a_direction_the_reply_never_decoded(monkeypa
     app = _app(station, monkeypatch, address=3, fmt="json")
     result = runner.invoke(app, ["power", "on"])
     assert result.exit_code == 0
-    assert station.calls[-2] == ("drive", (3, 0, Direction.FORWARD), {})
+    assert station.calls[-3] == ("drive", (3, 0, Direction.FORWARD), {})
     assert json.loads(result.stdout)["result"]["idled_direction_preserved"] is False
 
 
@@ -1490,12 +1551,12 @@ def test_power_resume_reports_a_partial_run_when_the_release_landed_and_the_read
     ("failing", "completed", "failed_step"),
     [
         ("emergency_stop", ["read_status_before", "power_on"], "stop_all"),
-        ("status", ["read_status_before", "power_on", "stop_all"], "read_status"),
         (
-            "loco_info",
-            ["read_status_before", "power_on", "stop_all", "read_status"],
-            "idle_address",
+            "status",
+            ["read_status_before", "power_on", "stop_all", "idle_address"],
+            "read_status",
         ),
+        ("loco_info", ["read_status_before", "power_on", "stop_all"], "idle_address"),
     ],
     ids=["hold", "status-read", "idle"],
 )
@@ -1550,20 +1611,97 @@ def test_power_on_reports_a_partial_run_rather_than_a_plain_failure(
     assert payload["warnings"][0]["details"]["error_code"] == "link_timeout"
 
 
-def test_a_failure_before_the_track_is_live_is_a_plain_error_not_a_partial(monkeypatch):
-    """The distinction is only worth having if both sides of it exist."""
+def test_a_failure_before_any_telegram_is_a_plain_error_not_a_partial(monkeypatch):
+    """The distinction is only worth having if both sides of it exist.
 
-    class _FailsAtPowerOn(FakeStation):
-        def power_on(self):
-            self._record("power_on")
-            raise LinkTimeout("no ack for track power on")
+    The opening status read is the only step of `power on` that sends no
+    mutation, so it is the only failure that really is "nothing happened".
+    """
 
-    station = _FailsAtPowerOn(status=AUTO_START_STATUS)
+    class _FailsAtTheFirstRead(FakeStation):
+        def status(self):
+            self._record("status")
+            raise LinkTimeout("no reply to the status request")
+
+    station = _FailsAtTheFirstRead(status=AUTO_START_STATUS)
     app = _app(station, monkeypatch, address=3, fmt="json")
     result = runner.invoke(app, ["power", "on"])
     assert result.exit_code == 5
     assert result.stdout == ""
     assert json.loads(result.stderr)["code"] == "link_timeout"
+    assert "power_on" not in station.call_names
+
+
+def test_a_power_on_that_dies_in_the_energise_says_the_track_may_be_live(monkeypatch):
+    """The failure this redesign was written to remove, in its worst form.
+
+    `station.power_on()` writes `21 81` and only then verifies, and on this station the
+    verify is a pause plus a status read (measured 2026-08-05: the YD7010 never answers
+    the power telegram with `61 01`). So a timeout there means the track may well be
+    live, with no `80 80` sent behind it - and the energise used to sit OUTSIDE the
+    `try`, so `run()` rendered a bare `link_timeout` with no result at all. The caller
+    was told the command failed, which reads as "nothing happened", while the layout was
+    energised and free.
+
+    BENCH CHECK: only a person at the layout can confirm the track is live after this
+    exit code. The fake proves the CLI stops claiming it is not.
+    """
+
+    class _DiesInTheEnergise(FakeStation):
+        def power_on(self):
+            self._record("power_on")
+            raise LinkTimeout("no status reply after the power-on telegram")
+
+    station = _DiesInTheEnergise(status=EMERGENCY_OFF_STATUS)
+    app = _app(station, monkeypatch, address=3, fmt="json")
+    result = runner.invoke(app, ["power", "on"])
+    assert result.exit_code == 8, result.stderr
+    payload = json.loads(result.stdout)
+    assert payload["ok"] is False
+    assert payload["result"]["completed"] == ["read_status_before"]
+    assert payload["result"]["failed_step"] == "power_on"
+    warning = payload["warnings"][0]
+    assert "the track may be live" in warning["message"]
+    assert "NOTHING is holding it" in warning["message"]
+    # What the run DID know, published rather than discarded: the track had no
+    # voltage before this command touched it.
+    assert warning["details"]["track_power_before"] is False
+    assert warning["details"]["emergency_off_before"] is True
+    # And the same two facts in the human rendering, which is what the operator
+    # standing at the layout reads.
+    human = runner.invoke(
+        _app(_DiesInTheEnergise(status=EMERGENCY_OFF_STATUS), monkeypatch), ["power", "on"]
+    )
+    assert human.exit_code == 8
+    assert "the track may be live" in human.stdout
+    assert "NOTHING is holding it" in human.stdout
+
+
+def test_a_resume_that_dies_in_the_release_still_says_stored_speeds_were_released(monkeypatch):
+    """`stored_speeds_released` is the token for "locomotives may now be moving", and the
+    partial path dropped it - in the one run where the release went out and the
+    confirming read then failed, which is when a caller most needs it.
+
+    MEASURED 2026-08-09 (docs/probe-results.md, run 5): the release is what starts
+    locomotives.
+    """
+
+    class _DiesInTheRelease(FakeStation):
+        def power_on(self):
+            self._record("power_on")
+            raise LinkTimeout("no status reply after the release telegram")
+
+    station = _DiesInTheRelease(status=EMERGENCY_STOP_STATUS)
+    app = _app(station, monkeypatch, address=3, fmt="json")
+    result = runner.invoke(app, ["power", "resume"])
+    assert result.exit_code == 8, result.stderr
+    payload = json.loads(result.stdout)
+    assert payload["result"]["failed_step"] == "power_on"
+    names = [w["name"] for w in payload["warnings"]]
+    assert "stored_speeds_released" in names
+    released = next(w for w in payload["warnings"] if w["name"] == "stored_speeds_released")
+    assert released["details"]["confirmed"] is False
+    assert "may now move" in released["message"]
 
 
 def test_a_complete_power_run_names_the_steps_it_ran(monkeypatch):
@@ -1574,8 +1712,8 @@ def test_a_complete_power_run_names_the_steps_it_ran(monkeypatch):
         "read_status_before",
         "power_on",
         "stop_all",
-        "read_status",
         "idle_address",
+        "read_status",
     ]
     assert payload["result"]["failed_step"] is None
 
@@ -1589,12 +1727,12 @@ def test_power_on_computes_changed_rather_than_asserting_it(monkeypatch, loco, e
     """It reported `true` unconditionally, which is not what a desired-state
     verb owes a caller.
 
-    The station here is already powered and reports the same status afterwards,
-    so the whole answer comes from the idle telegram: nothing to do, something
-    to do, or a reply carrying no speed railctl decodes - which is UNKNOWN, not
-    the convenient `false`.
+    The station here reports the same held status before and after, so the power
+    state did not move and the whole answer comes from the idle telegram:
+    nothing to do, something to do, or a reply carrying no speed railctl decodes
+    - which is UNKNOWN, not the convenient `false`.
     """
-    station = FakeStation(status=CLEAR_STATUS, loco_info=loco)
+    station = FakeStation(status=HELD_STATUS, loco_info=loco)
     app = _app(station, monkeypatch, address=3, fmt="json")
     result = runner.invoke(app, ["power", "on"])
     assert result.exit_code == 0, result.stderr
@@ -1605,7 +1743,7 @@ def test_power_on_reports_changed_true_when_the_power_state_moved(monkeypatch):
     class _ComesOn(FakeStation):
         def status(self):
             self._record("status")
-            return CLEAR_STATUS if "power_on" in self.call_names else EMERGENCY_OFF_STATUS
+            return HELD_STATUS if "power_on" in self.call_names else EMERGENCY_OFF_STATUS
 
     station = _ComesOn(loco_info=LOCO_STANDING)
     app = _app(station, monkeypatch, address=3, fmt="json")
@@ -1679,6 +1817,150 @@ def test_power_human_and_json_report_the_same_facts(monkeypatch):
     assert "railctl power resume" in human.stdout
 
 
+def test_the_partial_pins_the_four_fields_a_caller_reads_before_approaching_the_layout(
+    monkeypatch,
+):
+    """The exit-8 envelope publishes `emergency_stop`, `emergency_off`,
+    `auto_start_mode` and `changed`, and nothing asserted any of them.
+
+    They are the fields a script reads to decide whether it is safe to approach. All
+    four status bits are `null`, never `false`: the confirming read is the last step, so
+    a partial happened before it, and reporting a track this command just energised as
+    unpowered would be the founding rule broken inside the report of a failure to follow
+    it. `changed` is `true` because a telegram went out.
+    """
+
+    class _DiesBeforeTheHold(FakeStation):
+        def emergency_stop(self, address=None):
+            self._record("emergency_stop_attempt", address=address)
+            raise LinkTimeout("no ack for the stop-all broadcast")
+
+    station = _DiesBeforeTheHold(status=AUTO_START_STATUS)
+    app = _app(station, monkeypatch, address=3, fmt="json")
+    result = runner.invoke(app, ["power", "on"])
+    assert result.exit_code == 8, result.stderr
+    body = json.loads(result.stdout)["result"]
+    assert body["track_power"] is None
+    assert body["emergency_stop"] is None
+    assert body["emergency_off"] is None
+    assert body["auto_start_mode"] is None
+    assert body["changed"] is True
+    # What the run does know is published, under names that say it describes the
+    # state this command FOUND, not the state it left.
+    details = json.loads(result.stdout)["warnings"][0]["details"]
+    assert details["track_power_before"] is True
+    assert details["auto_start_mode_before"] is True
+    assert details["emergency_stop_before"] is False
+
+
+def test_the_worst_partial_says_the_track_is_live_and_unheld_in_both_renderings(monkeypatch):
+    """The exit-8 `power on` whose hold never went out is the most dangerous state this
+    command can leave, and it used to get the shortest report of the three - one clause
+    naming the step, with no sentence about the layout at all.
+
+    Both renderings carry it, because the JSON reader and the person walking up to the
+    track need the same fact.
+    """
+
+    class _DiesBeforeTheHold(FakeStation):
+        def emergency_stop(self, address=None):
+            self._record("emergency_stop_attempt", address=address)
+            raise LinkTimeout("no ack for the stop-all broadcast")
+
+    app = _app(_DiesBeforeTheHold(status=AUTO_START_STATUS), monkeypatch, address=3, fmt="json")
+    payload = json.loads(runner.invoke(app, ["power", "on"]).stdout)
+    assert "the track was switched on" in payload["warnings"][0]["message"]
+    assert "NOTHING is holding it" in payload["warnings"][0]["message"]
+
+    human = runner.invoke(
+        _app(_DiesBeforeTheHold(status=AUTO_START_STATUS), monkeypatch, address=3),
+        ["power", "on"],
+    )
+    assert human.exit_code == 8
+    assert "the track was switched on" in human.stdout
+    assert "NOTHING is holding it" in human.stdout
+
+
+def test_a_partial_with_no_address_does_not_name_the_step_it_never_ran(monkeypatch):
+    """The idle telegram is skipped when no `--address` resolves, and the failed step is
+    read out of the step list by index - so the list has to describe THIS run.
+
+    Against the full order, a run that skipped the idle and then lost the status read
+    would report `failed_step: idle_address`: a step that never ran, named as the one
+    that broke, in the field a script reads to find out what happened.
+    """
+
+    class _DiesOnTheConfirmingRead(FakeStation):
+        def status(self):
+            if "power_on" in self.call_names:
+                self._record("status")
+                raise LinkTimeout("no status reply after the hold")
+            return super().status()
+
+    station = _DiesOnTheConfirmingRead(status=AUTO_START_STATUS)
+    app = _app(station, monkeypatch, address=None, fmt="json")
+    result = runner.invoke(app, ["power", "on"])
+    assert result.exit_code == 8, result.stderr
+    body = json.loads(result.stdout)["result"]
+    assert "loco_info" not in station.call_names
+    assert body["completed"] == ["read_status_before", "power_on", "stop_all"]
+    assert body["failed_step"] == "read_status"
+
+
+def test_power_on_leaves_the_layout_held_so_a_drive_straight_after_is_refused(monkeypatch):
+    """The one behavioural break this redesign introduces, pinned rather than discovered.
+
+    `power on` now ends HELD, so the `drive` that used to follow it is refused with exit
+    20 and `condition: emergency_stop` - and the suggestion is the release. That is the
+    documented cost of the design (docs/probe-results.md, run 5: the release is what
+    starts locomotives, so the command that energises cannot also release), and a change
+    of mind about it has to break this test.
+    """
+    station = FakeStation(status=HELD_STATUS)
+    app = _app(station, monkeypatch, address=3, fmt="json")
+    assert runner.invoke(app, ["power", "on"]).exit_code == 0
+
+    refused = runner.invoke(app, ["drive", "30"])
+    assert refused.exit_code == 20
+    error = json.loads(refused.stderr)
+    assert error["code"] == "track_power"
+    assert error["details"]["condition"] == "emergency_stop"
+    assert error["suggestions"] == [["railctl", "power", "resume"]]
+    # And the release really is a separate command, not something `drive` does.
+    assert "power_on" not in station.call_names[-1:]
+
+
+def test_power_resume_refuses_on_a_dead_track_and_sends_nothing(monkeypatch):
+    """`21 81` is the telegram that energises a dead track, and it clears both emergency
+    bits at once. So `power resume` from `0x06` or `0x07` - and `0x07` is exactly what
+    `power on` followed by `power off` leaves - produced a live layout with nothing
+    holding it: run 1, the runaway, reached through the CLI.
+
+    `railctl power on` is the command that energises, and it comes up held. This one
+    refuses, before any telegram.
+
+    BENCH CHECK: with the track dead, `railctl power resume` must leave the Track Out LED
+    off and the locomotive standing. Only a person watching settles that; this reads a
+    call list.
+    """
+    for status in (EMERGENCY_OFF_STATUS, BOTH_EMERGENCY_STATUS):
+        station = FakeStation(status=status)
+        app = _app(station, monkeypatch, address=3, fmt="json")
+        result = runner.invoke(app, ["power", "resume"])
+        assert result.exit_code == 20, (status.raw, result.stderr)
+        assert result.stdout == ""
+        # The opening status read, then close. No power_on, no emergency_stop,
+        # no drive: nothing was sent.
+        assert station.call_names == ["status", "close"]
+        error = json.loads(result.stderr)
+        assert error["code"] == "track_power"
+        assert error["details"]["condition"] == "track_dead"
+        assert error["details"]["track_power"] is False
+        assert error["suggestions"] == [["railctl", "power", "on"]]
+        # And never the command that was just refused.
+        assert ["railctl", "power", "resume"] not in error["suggestions"]
+
+
 def test_power_resume_says_in_both_renderings_that_locomotives_may_now_move(monkeypatch):
     station = FakeStation(status=CLEAR_STATUS)
     app = _app(station, monkeypatch, address=3, fmt="json")
@@ -1743,36 +2025,36 @@ def test_stop_human_and_json_report_the_same_facts(monkeypatch):
 # --- never confirmed ---
 
 
+#: The six invocations that must all succeed with no prompt, each with the
+#: status its own success needs. `power on` succeeds only when the station
+#: reports the hold it just asked for - an unconfirmed hold is exit 8 now - and
+#: the two throttle commands are refused on that same held status, so one shared
+#: station cannot serve both. A fresh one per invocation is also what keeps
+#: `power on` from leaving a hold the next command in the list would trip over.
+_NEVER_PROMPTED = (
+    (["power", "on"], HELD_STATUS),
+    (["power", "off"], AUTO_START_STATUS),
+    (["power", "resume"], AUTO_START_STATUS),
+    (["stop"], AUTO_START_STATUS),
+    (["drive", "10"], AUTO_START_STATUS),
+    (["function", "f2", "on"], AUTO_START_STATUS),
+)
+
+
 def test_none_of_the_four_commands_ever_calls_confirm(monkeypatch):
     def _confirm_must_not_be_called(*args: Any, **kwargs: Any) -> None:
         raise AssertionError("confirm called")
 
     monkeypatch.setattr(deps, "confirm", _confirm_must_not_be_called)
-    station = FakeStation(status=AUTO_START_STATUS)
-    app = _app(station, monkeypatch, address=3)
-    for args in (
-        ["power", "on"],
-        ["power", "off"],
-        ["power", "resume"],
-        ["stop"],
-        ["drive", "10"],
-        ["function", "f2", "on"],
-    ):
+    for args, status in _NEVER_PROMPTED:
+        app = _app(FakeStation(status=status), monkeypatch, address=3)
         result = runner.invoke(app, args, input="")
         assert result.exit_code == 0, (args, result.stdout, result.stderr)
 
 
 def test_all_six_invocations_succeed_without_yes_and_without_a_prompt(monkeypatch):
-    station = FakeStation(status=AUTO_START_STATUS)
-    app = _app(station, monkeypatch, address=3)
-    for args in (
-        ["power", "on"],
-        ["power", "off"],
-        ["power", "resume"],
-        ["stop"],
-        ["drive", "10"],
-        ["function", "f2", "on"],
-    ):
+    for args, status in _NEVER_PROMPTED:
+        app = _app(FakeStation(status=status), monkeypatch, address=3)
         result = runner.invoke(app, args, input="")
         assert result.exit_code == 0, (args, result.stdout, result.stderr)
         assert "[y/N]" not in result.stderr

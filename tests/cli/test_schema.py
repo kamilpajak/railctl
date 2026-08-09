@@ -827,34 +827,73 @@ def test_the_status_that_refuses_every_other_speed_does_not_refuse_the_stop(monk
     assert json.loads(result.stdout)["result"]["speed"] == 0
 
 
-@pytest.mark.parametrize("state", ["on", "off", "resume"])
-def test_power_reaches_the_track_power_exit_code_it_publishes(monkeypatch, state):
+def test_power_off_reaches_the_track_power_exit_code_it_publishes(monkeypatch):
     """`POWER_EXIT_CODES` adds 20 and no test drove `power` to it.
 
     `Station._settle_power` raises `TrackPowerError` when the station still disagrees
-    after the settle pause, which is the only way this command produces 20 - and the
-    reachability rule the two throttle drives already follow says a published refusal
-    code needs a run, not a reading of the source.
+    after the settle pause, and the reachability rule the two throttle drives already
+    follow says a published refusal code needs a run, not a reading of the source.
 
-    `resume` is here because it is a new path to the same published codes: it calls
-    `power_on()` like `on` does, and a state added to the enum without a drive is the
-    silent omission this file already caught twice.
+    `off` is the state that still ends in a plain 20. For `on` and `resume` the same
+    exception now arrives after a telegram that may have energised or released the
+    layout, so it is reported as a partial - see the test below.
     """
 
     class _WillNotSettle(_FakeStatusStation):
-        def power_on(self) -> None:
-            raise TrackPowerError("commanded track power on but the station still reports off")
-
         def power_off(self) -> None:
             raise TrackPowerError("commanded track power off but the station still reports on")
 
     monkeypatch.setattr(Station, "open", staticmethod(lambda *a, **k: _WillNotSettle()))
     result = runner.invoke(
-        app, ["power", state, "--address", "3", "--format", "json", "--non-interactive"]
+        app, ["power", "off", "--address", "3", "--format", "json", "--non-interactive"]
     )
     assert result.exit_code == 20, result.stderr
     assert result.exit_code in command_meta("power").exit_codes
     assert json.loads(result.stderr)["code"] == "track_power"
+
+
+def test_power_resume_on_a_dead_track_reaches_the_same_published_code(monkeypatch):
+    """The second path to 20, and the one that matters.
+
+    `power resume` sends `21 81`, which is the telegram that ENERGISES a dead track and
+    clears both emergency bits at once. Run it from `0x06` or `0x07` - `0x07` is what
+    `power on` followed by `power off` leaves - and it produced a live layout with
+    nothing holding it, which is the runaway of run 1 reached through the CLI
+    (docs/probe-results.md, "`power on`'s stop-all was in the wrong order").
+
+    It refuses instead, before any telegram, with a condition a caller can branch on and
+    a suggestion naming the command that energises AND holds.
+    """
+    monkeypatch.setattr(Station, "open", staticmethod(lambda *a, **k: _FakeStatusStation(0x07)))
+    result = runner.invoke(
+        app, ["power", "resume", "--address", "3", "--format", "json", "--non-interactive"]
+    )
+    assert result.exit_code == 20, result.stderr
+    assert result.exit_code in command_meta("power").exit_codes
+    payload = json.loads(result.stderr)
+    assert payload["code"] == "track_power"
+    assert payload["details"]["condition"] == "track_dead"
+    assert payload["suggestions"] == [["railctl", "power", "on"]]
+
+
+@pytest.mark.parametrize("state", ["on", "resume"])
+def test_a_settle_failure_in_the_two_energising_states_is_a_partial(monkeypatch, state):
+    """`Station.power_on()` writes `21 81` and only then verifies, so the settle failure
+    it raises arrives with the telegram already sent. Both states report that as a
+    partial naming the step, never as a bare refusal that reads as "nothing happened"."""
+
+    class _WillNotSettle(_FakeStatusStation):
+        def power_on(self) -> None:
+            raise TrackPowerError("commanded track power on but the station still reports off")
+
+    monkeypatch.setattr(Station, "open", staticmethod(lambda *a, **k: _WillNotSettle(0x01)))
+    result = runner.invoke(
+        app, ["power", state, "--address", "3", "--format", "json", "--non-interactive"]
+    )
+    assert result.exit_code == PARTIAL_EXIT_CODE, result.stderr
+    payload = json.loads(result.stdout)
+    assert payload["result"]["failed_step"] == "power_on"
+    assert payload["warnings"][0]["details"]["error_code"] == "track_power"
 
 
 def test_power_on_reaches_the_partial_exit_code_it_publishes(monkeypatch):
