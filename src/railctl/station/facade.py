@@ -28,6 +28,8 @@ from typing import Final
 
 from railctl.envelope import Frame, hex_bytes
 from railctl.errors import (
+    CONDITION_POWER_OFF_UNSETTLED,
+    CONDITION_POWER_ON_UNSETTLED,
     LinkTimeout,
     ProtocolError,
     RailctlError,
@@ -425,9 +427,21 @@ class Station:
         if second.track_power != expected:
             state = "on" if expected else "off"
             seen = "on" if second.track_power else "off"
+            # `condition` is what the CLI branches on. Without it this raise was
+            # the one `TrackPowerError` in the codebase carrying no condition at
+            # all, and `cli/_errors.default_suggestions` answered that absence
+            # by offering `railctl power resume` - the release - to an operator
+            # whose `power off` had just failed to take.
             raise TrackPowerError(
                 f"commanded track power {state} but the station still reports {seen} "
-                f"after {self.timing.power_settle}s"
+                f"after {self.timing.power_settle}s",
+                details={
+                    "condition": (
+                        CONDITION_POWER_ON_UNSETTLED if expected else CONDITION_POWER_OFF_UNSETTLED
+                    ),
+                    "requested": state,
+                    "reported": seen,
+                },
             )
 
     def emergency_stop(self, address: int | None = None) -> None:

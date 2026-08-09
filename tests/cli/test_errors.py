@@ -18,7 +18,13 @@ from pathlib import Path
 import pytest
 import typer
 
-from railctl.cli._errors import OutputContext, default_suggestions, report_for, run
+from railctl.cli._errors import (
+    TRACK_POWER_RECOVERY,
+    OutputContext,
+    default_suggestions,
+    report_for,
+    run,
+)
 from railctl.cli.render import render_error
 from railctl.cli.result import (
     INTERNAL_CODE,
@@ -28,6 +34,11 @@ from railctl.cli.result import (
     error_code,
 )
 from railctl.errors import (
+    CONDITION_EMERGENCY_OFF,
+    CONDITION_EMERGENCY_STOP,
+    CONDITION_POWER_OFF_UNSETTLED,
+    CONDITION_POWER_ON_UNSETTLED,
+    CONDITION_TRACK_DEAD,
     AbortedError,
     ConfirmationRequiredError,
     CvVerifyError,
@@ -39,6 +50,7 @@ from railctl.errors import (
     StationBusyError,
     TrackPowerError,
     UnsupportedCommandError,
+    XBusChecksumError,
     XBusDecodeError,
 )
 
@@ -88,6 +100,7 @@ PUBLISHED_ERROR_CODES: dict[str, str] = {
     "CvVerifyError": "cv_verify",
     "DecoderNoAckError": "decoder_no_ack",
     "DecoderNotRespondingError": "decoder_not_responding",
+    "FunctionGroupUnreadableError": "function_group_unreadable",
     "IndexPageRequiredError": "index_page_required",
     "LinkProtocolError": "link_protocol",
     "LinkTimeout": "link_timeout",
@@ -319,7 +332,93 @@ def test_report_for_reads_the_hint_off_the_exception():
 
 
 def test_default_suggestions_is_empty_for_an_exception_with_no_known_fix():
-    assert default_suggestions(TrackPowerError("track power is off"), command="drive") == []
+    # A garbled reply frame has no runnable remedy, and offering one would read as
+    # authoritative advice this project does not have.
+    assert default_suggestions(XBusChecksumError("trailing XOR byte"), command="drive") == []
+
+
+def test_default_suggestions_offers_the_release_when_the_layout_is_merely_held():
+    """`power on` is no longer the recovery for an emergency stop.
+
+    Measured 2026-08-09 (docs/probe-results.md): `power on` now energises the track and
+    LEAVES it held, so suggesting it to an operator whose refusal was an emergency stop
+    hands them back the state they were refused in. The release is `power resume`.
+    """
+    exc = TrackPowerError(
+        "the layout is in emergency stop (the track still has voltage)",
+        details={"condition": "emergency_stop"},
+    )
+    assert default_suggestions(exc, command="drive") == [["railctl", "power", "resume"]]
+
+
+def test_default_suggestions_offers_both_halves_when_the_track_is_dead():
+    """A dead track needs energising AND releasing, in that order, because the first
+    command now ends held. One argv array would leave the operator one command short."""
+    exc = TrackPowerError(
+        "the track has no voltage (emergency off)", details={"condition": "emergency_off"}
+    )
+    assert default_suggestions(exc, command="drive") == [
+        ["railctl", "power", "on"],
+        ["railctl", "power", "resume"],
+    ]
+
+
+def test_default_suggestions_offers_only_the_energise_when_resume_is_asked_of_a_dead_track():
+    """`railctl power resume` refused because the track has no voltage. Offering the
+    release again would offer back the command that was just refused; `power on` is the
+    one that energises, and it comes up held."""
+    exc = TrackPowerError(
+        "the track has no voltage, so there is no hold to release",
+        details={"condition": CONDITION_TRACK_DEAD},
+    )
+    assert default_suggestions(exc, command="power resume") == [["railctl", "power", "on"]]
+
+
+@pytest.mark.parametrize(
+    "exc",
+    [
+        TrackPowerError("the station still reports off"),
+        TrackPowerError("something else", details={"condition": "not_a_condition_we_publish"}),
+        TrackPowerError.__new__(TrackPowerError),
+        # The two `Station._settle_power` actually raises. `power off` is the one
+        # that mattered: it was answered with the release.
+        TrackPowerError("x", details={"condition": CONDITION_POWER_OFF_UNSETTLED}),
+        TrackPowerError("x", details={"condition": CONDITION_POWER_ON_UNSETTLED}),
+    ],
+    ids=[
+        "no-details",
+        "unknown-condition",
+        "never-initialised",
+        "power-off-unsettled",
+        "power-on-unsettled",
+    ],
+)
+def test_default_suggestions_offers_nothing_for_a_track_power_error_it_cannot_place(exc):
+    """The one that mattered: a `power off` that would not settle used to be answered with
+    `railctl power resume`.
+
+    `Station._settle_power` raised `TrackPowerError` with no `details` at all, and the table
+    answered every condition-less instance with `power on` plus `power resume`. Measured
+    2026-08-09 (docs/probe-results.md, "`power on`'s stop-all was in the wrong order", run 5):
+    the release is the telegram that made a locomotive with step 80 stored accelerate away. A
+    suggestion that may start a locomotive needs a condition that justifies it.
+
+    `__new__` with no `__init__` is how `_meta._class_error_row` probes every class, so the
+    lookup must not assume the attribute is there either.
+    """
+    assert default_suggestions(exc, command="power") == []
+
+
+def test_every_condition_the_recovery_table_names_is_a_declared_constant():
+    """The table is keyed by the strings the raisers write. Both sides read the same
+    constants from `railctl.errors`, so a renamed condition cannot leave one half of the
+    pair silently unmatched - which would put this table back to answering nothing, or
+    (before the constants existed) to guessing."""
+    assert set(TRACK_POWER_RECOVERY) == {
+        CONDITION_EMERGENCY_STOP,
+        CONDITION_EMERGENCY_OFF,
+        CONDITION_TRACK_DEAD,
+    }
 
 
 def test_default_suggestions_offers_yes_for_a_blocked_confirmation():

@@ -26,8 +26,9 @@ later plan, not with this table.
 from __future__ import annotations
 
 import difflib
-from collections.abc import Sequence
+from collections.abc import Mapping, Sequence
 from dataclasses import dataclass, replace
+from types import MappingProxyType
 from typing import Any, Final, Literal
 
 import typer
@@ -45,12 +46,14 @@ from railctl.cli.result import (
     ERROR_SCHEMA,
     INTERNAL_CODE,
     INTERNAL_EXIT_CODE,
+    PARTIAL_EXIT_CODE,
     RESERVED_CODES,
     RETRYABLE_CODES,
     USAGE_CODE,
     USAGE_EXIT_CODE,
     error_code,
 )
+from railctl.xbus.speed import MAX_SPEED_STEP
 
 SCHEMA_SCHEMA: Final[str] = "railctl/schema/v1"
 
@@ -208,6 +211,29 @@ BASE_EXIT_CODES: Final[tuple[int, ...]] = (0, 1, 2)
 # describes, running the other way.
 STATION_EXIT_CODES: Final[tuple[int, ...]] = (0, 1, 2, 3, 4, 5, 6, 7, 9)
 
+# All three `power` states go through `Station._settle_power`, which raises
+# `TrackPowerError` (20) when the station still disagrees after the settle
+# pause. `power on` and `power resume` also publish the partial code: each one
+# energises the track before its remaining steps, and `power resume` releases
+# the hold in the same call, so a failure after that point leaves the layout in
+# a state that is a different thing from the command having done nothing.
+#
+# Sorted, because `help_epilog` and the manifest publish this tuple in the order
+# it is written and appending 8 after the base set's 9 listed the codes as
+# 0 1 2 3 4 5 6 7 9 8 20 on the `--help` page. `STATION_EXIT_CODES` happens to be
+# in order already; sorting here is what keeps that from being a property the
+# next addition has to remember.
+POWER_EXIT_CODES: Final[tuple[int, ...]] = tuple(
+    sorted({*STATION_EXIT_CODES, PARTIAL_EXIT_CODE, 20})
+)
+
+# `drive SPEED>0` and `function` both run `throttle.preflight`, which refuses
+# with `TrackPowerError` (20) on emergency off or emergency stop and with
+# `StationBusyError` (12) on an active service-mode session. Published because
+# they are reachable, not because a test happens to drive them - though
+# tests/cli/test_schema.py drives both, per the rule in design spec L6.
+THROTTLE_EXIT_CODES: Final[tuple[int, ...]] = (*STATION_EXIT_CODES, 12, 20)
+
 _STATUS = CommandMeta(
     path="status",
     help="Command station status: raw byte and decoded bits",
@@ -239,6 +265,136 @@ _SCHEMA = CommandMeta(
     ),
 )
 
+DRIVE_SPEED_ARG = Argument(
+    name="speed",
+    help=f"speed step 0-{MAX_SPEED_STEP}",
+    type="integer",
+)
+#: Two states, not three: given means reverse, omitted means keep whatever
+#: direction the locomotive is already running. `default=None` rather than
+#: `False` because `false` would publish "forward" as the default, and there is
+#: no default direction - `drive` REFUSES a positive speed when it cannot read
+#: the current one. Typer builds no `--no-reverse` counterpart for an
+#: explicitly named flag, and the spec's command tree names none either.
+DRIVE_REVERSE_OPT = Option(
+    name="--reverse",
+    help="run in reverse; omit to keep the locomotive's current direction",
+    type="boolean",
+    default=None,
+)
+#: The other half of `--reverse`, and the reason it exists: `drive` refuses a
+#: positive speed when the station's reported direction is unknown, and a
+#: refusal an operator cannot act on is not a refusal, it is a dead end. With
+#: `--reverse` the only way to state a direction, there was no runnable answer
+#: to "the direction could not be read" that meant forward.
+DRIVE_FORWARD_OPT = Option(
+    name="--forward",
+    help="run forward; omit to keep the locomotive's current direction",
+    type="boolean",
+    default=None,
+)
+_DRIVE = CommandMeta(
+    path="drive",
+    help="Set speed step and direction",
+    schema="railctl/drive/v1",
+    mutates=True,
+    exit_codes=THROTTLE_EXIT_CODES,
+    arguments=(DRIVE_SPEED_ARG,),
+    options=(DRIVE_REVERSE_OPT, DRIVE_FORWARD_OPT),
+)
+
+FUNCTION_FUNC_ARG = Argument(
+    name="function",
+    help="f0-f28, a bare number, or an alias such as 'light'",
+    type="string",
+)
+#: Published as an `enum` row, not a bare string. `parse_state` has always
+#: accepted exactly these three, and publishing `type: "string", enum: null`
+#: told an agent to discover them by trying. `commands/throttle.parse_state`
+#: reads this tuple, so the manifest's list and the check are one object.
+FUNCTION_STATE_ARG = Argument(
+    name="state",
+    help="on, off or toggle - defaults to on",
+    type="enum",
+    enum=("on", "off", "toggle"),
+    required=False,
+)
+FUNCTION_FORCE_GROUP_OPT = Option(
+    name="--force-group",
+    help="skip reading the current function group; clears the rest of the group",
+    type="boolean",
+    default=False,
+)
+_FUNCTION = CommandMeta(
+    path="function",
+    help="Set F0-F28 on, off or toggle",
+    schema="railctl/function/v1",
+    mutates=True,
+    exit_codes=THROTTLE_EXIT_CODES,
+    arguments=(FUNCTION_FUNC_ARG, FUNCTION_STATE_ARG),
+    options=(FUNCTION_FORCE_GROUP_OPT,),
+)
+
+#: Three states, and `resume` is not an invented word: it is the name of the
+#: XpressNet primitive `RESUME_OPS` (`21 81`). It exists as a state of its own
+#: because `power on` now ends with the layout HELD - MEASURED 2026-08-09,
+#: docs/probe-results.md, "`power on`'s stop-all was in the wrong order". An
+#: emergency stop holds the station's refresh buffer and never clears it, so
+#: nothing can hold and then quietly release; the release is a separate command
+#: the operator runs when they are watching the layout.
+_POWER_STATES: Final[tuple[str, ...]] = ("on", "off", "resume")
+#: `enum` here is published metadata that `power_cmd` enforces in its own body.
+#: `typer_argument` attaches no Click-level check, for the same reason
+#: `typer_option` attaches no `callback=`: a `typer.BadParameter` exits through
+#: Click's own usage box and never emits the `railctl/error/v1` envelope.
+POWER_STATE_ARG = Argument(
+    name="state", help=_one_of(_POWER_STATES), type="enum", enum=_POWER_STATES
+)
+#: Named in the row rather than only in the source, because a caller cannot see
+#: either fact from the command's name and nothing else published them: `power
+#: on` leaves the whole layout held in emergency stop, and it sends a speed-0
+#: telegram to `--address` - a write to a locomotive from a command called
+#: "power". The speed 0 is what keeps that one locomotive standing when the
+#: hold is later released; every other locomotive is still holding whatever
+#: speed the station had for it (measured 2026-08-09).
+_POWER_HELP: Final[str] = (
+    "Track power on, off, or resume. `power on` energises the track and leaves every "
+    "locomotive held in emergency stop, and sends speed 0 to --address, keeping its stored "
+    "direction where the station reports one; `power resume` releases the hold, which is the "
+    "moment stored speeds start locomotives"
+)
+_POWER = CommandMeta(
+    path="power",
+    help=_POWER_HELP,
+    schema="railctl/power/v1",
+    mutates=True,
+    exit_codes=POWER_EXIT_CODES,
+    arguments=(POWER_STATE_ARG,),
+)
+
+#: Command-scoped, and deliberately NOT the global `--address` /
+#: RAILCTL_ADDRESS / config default that `drive` and `function` read through
+#: `settings.address`. A user with `address = 3` configured who hits the panic
+#: button `railctl stop` means "stop everything"; inheriting the convenient
+#: default would stop only locomotive 3. `stop_cmd` therefore declares seven
+#: global options instead of eight - this row owns the `--address`/`-a` names
+#: for that command.
+STOP_ADDRESS_OPT = Option(
+    name="--address",
+    help="stop only this locomotive; omitted means every locomotive",
+    type="integer",
+    short="-a",
+    default=None,
+)
+_STOP = CommandMeta(
+    path="stop",
+    help="Emergency stop: all locomotives, or one with --address",
+    schema="railctl/stop/v1",
+    mutates=True,
+    exit_codes=STATION_EXIT_CODES,
+    options=(STOP_ADDRESS_OPT,),
+)
+
 # Tree order per the design spec's L2 ASCII listing: status, version, ...,
 # schema last. Each later task that adds a command rebuilds this literal in
 # full, its own row inserted where the nine-path tree order puts it - never
@@ -250,7 +406,15 @@ _SCHEMA = CommandMeta(
 # they matched. `tests/cli/test_schema.py` compares the Click tree against this tuple, so a
 # command registered out of order fails rather than quietly giving an agent and an operator
 # two different tables of contents.
-COMMANDS: Final[tuple[CommandMeta, ...]] = (_STATUS, _VERSION, _SCHEMA)
+COMMANDS: Final[tuple[CommandMeta, ...]] = (
+    _STATUS,
+    _VERSION,
+    _POWER,
+    _STOP,
+    _DRIVE,
+    _FUNCTION,
+    _SCHEMA,
+)
 
 _BY_PATH: Final[dict[str, CommandMeta]] = {c.path: c for c in COMMANDS}
 
@@ -341,10 +505,22 @@ def global_option(name: str) -> Any:
     return typer_option(replace(row, default=_bare_default(row), late_default=False))
 
 
+#: Why a THROTTLE command exits 12 - the pre-flight found the station in a
+#: service-mode session, which is not the `61 1F` reply `StationBusyError`'s
+#: own docstring describes.
+_SERVICE_MODE_MEANING: Final[str] = (
+    "a service-mode programming session is active on the station; it must finish or be "
+    "cancelled before a throttle command can run"
+)
+
 _BASE_EXIT_MEANINGS: Final[dict[int, str]] = {
     0: "success",
     1: "unhandled internal error",
     2: "usage error - a bad flag, value, or missing argument",
+    PARTIAL_EXIT_CODE: (
+        "partial - some steps of this command completed and a later one failed; the result "
+        "names which"
+    ),
 }
 
 # The two published codes that name no class in the exception tree, so these two sentences
@@ -447,11 +623,26 @@ def _output_lines(schema: str) -> list[str]:
     return ["OUTPUT", f"  schema: {schema}", f"  formats: {', '.join(ALLOWED_FORMATS)}", ""]
 
 
-def _exit_code_lines(codes: Sequence[int]) -> list[str]:
+#: Where an exception's own docstring is not why THIS command exits with that
+#: code. `drive`/`function` exit 12 from the pre-flight finding a service-mode
+#: session on the station, and `StationBusyError`'s docstring opens "The station
+#: reported 61 1F" - a reply neither command has sent anything to provoke. The
+#: class summary is right for the error-code table, where it describes the
+#: class; it is wrong in a command's EXIT CODES section, where it has to
+#: describe that command.
+_COMMAND_EXIT_MEANINGS: Final[dict[str, dict[int, str]]] = {
+    "drive": {12: _SERVICE_MODE_MEANING},
+    "function": {12: _SERVICE_MODE_MEANING},
+}
+
+
+def _exit_code_lines(
+    codes: Sequence[int], overrides: Mapping[int, str] = MappingProxyType({})
+) -> list[str]:
     by_code = {code: klass for klass, code in errors.EXIT_CODES.items()}
     lines = ["EXIT CODES"]
     for code in codes:
-        meaning = _BASE_EXIT_MEANINGS.get(code)
+        meaning = overrides.get(code) or _BASE_EXIT_MEANINGS.get(code)
         if meaning is None:
             meaning = _first_paragraph(by_code[code].__doc__)
         lines.append(f"  {code}: {meaning}")
@@ -479,7 +670,7 @@ def help_epilog(meta: CommandMeta) -> str:
     return "\n".join(
         [
             *_output_lines(meta.schema),
-            *_exit_code_lines(meta.exit_codes),
+            *_exit_code_lines(meta.exit_codes, _COMMAND_EXIT_MEANINGS.get(meta.path, {})),
             "EXAMPLES",
             f"  {_example(meta)}",
         ]

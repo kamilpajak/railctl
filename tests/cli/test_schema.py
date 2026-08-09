@@ -1,9 +1,9 @@
 """Pins the command metadata table and `railctl schema`.
 
 `COMMANDS` holds one row per command this commit actually registers - see the
-note at the top of this task in the plan. `status`, `version` and `schema`
-are real; the movement commands and `doctor` extend this same tuple in their
-own later commits.
+note at the top of this task in the plan. `status`, `version`, `power`, `stop`,
+`drive`, `function` and `schema` are real; `doctor` and `monitor` extend this
+same tuple in their own later commits.
 """
 
 from __future__ import annotations
@@ -28,10 +28,12 @@ from railctl.cli._meta import (
     typer_argument,
     typer_option,
 )
-from railctl.cli.result import RESERVED_CODES, RETRYABLE_CODES
+from railctl.cli.result import PARTIAL_EXIT_CODE, RESERVED_CODES, RETRYABLE_CODES
 from railctl.errors import EXIT_CODES
 
-KNOWN_CODES = set(BASE_EXIT_CODES) | set(EXIT_CODES.values())
+# `PARTIAL_EXIT_CODE` names no exception class - a partial run is a RESULT, not an
+# error - so it reaches this set from `result.py` rather than from the exit-code map.
+KNOWN_CODES = set(BASE_EXIT_CODES) | set(EXIT_CODES.values()) | {PARTIAL_EXIT_CODE}
 
 
 def test_command_meta_returns_the_row_for_a_known_path():
@@ -120,6 +122,15 @@ def test_every_real_manifest_exit_code_is_a_known_code():
         assert 0 in meta.exit_codes, meta.path
 
 
+def test_every_command_publishes_its_exit_codes_in_order():
+    """`--help` prints this tuple in the order it is written, and `power` appended the
+    partial code 8 after the base set's 9, so its EXIT CODES section read
+    0 1 2 3 4 5 6 7 9 8 20. Deterministic help in a deterministic order is the rule the
+    whole help page is built on."""
+    for meta in COMMANDS:
+        assert list(meta.exit_codes) == sorted(meta.exit_codes), meta.path
+
+
 def test_the_enum_rows_are_the_same_tuples_deps_validates_against():
     # The manifest's `enum` list and the check that rejects a bad value must be
     # one tuple, not two that agree today. `_meta` imports both from `deps`, so
@@ -129,6 +140,35 @@ def test_the_enum_rows_are_the_same_tuples_deps_validates_against():
     by_name = {o.name: o for o in GLOBAL_OPTIONS}
     assert by_name["--format"].enum is ALLOWED_FORMATS
     assert by_name["--color"].enum is ALLOWED_COLORS
+
+
+def test_the_manifest_publishes_resume_as_a_power_state():
+    """The third state has to be discoverable from the manifest alone.
+
+    `power on` comes up HELD (measured 2026-08-09, docs/probe-results.md), so `power
+    resume` is the only way to release the layout. An agent that reads `["on", "off"]`
+    here has no way to find it except by guessing a word and reading the refusal - and
+    the help text is built from the same tuple, so both say all three or neither does.
+    """
+    state = manifest(["power"])["command"]["arguments"][0]  # type: ignore[index]
+    assert state["enum"] == ["on", "off", "resume"]
+    assert state["type"] == "enum"
+    assert "resume" in command_meta("power").arguments[0].help
+
+
+def test_every_row_with_a_fixed_set_of_values_publishes_it_as_an_enum():
+    """`type` and `enum` are two fields describing one fact, so they can drift.
+
+    `FUNCTION_STATE_ARG` published `type: "string", enum: null` while `parse_state`
+    accepted exactly on, off and toggle - an agent reading the manifest was told to
+    discover the list by trying one and reading the error.
+    """
+    rows = [
+        *GLOBAL_OPTIONS,
+        *(row for meta in COMMANDS for row in (*meta.arguments, *meta.options)),
+    ]
+    for row in rows:
+        assert (row.type == "enum") == (row.enum is not None), row.name
 
 
 def test_typer_option_attaches_no_click_level_callback():
@@ -168,7 +208,15 @@ def test_typer_argument_required_uses_ellipsis_and_optional_uses_none():
 def test_manifest_with_no_path_returns_the_tree_shape():
     payload = manifest(None)
     assert payload["schema"] == "railctl/schema/v1"
-    assert [c["path"] for c in payload["commands"]] == ["status", "version", "schema"]
+    assert [c["path"] for c in payload["commands"]] == [
+        "status",
+        "version",
+        "power",
+        "stop",
+        "drive",
+        "function",
+        "schema",
+    ]
     assert {o["name"] for o in payload["global_options"]} == {o.name for o in GLOBAL_OPTIONS}
 
 
@@ -262,6 +310,27 @@ def test_help_epilog_includes_headings_and_meanings_for_every_exit_code():
     assert "2: usage error" in epilog
 
 
+def test_a_command_explains_its_own_reason_for_an_exit_code_not_the_classs():
+    """Exit 12 out of `drive` is the pre-flight finding a service-mode session.
+
+    `StationBusyError`'s docstring opens "The station reported 61 1F: a programming
+    operation is already running" - true of the class, and not why a throttle command
+    ever exits 12: neither `drive` nor `function` sends anything that could provoke that
+    reply. The class summary stays right where it describes the class, in the error-code
+    table.
+    """
+    for path in ("drive", "function"):
+        section = help_epilog(command_meta(path))
+        assert "12: a service-mode programming session is active" in section, path
+        assert "61 1F" not in section, path
+    # Unchanged where no override applies: the class docstring is the right answer for
+    # every other code, and this must not have become a blanket rewrite.
+    assert "5: No reply arrived within the budget" in help_epilog(command_meta("drive"))
+    # And the error-code table still publishes the class's own summary.
+    rows = {row["code"]: row for row in error_codes()}
+    assert rows["station_busy"]["summary"].startswith("The station reported 61 1F")
+
+
 def test_every_place_that_lists_the_allowed_values_lists_all_of_them():
     # Four copies of one list: the tuple `deps` validates against, the manifest's `enum`,
     # the flag's help string, and the OUTPUT section of every epilog. A value added to the
@@ -315,7 +384,7 @@ def test_error_codes_list_exactly_the_exception_tree_plus_the_two_reserved_codes
     published = {row["code"] for row in error_codes()}
     assert published == set(PUBLISHED_ERROR_CODES.values()) | RESERVED_CODES
     assert len(error_codes()) == len(published)  # no duplicate rows
-    assert len(published) == 33
+    assert len(published) == 34
 
 
 def test_error_code_rows_read_their_facts_off_the_class():
@@ -379,7 +448,15 @@ def test_build_schema_returns_the_tree_when_no_path_is_given():
     result = build_schema(None)
     assert result.schema == "railctl/schema/v1"
     assert result.command == "schema"
-    assert [c["path"] for c in result.result["commands"]] == ["status", "version", "schema"]
+    assert [c["path"] for c in result.result["commands"]] == [
+        "status",
+        "version",
+        "power",
+        "stop",
+        "drive",
+        "function",
+        "schema",
+    ]
 
 
 def test_build_schema_raises_value_error_for_an_unknown_path():
@@ -413,9 +490,14 @@ from typer.testing import CliRunner  # noqa: E402
 
 from railctl.cli._meta import CommandMeta  # noqa: E402
 from railctl.cli.main import app  # noqa: E402
-from railctl.errors import UnsupportedCommandError  # noqa: E402
+from railctl.errors import (  # noqa: E402
+    LinkTimeout,
+    TrackPowerError,
+    UnsupportedCommandError,
+)
 from railctl.station import Station  # noqa: E402
-from railctl.xbus.replies import StationStatus, StationVersion  # noqa: E402
+from railctl.xbus.replies import LocoInfo, StationStatus, StationVersion  # noqa: E402
+from railctl.xbus.speed import Direction  # noqa: E402
 
 runner = CliRunner()
 
@@ -436,22 +518,68 @@ def _isolated_environment(monkeypatch, tmp_path):
         monkeypatch.delenv(key)
 
 
+_STANDING_LOCO = LocoInfo(
+    raw_ident=0b10000100,
+    raw_speed=0x80,
+    speed_steps=128,
+    in_use_by_other=False,
+    function_bits=(False,) * 13,
+    speed=0,
+    direction=Direction.FORWARD,
+    emergency_stopped=False,
+)
+
+
 class _FakeStatusStation:
-    """Bare stand-in for the `status`-based invocation-order tests below.
-    `status` is the pinned example (not `schema`), because it is the one
+    """Bare stand-in for the invocation-order tests below.
+
+    `status` is the pinned example (not `schema`), because it was the first
     command in this file that actually opens a `Station` - proving the
     --format-position parity on a command that never touches a port would not
     catch a per-command global-option block that forgot to route through the
     real `open_station`/`run()` plumbing.
+
+    The mutating half answers every throttle call and records nothing: what
+    this file checks is the CLI contract - exit codes, the envelope, the
+    parameter surface - and `tests/cli/test_throttle.py` owns the question of
+    which facade method each command calls, in what order, with what arguments.
+    `raw_status` is settable so a test can drive a pre-flight refusal without a
+    second fake class; it defaults to a healthy powered track.
     """
 
     identity = "serial:7010A0001194:3"
 
+    def __init__(self, raw_status: int = 0x00) -> None:
+        self.raw_status = raw_status
+
     def status(self) -> StationStatus:
-        return StationStatus.from_raw(0x00)
+        return StationStatus.from_raw(self.raw_status)
 
     def version(self) -> StationVersion:
         return StationVersion(raw=0x40, station_id=0x12)
+
+    def power_on(self) -> None:
+        pass
+
+    def power_off(self) -> None:
+        pass
+
+    def emergency_stop(self, address: int | None = None) -> None:
+        pass
+
+    def drive(self, address: int, speed: int, direction: Direction) -> None:
+        pass
+
+    def loco_info(self, address: int) -> LocoInfo:
+        return _STANDING_LOCO
+
+    def function_set(
+        self, address: int, function: int, on: bool, *, force_group: bool = False
+    ) -> None:
+        pass
+
+    def function_toggle(self, address: int, function: int, *, force_group: bool = False) -> bool:
+        return True
 
     def close(self) -> None:
         pass
@@ -460,6 +588,22 @@ class _FakeStatusStation:
 @pytest.fixture
 def fake_station(monkeypatch):
     monkeypatch.setattr(Station, "open", staticmethod(lambda *a, **k: _FakeStatusStation()))
+
+
+# The required positional arguments each command needs before it can run at
+# all, plus the `--address` the two throttle commands refuse to guess. Written
+# once: three tests below drive every row of COMMANDS, and a fourth drives the
+# two with a pre-flight. `drive` uses a POSITIVE speed on purpose - speed 0
+# skips the pre-flight, so a 0 here would make the refusal drives prove nothing.
+_EXTRA_ARGV: dict[str, list[str]] = {
+    "power": ["off"],
+    "drive": ["30", "--address", "3"],
+    "function": ["f2", "on", "--address", "3"],
+}
+
+
+def _invocation(meta: CommandMeta) -> list[str]:
+    return [meta.path, *_EXTRA_ARGV.get(meta.path, [])]
 
 
 def registered_paths(app: typer.Typer) -> set[str]:
@@ -503,27 +647,43 @@ def _parsed_surface(command) -> dict[str, object]:
     """
     long_names: set[str] = set()
     shorts: set[str] = set()
+    helps: dict[str, str | None] = {}
     positionals: list[tuple[str, bool]] = []
     for param in command.params:
         if param.param_type_name == "option":
             for opt in param.opts:
                 target = long_names if opt.startswith("--") else shorts
                 target.add(opt)
+                if opt.startswith("--"):
+                    helps[opt] = param.help
         else:
             positionals.append((param.name, param.required))
+    helps.pop("--help", None)
     return {
         "long": long_names - {"--help"},
         "short": shorts,
+        "help": helps,
         "positional": positionals,
     }
 
 
 def _declared_surface(meta: CommandMeta) -> dict[str, object]:
-    """The same three facts, read off the metadata row - the manifest's own claim."""
-    options = (*meta.options, *GLOBAL_OPTIONS)
+    """The same facts, read off the metadata row - the manifest's own claim.
+
+    `help` is here because the two name sets cannot tell `stop`'s `--address`
+    from the global one: both spell the flag the same way, so the union collapsed
+    to a single entry and the command-scoped row went unchecked. `stop`'s row
+    means "stop only this locomotive", the global one means "the locomotive every
+    command acts on", and swapping them would leave the parameter surface test
+    green while `stop --help` described the fallback that command exists to
+    refuse. The command's own rows are layered LAST, which is exactly the
+    precedence Click applies when a command redeclares a flag name.
+    """
+    options = (*GLOBAL_OPTIONS, *meta.options)
     return {
         "long": {o.name for o in options},
         "short": {o.short for o in options if o.short is not None},
+        "help": {o.name: o.help for o in options},
         "positional": [(a.name, a.required) for a in meta.arguments],
     }
 
@@ -579,7 +739,8 @@ def test_the_observed_exit_code_is_one_the_command_publishes(meta: CommandMeta):
     subset check over hand-written literals cannot see that; only running the thing can.
     """
     result = runner.invoke(
-        app, [meta.path, "--target", "z21:1.2.3.4", "--format", "json", "--non-interactive"]
+        app,
+        [*_invocation(meta), "--target", "z21:1.2.3.4", "--format", "json", "--non-interactive"],
     )
     # Not 0: this target is deliberately one nothing can serve, so a success here would
     # mean the invocation never reached the station and the check below proved nothing.
@@ -618,10 +779,190 @@ def test_a_station_that_refuses_exits_with_a_code_the_command_publishes(meta, mo
             pass
 
     monkeypatch.setattr(Station, "open", staticmethod(lambda *a, **k: Refusing()))
-    result = runner.invoke(app, [meta.path, "--format", "json", "--non-interactive"])
+    result = runner.invoke(app, [*_invocation(meta), "--format", "json", "--non-interactive"])
     assert result.exit_code == 6, result.stderr
     assert result.exit_code in meta.exit_codes
     assert json.loads(result.stderr)["code"] == "unsupported_command"
+
+
+PREFLIGHT_COMMANDS = [c for c in COMMANDS if c.path in ("drive", "function")]
+
+
+@pytest.mark.parametrize("meta", PREFLIGHT_COMMANDS, ids=lambda m: m.path)
+@pytest.mark.parametrize(
+    ("raw_status", "expected_exit"),
+    [(0x02, 20), (0x01, 20), (0x08, 12)],
+    ids=["emergency-off", "emergency-stop", "service-mode"],
+)
+def test_a_preflight_refusal_exits_with_a_code_the_command_publishes(
+    monkeypatch, meta: CommandMeta, raw_status: int, expected_exit: int
+):
+    """The third and fourth reachable codes, and the reason two drives are not enough.
+
+    `drive SPEED>0` and `function` refuse on emergency off (20), emergency stop (20) and an
+    active service-mode session (12). None of those can arrive through the `z21:` target or
+    through a station that refuses everything, so without this drive both codes could be
+    dropped from `THROTTLE_EXIT_CODES` with the whole suite still green - the same silent
+    omission that once shipped for 6 and 7.
+
+    Bits 0 and 1 are the MEASURED order on this hardware, the reverse of the Lenz spec
+    (docs/probe-results.md), so 0x01 is emergency stop and 0x02 is emergency off. This is a
+    check on our own refusal paths and their exit codes; it is not a measurement of the
+    station, and no locomotive was watched not moving.
+    """
+    monkeypatch.setattr(
+        Station, "open", staticmethod(lambda *a, **k: _FakeStatusStation(raw_status))
+    )
+    result = runner.invoke(app, [*_invocation(meta), "--format", "json", "--non-interactive"])
+    assert result.exit_code == expected_exit, result.stderr
+    assert result.exit_code in meta.exit_codes
+    assert json.loads(result.stderr)["exit_code"] == result.exit_code
+
+
+def test_the_status_that_refuses_every_other_speed_does_not_refuse_the_stop(monkeypatch):
+    """`drive 0` on the same station that produced exit 20 above.
+
+    Named for what it covers, not for what one would like to be true: this drives ONE
+    station state, the emergency-off status, through the pre-flight guard. It said "never
+    refused" and could not see the hole that actually existed - a `loco_info` reply the
+    station refused aborted the same command before `station.drive` was reached, without
+    the status ever being consulted. `tests/cli/test_throttle.py` owns that half now.
+    """
+    monkeypatch.setattr(Station, "open", staticmethod(lambda *a, **k: _FakeStatusStation(0x02)))
+    result = runner.invoke(
+        app, ["drive", "0", "--address", "3", "--format", "json", "--non-interactive"]
+    )
+    assert result.exit_code == 0, result.stderr
+    assert json.loads(result.stdout)["result"]["speed"] == 0
+
+
+def test_power_off_reaches_the_track_power_exit_code_it_publishes(monkeypatch):
+    """`POWER_EXIT_CODES` adds 20 and no test drove `power` to it.
+
+    `Station._settle_power` raises `TrackPowerError` when the station still disagrees
+    after the settle pause, and the reachability rule the two throttle drives already
+    follow says a published refusal code needs a run, not a reading of the source.
+
+    `off` is the state that still ends in a plain 20. For `on` and `resume` the same
+    exception now arrives after a telegram that may have energised or released the
+    layout, so it is reported as a partial - see the test below.
+    """
+
+    class _WillNotSettle(_FakeStatusStation):
+        def power_off(self) -> None:
+            raise TrackPowerError("commanded track power off but the station still reports on")
+
+    monkeypatch.setattr(Station, "open", staticmethod(lambda *a, **k: _WillNotSettle()))
+    result = runner.invoke(
+        app, ["power", "off", "--address", "3", "--format", "json", "--non-interactive"]
+    )
+    assert result.exit_code == 20, result.stderr
+    assert result.exit_code in command_meta("power").exit_codes
+    assert json.loads(result.stderr)["code"] == "track_power"
+
+
+def test_power_resume_on_a_dead_track_reaches_the_same_published_code(monkeypatch):
+    """The second path to 20, and the one that matters.
+
+    `power resume` sends `21 81`, which is the telegram that ENERGISES a dead track and
+    clears both emergency bits at once. Run it from `0x06` or `0x07` - `0x07` is what
+    `power on` followed by `power off` leaves - and it produced a live layout with
+    nothing holding it, which is the runaway of run 1 reached through the CLI
+    (docs/probe-results.md, "`power on`'s stop-all was in the wrong order").
+
+    It refuses instead, before any telegram, with a condition a caller can branch on and
+    a suggestion naming the command that energises AND holds.
+    """
+    monkeypatch.setattr(Station, "open", staticmethod(lambda *a, **k: _FakeStatusStation(0x07)))
+    result = runner.invoke(
+        app, ["power", "resume", "--address", "3", "--format", "json", "--non-interactive"]
+    )
+    assert result.exit_code == 20, result.stderr
+    assert result.exit_code in command_meta("power").exit_codes
+    payload = json.loads(result.stderr)
+    assert payload["code"] == "track_power"
+    assert payload["details"]["condition"] == "track_dead"
+    assert payload["suggestions"] == [["railctl", "power", "on"]]
+
+
+@pytest.mark.parametrize("state", ["on", "resume"])
+def test_a_settle_failure_in_the_two_energising_states_is_a_partial(monkeypatch, state):
+    """`Station.power_on()` writes `21 81` and only then verifies, so the settle failure
+    it raises arrives with the telegram already sent. Both states report that as a
+    partial naming the step, never as a bare refusal that reads as "nothing happened"."""
+
+    class _WillNotSettle(_FakeStatusStation):
+        def power_on(self) -> None:
+            raise TrackPowerError("commanded track power on but the station still reports off")
+
+    monkeypatch.setattr(Station, "open", staticmethod(lambda *a, **k: _WillNotSettle(0x01)))
+    result = runner.invoke(
+        app, ["power", state, "--address", "3", "--format", "json", "--non-interactive"]
+    )
+    assert result.exit_code == PARTIAL_EXIT_CODE, result.stderr
+    payload = json.loads(result.stdout)
+    assert payload["result"]["failed_step"] == "power_on"
+    assert payload["warnings"][0]["details"]["error_code"] == "track_power"
+
+
+def test_power_on_reaches_the_partial_exit_code_it_publishes(monkeypatch):
+    """`POWER_EXIT_CODES` publishes 8, so something has to be able to produce it.
+
+    A published code nobody drives is the omission the two tests above were written for,
+    running the other way: the tuple says a caller may see 8, and only a run says they can.
+    """
+
+    class _DiesAfterPowerOn(_FakeStatusStation):
+        def status(self) -> StationStatus:
+            if self.powered_on:
+                raise LinkTimeout("no status reply after track power on")
+            return super().status()
+
+        powered_on = False
+
+        def power_on(self) -> None:
+            self.powered_on = True
+
+    monkeypatch.setattr(Station, "open", staticmethod(lambda *a, **k: _DiesAfterPowerOn()))
+    result = runner.invoke(
+        app, ["power", "on", "--address", "3", "--format", "json", "--non-interactive"]
+    )
+    assert result.exit_code == PARTIAL_EXIT_CODE, result.stderr
+    assert result.exit_code in command_meta("power").exit_codes
+    payload = json.loads(result.stdout)
+    assert payload["exit_code"] == result.exit_code
+    assert payload["ok"] is False
+
+
+def test_power_resume_reaches_the_partial_exit_code_too(monkeypatch):
+    """The same published 8, from the state that releases the layout.
+
+    `power resume` sends `21 81` and only then reads the status back. If that read
+    fails, the hold is already gone - measured 2026-08-09, that is the moment stored
+    speeds start locomotives - so the caller gets a partial result naming the step,
+    not a bare error that reads as "nothing happened".
+    """
+
+    class _DiesAfterRelease(_FakeStatusStation):
+        released = False
+
+        def status(self) -> StationStatus:
+            if self.released:
+                raise LinkTimeout("no status reply after the release")
+            return super().status()
+
+        def power_on(self) -> None:
+            self.released = True
+
+    monkeypatch.setattr(Station, "open", staticmethod(lambda *a, **k: _DiesAfterRelease(0x01)))
+    result = runner.invoke(
+        app, ["power", "resume", "--address", "3", "--format", "json", "--non-interactive"]
+    )
+    assert result.exit_code == PARTIAL_EXIT_CODE, result.stderr
+    assert result.exit_code in command_meta("power").exit_codes
+    payload = json.loads(result.stdout)
+    assert payload["result"]["state"] == "resume"
+    assert payload["result"]["failed_step"] == "read_status"
 
 
 def test_the_root_group_carries_the_global_options_and_no_positionals():
@@ -629,6 +970,7 @@ def test_the_root_group_carries_the_global_options_and_no_positionals():
     assert _parsed_surface(root) == {
         "long": {o.name for o in GLOBAL_OPTIONS},
         "short": {o.short for o in GLOBAL_OPTIONS if o.short is not None},
+        "help": {o.name: o.help for o in GLOBAL_OPTIONS},
         # The root takes the verb and nothing else; a positional here would swallow
         # the subcommand name.
         "positional": [],
@@ -640,7 +982,15 @@ def test_schema_json_prints_one_envelope_with_the_registered_paths_in_tree_order
     assert result.exit_code == 0
     payload = json.loads(result.stdout)["result"]
     assert payload["schema"] == "railctl/schema/v1"
-    assert [c["path"] for c in payload["commands"]] == ["status", "version", "schema"]
+    assert [c["path"] for c in payload["commands"]] == [
+        "status",
+        "version",
+        "power",
+        "stop",
+        "drive",
+        "function",
+        "schema",
+    ]
 
 
 def test_schema_for_a_not_yet_implemented_command_is_exit_2_with_near_misses():
@@ -650,7 +1000,10 @@ def test_schema_for_a_not_yet_implemented_command_is_exit_2_with_near_misses():
     payload = json.loads(result.stderr)
     assert payload["code"] == "usage"
     assert "power on" in payload["message"]
-    assert "status" in payload["message"]  # one of the three known paths, named
+    # A near miss is named, so the operator sees what the tool does know. `power`
+    # is a registered path and `power on` is not - the design's tree has no
+    # sub-group under `power`, the state is a positional argument.
+    assert "power" in payload["message"]
     # A runnable argv array, not recovery advice buried in prose: `UsageProblem` carries
     # it, `usage_report` publishes it, and a bare ValueError published `[]`.
     assert payload["suggestions"] == [["railctl", "schema"]]
@@ -751,9 +1104,23 @@ def test_a_command_that_does_read_the_config_file_still_reports_a_broken_one(
 
 
 @pytest.mark.parametrize("path", ["status", "version", "schema"])
-def test_none_of_the_registered_commands_mutates_anything(path: str):
+def test_the_read_only_commands_mutate_nothing(path: str):
     assert command_meta(path).mutates is False
     assert command_meta(path).confirms is False
+
+
+@pytest.mark.parametrize("path", ["power", "stop", "drive", "function"])
+def test_every_throttle_command_is_published_as_mutating_and_never_confirming(path: str):
+    """`mutates` is the field an agent reads to decide whether a command is safe to run
+    unattended, and all four of these change the layout's state. `confirms` is false on
+    purpose and is not an oversight: the design's L6 rule is that `power`, `drive`, `stop`
+    and `function` are never confirmed, because a prompt on every throttle change trains an
+    operator to type `-y` reflexively - which then answers yes to the `restore` and the
+    `cv write` that genuinely need asking.
+    """
+    meta = command_meta(path)
+    assert meta.mutates is True
+    assert meta.confirms is False
 
 
 def test_global_options_carry_their_env_vars_and_no_color_on_color():
@@ -787,8 +1154,8 @@ def test_the_envelope_carries_the_schema_string_the_manifest_publishes(
     # The manifest says what a command emits; the envelope says what it emitted.
     # Written as two literals, a bump to `/v2` in one of them leaves a consumer
     # keyed on `schema` matching nothing, with no test saying so.
-    result = runner.invoke(app, [meta.path, "--format", "json"])
-    assert result.exit_code == 0
+    result = runner.invoke(app, [*_invocation(meta), "--format", "json"])
+    assert result.exit_code == 0, result.stderr
     assert json.loads(result.stdout)["schema"] == meta.schema
 
 

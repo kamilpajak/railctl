@@ -45,6 +45,15 @@ RETRYABLE_CODES: Final[frozenset[str]] = frozenset({"link_timeout", "station_bus
 USAGE_EXIT_CODE: Final[int] = 2
 INTERNAL_EXIT_CODE: Final[int] = 1
 
+#: Some steps of a multi-step mutation ran and a later one failed. Not an error
+#: envelope: the whole value of this code is the report of WHAT completed, and
+#: that report is a result. A `CommandResult` carrying it sets `ok=False` and
+#: goes to stdout like any other result, so a caller can tell "nothing
+#: happened" from "the track is on but the locomotive was not idled" without
+#: parsing prose. Names no exception class, which is why `_meta` owns its
+#: one-line meaning alongside 0/1/2.
+PARTIAL_EXIT_CODE: Final[int] = 8
+
 
 def error_code(exc: BaseException) -> str:
     """The published code for `exc` - read off the class, never computed from its name.
