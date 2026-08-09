@@ -195,6 +195,33 @@ class TrackPowerError(StationError):
     code: ClassVar[str] = "track_power"
 
 
+#: The values `TrackPowerError.details["condition"]` may carry. Declared here,
+#: next to the class, because three layers write them (`Station._settle_power`,
+#: `cli/commands/throttle.preflight`, `cli/commands/power`) and one layer reads
+#: them back (`cli/_errors.default_suggestions`, which maps each to a runnable
+#: recovery). Free strings in four modules is how the reader and the writers
+#: stop agreeing.
+#:
+#: A `TrackPowerError` whose condition is not one of these gets NO suggestion.
+#: That is the point of naming them: the suggestion table used to answer any
+#: condition-less `TrackPowerError` with `railctl power resume`, the one command
+#: measured to start locomotives (docs/probe-results.md, "`power on`'s stop-all
+#: was in the wrong order", run 5), including for a `power off` that failed to
+#: settle - a failure that has nothing to do with a hold.
+CONDITION_EMERGENCY_STOP: Final[str] = "emergency_stop"
+CONDITION_EMERGENCY_OFF: Final[str] = "emergency_off"
+#: `power resume` asked to release a hold on a track with no voltage. Distinct
+#: from `emergency_off`, which is the same reading refusing a *throttle*
+#: command: the recovery here is `power on` alone, and offering the release a
+#: second time would be offering the command that was just refused.
+CONDITION_TRACK_DEAD: Final[str] = "track_dead"
+#: The station still disagreed with the power state it was commanded into,
+#: after the settle pause and a re-read. Named by what was REQUESTED, because
+#: what the track is actually doing is precisely what is not known.
+CONDITION_POWER_ON_UNSETTLED: Final[str] = "power_on_unsettled"
+CONDITION_POWER_OFF_UNSETTLED: Final[str] = "power_off_unsettled"
+
+
 class FunctionGroupUnreadableError(StationError):
     """`function` could not read a group's current state before flipping one bit.
 

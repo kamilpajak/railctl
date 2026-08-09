@@ -14,7 +14,7 @@ import time
 import traceback
 from collections.abc import Callable
 from dataclasses import dataclass
-from typing import NoReturn, TextIO
+from typing import Final, NoReturn, TextIO
 
 import typer
 
@@ -32,6 +32,9 @@ from railctl.cli.result import (
     error_code,
 )
 from railctl.errors import (
+    CONDITION_EMERGENCY_OFF,
+    CONDITION_EMERGENCY_STOP,
+    CONDITION_TRACK_DEAD,
     AbortedError,
     ConfirmationRequiredError,
     FunctionGroupUnreadableError,
@@ -60,6 +63,33 @@ class OutputContext:
     stderr: TextIO
 
 
+#: The runnable recovery for each `TrackPowerError` condition, and nothing for a
+#: condition this table does not name.
+#:
+#: `power on` stopped being the recovery for an emergency stop: as of 2026-08-09
+#: it ENERGISES AND HOLDS (docs/probe-results.md, "`power on`'s stop-all was in
+#: the wrong order"), so offering it to an operator who is already held puts them
+#: back where they started. The release alone is the whole recovery there. A dead
+#: track has to be energised first, and that leaves it held, so the release is
+#: the second half - both argv arrays are runnable, in this order.
+#:
+#: The unconditional fallback this replaced answered ANY condition-less
+#: `TrackPowerError` with those same two commands, and `railctl power resume` is
+#: measured to start every locomotive the station holds a speed for (run 5). A
+#: `power off` that failed to settle got told to release the layout. A command
+#: that may start a locomotive is only ever offered for a condition that
+#: justifies it; where the condition is unknown, the right number of suggestions
+#: is none.
+TRACK_POWER_RECOVERY: Final[dict[str, tuple[tuple[str, ...], ...]]] = {
+    CONDITION_EMERGENCY_STOP: (("railctl", "power", "resume"),),
+    CONDITION_EMERGENCY_OFF: (
+        ("railctl", "power", "on"),
+        ("railctl", "power", "resume"),
+    ),
+    CONDITION_TRACK_DEAD: (("railctl", "power", "on"),),
+}
+
+
 def default_suggestions(
     exc: BaseException, *, command: str, cv: int | None = None
 ) -> list[list[str]]:
@@ -74,6 +104,10 @@ def default_suggestions(
     (`"f2"`) and the state token (`"on"`) the operator actually typed - neither of which is
     anywhere in the exception's type. So the raiser (`cli/commands/throttle.py`) assembles the
     array and this reads it back, rather than the table guessing at a command-specific shape.
+
+    `TrackPowerError` is answered from `TRACK_POWER_RECOVERY` above, keyed by the condition the
+    raiser recorded. An unrecognised or missing condition gets an empty list: this table used to
+    guess there, and the guess was the command that releases the layout.
     """
     if isinstance(exc, FunctionGroupUnreadableError):
         # `getattr` and `_argv_arrays`, not a bare `exc.retry_argv`: the manifest builder
@@ -89,25 +123,11 @@ def default_suggestions(
     if isinstance(exc, ConfirmationRequiredError):
         return [["railctl", *command.split(), "--yes"]]
     if isinstance(exc, TrackPowerError):
-        # The two emergency states this tool refuses on need different argv,
-        # because `power on` stopped being the recovery for one of them: as of
-        # 2026-08-09 it ENERGISES AND HOLDS (docs/probe-results.md, "`power
-        # on`'s stop-all was in the wrong order"), so offering it to an
-        # operator who is already held would put them back where they started.
-        #
-        # - emergency stop: the track has voltage and everything is held, so
-        #   the release alone is the whole recovery.
-        # - anything else, emergency off included: the track is dead, so it has
-        #   to be energised first - and that leaves it held, so the release is
-        #   the second half. Both argv arrays are runnable, in this order.
-        #
         # `details` is read with a default because `_meta._class_error_row`
         # probes every exception class with `klass.__new__(klass)`, which runs
-        # no `__init__`, and `Station._settle_power` raises this class with no
-        # details of its own.
-        if (getattr(exc, "details", None) or {}).get("condition") == "emergency_stop":
-            return [["railctl", "power", "resume"]]
-        return [["railctl", "power", "on"], ["railctl", "power", "resume"]]
+        # no `__init__` and leaves the attribute absent.
+        condition = (getattr(exc, "details", None) or {}).get("condition")
+        return [list(argv) for argv in TRACK_POWER_RECOVERY.get(condition, ())]
     return []
 
 

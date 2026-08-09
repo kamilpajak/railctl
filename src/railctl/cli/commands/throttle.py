@@ -49,6 +49,8 @@ from railctl.cli.deps import (
 )
 from railctl.cli.result import CommandResult, tri_state
 from railctl.errors import (
+    CONDITION_EMERGENCY_OFF,
+    CONDITION_EMERGENCY_STOP,
     FunctionGroupUnreadableError,
     StationBusyError,
     StationError,
@@ -168,7 +170,9 @@ def preflight(station: Station, *, speed: int | None) -> StationStatus:
         raise TrackPowerError(
             f"{_emergency_reason(status)}; refusing to send {target}",
             details={
-                "condition": ("emergency_off" if status.emergency_off else "emergency_stop"),
+                "condition": (
+                    CONDITION_EMERGENCY_OFF if status.emergency_off else CONDITION_EMERGENCY_STOP
+                ),
                 "emergency_off": status.emergency_off,
                 "emergency_stop": status.emergency_stop,
             },

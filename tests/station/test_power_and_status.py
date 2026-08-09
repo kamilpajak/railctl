@@ -18,6 +18,8 @@ import pytest
 from railctl.envelope import Kind
 from railctl.envelope.liusb import LiUsbEnvelope
 from railctl.errors import (
+    CONDITION_POWER_OFF_UNSETTLED,
+    CONDITION_POWER_ON_UNSETTLED,
     LinkTimeout,
     ProtocolError,
     RailctlError,
@@ -96,19 +98,44 @@ def test_power_off_reads_the_solicited_reply_in_one_exchange(bench):
 def test_power_on_disagreement_re_reads_once_then_raises(bench):
     bench.expect(CMD_TRACK_POWER_ON, POWER_OFF_REPLY)
     bench.expect(CMD_STATION_STATUS, STATUS_UNPOWERED)
-    with pytest.raises(TrackPowerError):
+    with pytest.raises(TrackPowerError) as caught:
         bench.station.power_on()
     assert bench.clock.monotonic() == pytest.approx(TIMING.power_settle)
     assert bench.transport.script_pending == []
+    assert caught.value.details["condition"] == CONDITION_POWER_ON_UNSETTLED
 
 
 def test_power_off_disagreement_re_reads_once_then_raises(bench):
     bench.expect(CMD_TRACK_POWER_OFF, POWER_ON_REPLY)
     bench.expect(CMD_STATION_STATUS, STATUS_POWERED)
-    with pytest.raises(TrackPowerError):
+    with pytest.raises(TrackPowerError) as caught:
         bench.station.power_off()
     assert bench.clock.monotonic() == pytest.approx(TIMING.power_settle)
     assert bench.transport.script_pending == []
+    assert caught.value.details["condition"] == CONDITION_POWER_OFF_UNSETTLED
+
+
+def test_a_settle_failure_names_what_was_requested_and_what_the_station_reported(bench):
+    """The CLI branches on `condition`, and this raise had none.
+
+    `cli/_errors.default_suggestions` answered a condition-less `TrackPowerError` with
+    `railctl power resume` - measured 2026-08-09 to be the telegram that starts every
+    locomotive the station still holds a speed for (docs/probe-results.md, run 5). This
+    raise is the one that produced that answer for a failed `power off`.
+
+    `requested` and `reported` are separate fields because they are separate facts: what
+    the operator asked for is known, and what the track is doing is exactly what did not
+    settle.
+    """
+    bench.expect(CMD_TRACK_POWER_OFF, POWER_ON_REPLY)
+    bench.expect(CMD_STATION_STATUS, STATUS_POWERED)
+    with pytest.raises(TrackPowerError) as caught:
+        bench.station.power_off()
+    assert caught.value.details == {
+        "condition": CONDITION_POWER_OFF_UNSETTLED,
+        "requested": "off",
+        "reported": "on",
+    }
 
 
 def test_power_off_invalidates_caches_even_when_it_ultimately_raises(bench):
