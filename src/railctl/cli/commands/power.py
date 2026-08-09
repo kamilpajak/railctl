@@ -365,14 +365,13 @@ def build_power_partial(
     hazard = PARTIAL_HAZARD[state, failed_step]
     outcome.warn(
         "power_on_incomplete",
-        f"{reached}, and then {failed_step} failed: {failure}. {hazard}",
+        f"{reached}, and then {failed_step} failed ({failure}); {hazard}",
         completed=list(completed),
         failed_step=failed_step,
         error_code=error_code(failure),
         **_before_details(before),
     )
     outcome.say(f"{reached}; {failed_step} did not complete")
-    outcome.say(hazard)
     if state == "resume":
         # The release telegram is written before anything here can fail, so the
         # token that says locomotives may be moving belongs in this envelope
