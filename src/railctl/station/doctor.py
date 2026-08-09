@@ -13,6 +13,7 @@ check did not run). No branch here ever writes `False` for any other reason.
 from __future__ import annotations
 
 from collections.abc import Callable
+from dataclasses import replace
 from datetime import UTC, datetime
 from typing import TYPE_CHECKING, Final, Literal
 
@@ -28,8 +29,10 @@ from railctl.station.programming import CvMatcher
 from railctl.station.timing import TIMING
 from railctl.station.types import (
     DECODER_TYPE_CV,
+    LAYOUT_UNTOUCHED,
     Check,
     DoctorReport,
+    LayoutState,
     decoder_family,
 )
 from railctl.xbus.commands import (
@@ -55,6 +58,7 @@ from railctl.xbus.replies import (
     StationVersion,
     Unsupported,
 )
+from railctl.xbus.speed import Direction
 
 if TYPE_CHECKING:
     from railctl.station.facade import Station
@@ -136,21 +140,150 @@ def _check_d2(station: Station) -> tuple[Check, StationStatus | None]:
     return Check("D2", CHECK_TITLES["D2"], "ok", detail), status
 
 
+def _stored_direction(station: Station, address: int) -> Direction | None:
+    """The locomotive's current direction, or `None` when the station could not say.
+
+    `None` is UNKNOWN, never "forward": the caller sends `Direction.FORWARD` anyway,
+    because leaving a locomotive able to start by itself in order to protect its
+    direction would be the wrong way round, but it then reports that the direction
+    was not preserved rather than presenting the fallback as the locomotive's own.
+    Exactly `commands/power.py::_idle`'s reasoning, applied to the same telegram.
+    """
+    try:
+        return station.loco_info(address).direction
+    except RailctlError:
+        return None
+
+
+def _idle_probe_address(station: Station, address: int | None) -> LayoutState:
+    """Send speed 0 to the one locomotive this run knows about, while the layout is
+    already held.
+
+    MEASURED 2026-08-09 (docs/probe-results.md, "`power on`'s stop-all was in the
+    wrong order"): the emergency stop HOLDS the station's refresh buffer and never
+    clears it (run 5), so zeroing the stored speed is the only thing that keeps this
+    locomotive standing when the hold is later released. Run 6 measured that the
+    telegram lands while the layout is held, and run 7 that the hold survives it.
+    """
+    if address is None:
+        return LayoutState(energised=True)
+    stored = _stored_direction(station, address)
+    try:
+        station.drive(address, 0, Direction.FORWARD if stored is None else stored)
+    except RailctlError:
+        # Not a silent success: this locomotive still holds whatever speed the
+        # station has for it, so a later release would start it.
+        return LayoutState(energised=True, idled_address=address, idled=False)
+    return LayoutState(
+        energised=True,
+        idled_address=address,
+        idled=True,
+        direction_preserved=stored is not None,
+    )
+
+
+def _abandon_energised_track(station: Station) -> tuple[Check, bool, LayoutState]:
+    """The hold failed on a track this run energised. Put it back as it was found.
+
+    A live track with nothing holding it is the runaway of runs 1 and 2 - the
+    locomotive resumed its stored speed the instant power returned, with and without
+    a stop telegram sent beforehand. The doctor found this track OFF, so switching it
+    back off is not a change the operator did not ask for; it is the only state this
+    command is entitled to leave behind once it cannot hold what it started.
+    """
+    try:
+        station.power_off()
+    except RailctlError as exc:
+        detail = (
+            f"track power was turned on, the emergency stop that should hold the layout "
+            f"failed, and switching the track back off failed too ({exc}); the track MAY "
+            f"BE LIVE with nothing holding it"
+        )
+        return (
+            Check("D3", CHECK_TITLES["D3"], "fail", detail),
+            False,
+            LayoutState(energised=True, held=False),
+        )
+    detail = (
+        "track power was turned on but the emergency stop that should hold the layout "
+        "failed, so the track was switched back off, as it was found"
+    )
+    return (
+        Check("D3", CHECK_TITLES["D3"], "fail", detail),
+        False,
+        LayoutState(energised=True, track_power=False, held=False),
+    )
+
+
 def _check_d3(
-    station: Station, status: StationStatus | None, *, allow_power_on: bool
-) -> tuple[Check, bool]:
+    station: Station, status: StationStatus | None, *, address: int | None, allow_power_on: bool
+) -> tuple[Check, bool, LayoutState]:
+    """Track power, and - when this run is the thing that energises it - the hold.
+
+    A track the operator already had live is left exactly as found: the doctor is a
+    diagnostic, and holding a layout that was running is a change nobody asked for.
+    Only the `--power-on` path that actually energises a dead track holds it, because
+    only that path created the hazard.
+    """
     if status is None:
-        return Check("D3", CHECK_TITLES["D3"], "fail", "D2 did not produce a status"), False
+        detail = "D2 did not produce a status"
+        return Check("D3", CHECK_TITLES["D3"], "fail", detail), False, LAYOUT_UNTOUCHED
     if status.track_power:
-        return Check("D3", CHECK_TITLES["D3"], "ok", "track power already on"), True
+        detail = "track power already on"
+        return Check("D3", CHECK_TITLES["D3"], "ok", detail), True, LAYOUT_UNTOUCHED
     if not allow_power_on:
         detail = "track power is off; re-run with --power-on to verify D4 and D10"
-        return Check("D3", CHECK_TITLES["D3"], "unknown", detail), False
+        return Check("D3", CHECK_TITLES["D3"], "unknown", detail), False, LAYOUT_UNTOUCHED
     try:
         station.power_on()
     except RailctlError as exc:
-        return Check("D3", CHECK_TITLES["D3"], "fail", str(exc)), False
-    return Check("D3", CHECK_TITLES["D3"], "ok", "track power turned on"), True
+        # `energised=None`, never False: `power_on()` writes the telegram and only
+        # then verifies, so a failure here leaves a track that may well be live.
+        return Check("D3", CHECK_TITLES["D3"], "fail", str(exc)), False, LayoutState(energised=None)
+    try:
+        # AFTER the energise, never before. Runs 1 and 2 measured that a stop sent to
+        # a dead track changes nothing at all - either the station ignores it or the
+        # power-on clears it - and runs 3 and 4 measured that the same telegram sent
+        # 0.51 s after the track came up held stored steps 15 and 80.
+        station.emergency_stop(address=None)
+    except RailctlError:
+        return _abandon_energised_track(station)
+    layout = _idle_probe_address(station, address)
+    detail = (
+        f"track power turned on, then the whole layout was held and "
+        f"{'no locomotive was zeroed (no --address)' if address is None else f'loco {address} was sent speed 0'}"
+        f"; the hold is re-asserted and read back at the end of the run"
+    )
+    return Check("D3", CHECK_TITLES["D3"], "ok", detail), True, layout
+
+
+def _settle_hold(station: Station, layout: LayoutState) -> LayoutState:
+    """Re-assert the hold this run applied, then read back the state it leaves behind.
+
+    Not belt and braces about an emergency stop wearing off. `CvProgrammer.
+    exit_service_mode` sends resume-operations unconditionally, and that telegram is
+    exactly what clears a hold - MEASURED 2026-08-09, run 5, where a locomotive held
+    with step 80 stored accelerated away on it. So a `--power-on` run with the
+    programming track enabled RELEASES the hold D3 applied, halfway through its own
+    checks, and D9 does it again. Re-asserting here is what makes `layout.held`
+    describe the state the doctor actually leaves behind rather than one it set and
+    then undid.
+
+    The doctor never releases. Whether it should was the open question: releasing is
+    a single telegram and it would leave the bench as it was found. Run 5 settles it -
+    the release is the moment stored speeds start locomotives, and a diagnostic
+    command must not be what chooses that moment. `railctl power on` already ends
+    held for the same reason and `railctl power resume` is the deliberate half; the
+    doctor points at it rather than growing a second way to do the same thing.
+    """
+    try:
+        station.emergency_stop(address=None)
+        after = station.status()
+    except RailctlError:
+        # The telegram went out and the station never said whether it took. UNKNOWN,
+        # which the CLI treats as "not safe" - see LayoutState's own docstring.
+        return replace(layout, held=None, track_power=None)
+    return replace(layout, held=after.emergency_stop, track_power=after.track_power)
 
 
 _SILENCE_NOTE: Final[str] = (
@@ -619,10 +752,15 @@ def run_probe(
     checks: list[Check] = [_check_d0(station), _check_d1(station)]
     d2_check, status = _check_d2(station)
     checks.append(d2_check)
-    d3_check, track_powered = _check_d3(station, status, allow_power_on=allow_power_on)
+    # Resolved BEFORE D3, not after: D3 is where a `--power-on` run zeroes the
+    # locomotive it is about to probe, and it can only do that if it already knows
+    # which address that is.
+    resolved_address = _resolved_address(station, address)
+    d3_check, track_powered, layout = _check_d3(
+        station, status, address=resolved_address, allow_power_on=allow_power_on
+    )
     checks.append(d3_check)
 
-    resolved_address = _resolved_address(station, address)
     d4_noack = False
     if track_powered and resolved_address is not None:
         d4_check, d4_noack = _check_d4(station, address=resolved_address)
@@ -678,9 +816,11 @@ def run_probe(
     checks.append(_check_d10(station, address=address, track_powered=track_powered))
     checks.append(_check_d11(station, address=address))
     checks.append(_check_d12(station, address=address))
+    if track_powered and layout.energised is True:
+        layout = _settle_hold(station, layout)
     clock = now_utc or _iso_utc_now
     station.record(probed_at=clock())
-    return DoctorReport(checks=tuple(checks), capabilities=station.capabilities)
+    return DoctorReport(checks=tuple(checks), capabilities=station.capabilities, layout=layout)
 
 
 def _primary_cv_path(caps: Capabilities) -> str:

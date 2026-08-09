@@ -99,6 +99,52 @@ class StationEvent:
 
 
 @dataclass(frozen=True, slots=True)
+class LayoutState:
+    """What a `railctl doctor --power-on` run did to the layout, and the state it
+    left behind. Issue #14.
+
+    Every field is tri-state for the same reason every capability is, and for a
+    sharper one: an operator reads this before walking up to the track. "The doctor
+    did not confirm the hold" and "the doctor confirmed there is no hold" are
+    different things to know, and both are different from "the doctor never touched
+    the power".
+
+    A hazard is the one place where UNKNOWN is not neutral. A capability nobody
+    measured is simply not yet known; a hold nobody confirmed has to be treated as
+    absent, because acting on it means standing next to a locomotive that may start.
+    So the CLI's own reading of `held` is "anything but True is not safe" - which is
+    the opposite direction from `pom_read`, deliberately, and only because this
+    field describes a moving train rather than a decoder feature.
+    """
+
+    #: `False` - this run did not energise the track and changed nothing about its
+    #: power. `True` - it energised it and the station confirmed. `None` - the
+    #: power-on telegram went out and the verify failed, so the track MAY be live.
+    energised: bool | None = False
+    #: The track power the doctor left behind, read off the station's own status at
+    #: the end of the run. `None` when the doctor changed nothing, or could not read
+    #: it back.
+    track_power: bool | None = None
+    #: Whether the whole layout is held in emergency stop, read off the station's own
+    #: bit and never off the fact that a stop telegram was sent.
+    held: bool | None = None
+    #: The address that was sent speed 0 so a later release cannot start it, and
+    #: whether that telegram was accepted. `idled_address` is `None` when the run had
+    #: no address to zero.
+    idled_address: int | None = None
+    idled: bool | None = None
+    #: Whether the locomotive's stored direction was read and kept. `None` when no
+    #: speed-0 telegram was accepted, so there is nothing to say either way.
+    direction_preserved: bool | None = None
+
+
+#: The layout as a run that never touched the track power leaves it: nothing
+#: energised, nothing held, nothing zeroed. Named once so a doctor report can be
+#: compared against it rather than against six separate fields.
+LAYOUT_UNTOUCHED: Final[LayoutState] = LayoutState()
+
+
+@dataclass(frozen=True, slots=True)
 class Check:
     """One row of a `railctl doctor` report."""
 
@@ -120,6 +166,12 @@ _MUST_NOT_FAIL: Final[str] = "D3"
 class DoctorReport:
     checks: tuple[Check, ...]
     capabilities: Capabilities
+    #: What the run did to the layout. Defaulted rather than required because the
+    #: overwhelming majority of runs - every one without `--power-on`, and every one
+    #: that found the track already live - leave it exactly as `LAYOUT_UNTOUCHED`
+    #: describes, and a report that has to state that explicitly invites the one
+    #: caller who forgets to.
+    layout: LayoutState = LAYOUT_UNTOUCHED
 
     @property
     def ok(self) -> bool:
