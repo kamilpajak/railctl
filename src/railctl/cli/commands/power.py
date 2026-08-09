@@ -554,7 +554,10 @@ def _power_on(station: Station, address: int | None) -> CommandResult:
     release. The hold keeps the station's refresh buffer; it never clears it.
     Run 6 is why the idle may come last: with the layout held, `drive(3, 0)`
     landed and `loco_info` then read speed 0, so the speed telegram does not
-    have to precede the hold.
+    have to precede the hold. Run 7 is why the confirming status read comes
+    after it: the STATUS re-read after that same telegram was still `0x05`, so
+    the hold survives a per-locomotive zero and the read that decides what to
+    claim can happen where it belongs, after the last mutation.
 
     This is JMRI's `XNetPowerManager` state model with a safe default. Their
     `ON` is `21 81` with locomotives free, their `IDLE` is `80 80` with the
@@ -707,7 +710,8 @@ def _idle(station: Station, address: int | None) -> Idled | None:
     hold does not clear the station's stored speed (measured 2026-08-09, run
     5), so zeroing it is the only way the release leaves it standing. It goes
     out while the layout is already held, which run 6 measured working - the
-    telegram landed and `loco_info` then read speed 0. The direction was never
+    telegram landed and `loco_info` then read speed 0 - and run 7 measured that
+    it leaves the hold intact. The direction was never
     the point, and sending `Direction.FORWARD` unconditionally overwrote
     whatever the locomotive had.
 

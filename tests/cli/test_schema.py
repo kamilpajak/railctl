@@ -122,6 +122,15 @@ def test_every_real_manifest_exit_code_is_a_known_code():
         assert 0 in meta.exit_codes, meta.path
 
 
+def test_every_command_publishes_its_exit_codes_in_order():
+    """`--help` prints this tuple in the order it is written, and `power` appended the
+    partial code 8 after the base set's 9, so its EXIT CODES section read
+    0 1 2 3 4 5 6 7 9 8 20. Deterministic help in a deterministic order is the rule the
+    whole help page is built on."""
+    for meta in COMMANDS:
+        assert list(meta.exit_codes) == sorted(meta.exit_codes), meta.path
+
+
 def test_the_enum_rows_are_the_same_tuples_deps_validates_against():
     # The manifest's `enum` list and the check that rejects a bad value must be
     # one tuple, not two that agree today. `_meta` imports both from `deps`, so

@@ -217,7 +217,15 @@ STATION_EXIT_CODES: Final[tuple[int, ...]] = (0, 1, 2, 3, 4, 5, 6, 7, 9)
 # energises the track before its remaining steps, and `power resume` releases
 # the hold in the same call, so a failure after that point leaves the layout in
 # a state that is a different thing from the command having done nothing.
-POWER_EXIT_CODES: Final[tuple[int, ...]] = (*STATION_EXIT_CODES, PARTIAL_EXIT_CODE, 20)
+#
+# Sorted, because `help_epilog` and the manifest publish this tuple in the order
+# it is written and appending 8 after the base set's 9 listed the codes as
+# 0 1 2 3 4 5 6 7 9 8 20 on the `--help` page. `STATION_EXIT_CODES` happens to be
+# in order already; sorting here is what keeps that from being a property the
+# next addition has to remember.
+POWER_EXIT_CODES: Final[tuple[int, ...]] = tuple(
+    sorted({*STATION_EXIT_CODES, PARTIAL_EXIT_CODE, 20})
+)
 
 # `drive SPEED>0` and `function` both run `throttle.preflight`, which refuses
 # with `TrackPowerError` (20) on emergency off or emergency stop and with

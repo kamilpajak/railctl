@@ -58,7 +58,8 @@ EMERGENCY_OFF_STATUS = StationStatus.from_raw(0x02)
 SERVICE_MODE_STATUS = StationStatus.from_raw(0x08)
 #: What the station reads back after the new `power on`: track live, emergency
 #: stop set, automatic start mode. `0x05` is the byte the 2026-08-09 bench run
-#: read while the layout was held (docs/probe-results.md, run 6).
+#: read while the layout was held (docs/probe-results.md, runs 6 and 7 - run 7
+#: is the STATUS re-read that reported it).
 HELD_STATUS = StationStatus.from_raw(0x05)
 #: Emergency stop AND emergency off together, plus automatic start mode. `0x07`
 #: is what the YD7010 reads on power-up (docs/probe-results.md), and it is the
