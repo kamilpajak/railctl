@@ -1916,19 +1916,32 @@ def test_power_on_leaves_the_layout_held_so_a_drive_straight_after_is_refused(mo
     documented cost of the design (docs/probe-results.md, run 5: the release is what
     starts locomotives, so the command that energises cannot also release), and a change
     of mind about it has to break this test.
+
+    The station here reports the hold only once `80 80` has actually been sent, so the
+    refusal below is downstream of the telegram `power on` sends rather than of a status
+    the fake was told to return.
     """
-    station = FakeStation(status=HELD_STATUS)
+
+    class _HeldOnceTheStopAllLands(FakeStation):
+        def status(self):
+            self._record("status")
+            return HELD_STATUS if "emergency_stop" in self.call_names else CLEAR_STATUS
+
+    station = _HeldOnceTheStopAllLands()
     app = _app(station, monkeypatch, address=3, fmt="json")
-    assert runner.invoke(app, ["power", "on"]).exit_code == 0
+    powered = runner.invoke(app, ["power", "on"])
+    assert powered.exit_code == 0, powered.stderr
+    assert json.loads(powered.stdout)["result"]["emergency_stop"] is True
 
     refused = runner.invoke(app, ["drive", "30"])
     assert refused.exit_code == 20
     error = json.loads(refused.stderr)
     assert error["code"] == "track_power"
     assert error["details"]["condition"] == "emergency_stop"
+    # The recovery is the release, and it is a separate command: `drive` never
+    # clears a hold on the operator's behalf.
     assert error["suggestions"] == [["railctl", "power", "resume"]]
-    # And the release really is a separate command, not something `drive` does.
-    assert "power_on" not in station.call_names[-1:]
+    assert station.call_names[-2:] == ["status", "close"]
 
 
 def test_power_resume_refuses_on_a_dead_track_and_sends_nothing(monkeypatch):
