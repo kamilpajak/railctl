@@ -26,16 +26,16 @@ from __future__ import annotations
 
 import json
 from collections.abc import Sequence
-from typing import TYPE_CHECKING, Final
+from typing import TYPE_CHECKING, Final, NoReturn
 
 import typer
 
-from railctl.cli._errors import OutputContext, report_for, run
+from railctl.cli._errors import OutputContext, report_for, run, usage_report
 from railctl.cli._meta import MONITOR_LIMIT, command_meta, global_option, help_epilog, typer_option
 from railctl.cli.config import capabilities_path
-from railctl.cli.deps import close_after, close_quietly, merged_output, open_station
+from railctl.cli.deps import UsageProblem, close_after, close_quietly, merged_output, open_station
 from railctl.cli.render import NdjsonStream
-from railctl.cli.result import CommandResult
+from railctl.cli.result import INTERNAL_EXIT_CODE, USAGE_EXIT_CODE, CommandResult, ErrorReport
 from railctl.errors import AbortedError, RailctlError, exit_code_for
 from railctl.station import EVENT_NAMES
 
@@ -59,6 +59,9 @@ _START_NOTICE: Final[str] = "monitoring broadcasts; press Ctrl-C to stop\n"
 #: never `AbortedError(...)`: nothing here needs an initialised instance, and
 #: `exit_code_for` answers off the class - the same probe `_meta._class_error_row` uses.
 _ABORTED_EXIT_CODE: Final[int] = exit_code_for(AbortedError.__new__(AbortedError))
+
+#: The smallest `--limit` that means anything. Zero and below name no run at all.
+MIN_LIMIT: Final[int] = 1
 
 # Built once, at import time - see the same B008 note in main.py.
 _TARGET = global_option("--target")
@@ -114,9 +117,11 @@ def stream_monitor(station: Station, *, ndjson: NdjsonStream, limit: int | None 
     was cut short - and this project exists precisely to keep "the run ended early"
     and "the run ended cleanly" from becoming indistinguishable one layer up.
 
-    Nothing wider is caught. `station.events()` is never wrapped in a blanket
-    `except Exception` by this command: a link fault is a real failure with an
-    envelope of its own, not an ending to be smoothed over.
+    Nothing is SWALLOWED. The two wider handlers below re-raise exactly like the
+    `KeyboardInterrupt` one; all they do is record the exit code the closing summary
+    line carries, so the stream and the error envelope on stderr agree about how the
+    run ended. A link fault is still a real failure with an envelope of its own, not
+    an ending smoothed over.
     """
     count = 0
     complete = False
@@ -125,12 +130,27 @@ def stream_monitor(station: Station, *, ndjson: NdjsonStream, limit: int | None 
         for event in station.events():
             ndjson.event("event", name=event.name, detail=event.detail, payload=event.payload)
             count += 1
+            # Counted and emitted BEFORE the check, deliberately. Testing first reads
+            # one more event off the generator and then throws it away - on a live bus
+            # that is a broadcast the operator asked to see and will never see again.
+            # `--limit 0` is the case that shape would protect against, and it is
+            # refused at the argument instead (`_checked_limit`).
             if limit is not None and count >= limit:
                 break
         complete = True
         return count
     except KeyboardInterrupt:
         exit_code = _ABORTED_EXIT_CODE
+        raise
+    except RailctlError as exc:
+        # The summary line must carry the SAME code the error envelope on stderr will
+        # carry. Without this branch every failure that was not a Ctrl-C closed the
+        # stream with `exit_code: 0` under `complete: false` - a consumer reading only
+        # the stream saw a run that ended cleanly, while the process exited 13.
+        exit_code = exit_code_for(exc)
+        raise
+    except BaseException:
+        exit_code = INTERNAL_EXIT_CODE
         raise
     finally:
         ndjson.summary(count=count, complete=complete, exit_code=exit_code)
@@ -158,20 +178,49 @@ def _run_ndjson(settings: Settings, output: OutputContext, limit: int | None) ->
     """
     station: Station | None = None
     try:
+        _checked_limit(limit)
         station = open_station(settings, capabilities_path=capabilities_path())
         print(_START_NOTICE, end="", file=output.stderr)
         stream_monitor(station, ndjson=NdjsonStream(output.stdout), limit=limit)
     except KeyboardInterrupt:
         raise typer.Exit(code=_ABORTED_EXIT_CODE) from None
+    except ValueError as exc:
+        # `run()`'s own ValueError branch, by hand, for the same reason the
+        # `RailctlError` branch below is: this path never calls `run()`. Without it a
+        # bad `--limit` on the ndjson path left a Python traceback and exit 1 where
+        # every other format answers with a usage envelope and exit 2.
+        _fail_envelope(usage_report(exc), output, exit_code=USAGE_EXIT_CODE)
     except RailctlError as exc:
-        envelope = report_for(exc, command="monitor").envelope()
-        output.stderr.write(json.dumps(envelope, separators=(",", ":")) + "\n")
-        raise typer.Exit(code=exit_code_for(exc)) from exc
+        _fail_envelope(report_for(exc, command="monitor"), output, exit_code=exit_code_for(exc))
     else:
         raise typer.Exit(code=0)
     finally:
         if station is not None:
             close_quietly(station)
+
+
+def _fail_envelope(report: ErrorReport, output: OutputContext, *, exit_code: int) -> NoReturn:
+    """One JSON object on stderr, then exit - the shape `render_error` gives every other
+    command, written here because this path deliberately never calls `run()`."""
+    output.stderr.write(json.dumps(report.envelope(), separators=(",", ":")) + "\n")
+    raise typer.Exit(code=exit_code)
+
+
+def _checked_limit(limit: int | None) -> int | None:
+    """`--limit` must be at least 1, or refuse to run.
+
+    Unvalidated, `--limit 0` read as "stop after zero events" and the loop still
+    emitted one before it checked - a caller who asked for nothing got a broadcast, and
+    a negative limit behaved identically. Refusing beats picking one of two readings of
+    a number nobody can act on.
+    """
+    if limit is not None and limit < MIN_LIMIT:
+        raise UsageProblem(
+            f"--limit must be at least {MIN_LIMIT}, got {limit}",
+            suggestions=[["railctl", "monitor", "--limit", str(MIN_LIMIT)]],
+            details={"option": "--limit", "minimum": MIN_LIMIT, "got": limit},
+        )
+    return limit
 
 
 def _work(settings: Settings, output: OutputContext, limit: int | None) -> CommandResult:
@@ -184,6 +233,7 @@ def _work(settings: Settings, output: OutputContext, limit: int | None) -> Comma
     `run()` needs a normal return to render what was seen as one JSON or human value
     instead of an error object that carries none of it.
     """
+    _checked_limit(limit)
     streamed = output.fmt == "human"
     station = open_station(settings, capabilities_path=capabilities_path())
     print(_START_NOTICE, end="", file=output.stderr)
@@ -192,6 +242,11 @@ def _work(settings: Settings, output: OutputContext, limit: int | None) -> Comma
         for event in station.events():
             if streamed:
                 output.stdout.write(f"{event.name}: {event.detail}\n")
+                # A monitor that shows nothing until the buffer fills is not a
+                # monitor. `sys.stdout` is block-buffered the moment it is a pipe,
+                # so `railctl monitor | grep power` showed its first line after 4 KB
+                # of broadcasts - which on a quiet layout is never.
+                output.stdout.flush()
             seen.append(event)
             if limit is not None and len(seen) >= limit:
                 break

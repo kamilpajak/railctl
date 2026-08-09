@@ -155,6 +155,21 @@ def test_2_doctor_power_on_holds_the_layout_and_records_pom_read_false_from_sile
     locomotives (run 5), so a diagnostic command must not be what chooses that moment.
     Stage 4 switches the track off instead, which is how stage 1 found it.
 
+    WHAT THE HOLD ACTUALLY DOES DURING THIS STAGE, corrected 2026-08-09. The layout is
+    not held for one unbroken stretch. `exit_service_mode` ends every service-mode
+    session with resume-operations, and that telegram CLEARS the emergency stop (run
+    5) - so the hold drops at the end of the D5-D8 batch and again at the end of D9's
+    identity reads. Each of those gaps is now closed by the exit path itself, which
+    re-sends the stop before it returns, and the run makes a final re-assert and reads
+    the bit back at the end. The gap is a status exchange wide, not a whole check, and
+    the earlier version of this document told the watcher the layout was held for the
+    whole stage while it was in fact released mid-probe and never put back.
+
+    So: brief unheld windows are EXPECTED and are the thing to watch. Locomotive 3 was
+    sent speed 0 while held, which is what makes those windows safe - the station has
+    no stored speed left for it to resume (runs 6 and 7). A locomotive that twitches in
+    one of those windows is a real finding: it means the speed-0 telegram did not take.
+
     `pom_read is False` here is the ONE place in this codebase where `false` follows
     something other than a `61 82`: D4 asked three times and got nothing at all, and
     leaving it null makes every AUTO operation retry POM for seconds on end forever.
@@ -167,8 +182,14 @@ def test_2_doctor_power_on_holds_the_layout_and_records_pom_read_false_from_sile
     _gate(
         "STAGE 2 of 4 - THIS TURNS THE TRACK ON.\n"
         "Watch locomotive 3. It must not turn a wheel at any point. Keep a hand on\n"
-        "the station's STOP button. The layout is left HELD afterwards - stage 4\n"
-        "switches the track off rather than releasing it."
+        "the station's STOP button.\n"
+        "The hold is NOT one unbroken stretch: leaving service mode clears it, twice\n"
+        "in this run (after D5-D8 and after D9), and each time it is re-sent straight\n"
+        "away. Those short windows are expected. Loco 3 was sent speed 0 while held,\n"
+        "so it has no stored speed to resume - a twitch in one of those windows means\n"
+        "the speed-0 telegram did not take, and that is a finding.\n"
+        "The layout is left HELD afterwards - stage 4 switches the track off rather\n"
+        "than releasing it."
     )
     result = _run("doctor", "--address", ACCEPTANCE_ADDRESS, "--power-on", "--format", "json")
     assert result.exit_code == 0, result.stderr
@@ -178,6 +199,7 @@ def test_2_doctor_power_on_holds_the_layout_and_records_pom_read_false_from_sile
     assert layout["energised"] is True, "this run should have been the one that energised"
     assert layout["track_power"] is True
     assert layout["held"] is True, "the station did not confirm the hold - THIS IS THE FINDING"
+    assert layout["must_leave_held"] is True, "the run has to own the hold it applied"
     assert layout["idled_address"] == int(ACCEPTANCE_ADDRESS)
     assert layout["idled"] is True
     assert body["warnings"] == [], body["warnings"]

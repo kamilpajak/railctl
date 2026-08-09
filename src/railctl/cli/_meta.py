@@ -707,9 +707,22 @@ _COMMAND_EXIT_MEANINGS: Final[dict[str, dict[int, str]]] = {
             "the gap named in the report"
         ),
         8: (
-            "partial - the probe ran, but this run energised the track and the station never "
-            "confirmed the hold that should be under it; treat the layout as able to move"
+            "partial - the probe ran, but the layout is not confirmed held: this run either "
+            "energised the track or released a hold it found, and the station never confirmed "
+            "the hold that should be under it, or a locomotive refused the speed-0 telegram. "
+            "Treat the layout as able to move"
         ),
+    },
+    # 9 is AbortedError everywhere else, and for `monitor` that IS how a normal run
+    # ends - the operator's Ctrl-C. The row exists because the class summary reads as
+    # a failure, and here it is the documented ending: this is the one command whose
+    # metadata comment already explained 9 while its own help text did not.
+    "monitor": {
+        9: (
+            "the operator stopped the monitor with Ctrl-C. The ndjson stream still ends with "
+            "its summary line, carrying complete: false - a monitor that ran until it was "
+            "interrupted did its job"
+        )
     },
 }
 

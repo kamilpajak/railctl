@@ -109,6 +109,92 @@ def test_stream_monitor_writes_three_events_then_a_summary_on_keyboard_interrupt
     }
 
 
+class _FailingStation:
+    """Yields `before` events and then raises - the half-written stream case."""
+
+    def __init__(self, before: list[StationEvent], error: BaseException) -> None:
+        self._before = before
+        self._error = error
+        self.closed = False
+
+    def events(self, *, interval: float = 0.25):
+        yield from self._before
+        raise self._error
+
+    def close(self) -> None:
+        self.closed = True
+
+
+class _FlushCountingStream(io.StringIO):
+    """`io.StringIO` that counts `flush()`, which it otherwise implements as a no-op."""
+
+    def __init__(self) -> None:
+        super().__init__()
+        self.flushes = 0
+
+    def flush(self) -> None:
+        self.flushes += 1
+        super().flush()
+
+
+def test_a_limit_smaller_than_the_events_available_stops_the_run():
+    """The `--limit` tests all supplied exactly as many events as the limit, so the
+    generator exhausted on its own and the break never had to fire: deleting the limit
+    check entirely left every one of them green."""
+    events = [
+        StationEvent(at=float(n), name="power.on", detail=f"d{n}", payload={}) for n in range(5)
+    ]
+    buf = io.StringIO()
+    assert stream_monitor(_EventStation(events), ndjson=NdjsonStream(buf), limit=2) == 2
+    lines = [json.loads(line) for line in buf.getvalue().splitlines()]
+    assert [line["type"] for line in lines] == ["event", "event", "summary"]
+    assert lines[-1]["count"] == 2
+
+
+def test_a_failing_stream_closes_with_the_same_exit_code_the_envelope_will_carry():
+    """`exit_code` was set only in the `KeyboardInterrupt` branch, so every other
+    failure closed the stream with `exit_code: 0` under `complete: false`. A consumer
+    reading the stream alone saw a run that ended cleanly while the process exited 13.
+    """
+    exc = DecoderNotRespondingError("the link stopped answering", cv=8)
+    station = _FailingStation([StationEvent(at=1.0, name="power.on", detail="on", payload={})], exc)
+    buf = io.StringIO()
+    with pytest.raises(DecoderNotRespondingError):
+        stream_monitor(station, ndjson=NdjsonStream(buf))
+    summary = json.loads(buf.getvalue().splitlines()[-1])
+    assert summary["complete"] is False
+    assert summary["exit_code"] == report_for(exc, command="monitor").exit_code
+    assert summary["count"] == 1
+
+
+def test_a_bug_in_the_stream_closes_with_the_internal_exit_code():
+    """Not a domain answer and not a Ctrl-C: the closing line still has to name an
+    ending, and 0 is the one thing it must not say."""
+    station = _FailingStation([], RuntimeError("a bug"))
+    buf = io.StringIO()
+    with pytest.raises(RuntimeError):
+        stream_monitor(station, ndjson=NdjsonStream(buf))
+    assert json.loads(buf.getvalue().splitlines()[-1]) == {
+        "type": "summary",
+        "sequence": 0,
+        "count": 0,
+        "complete": False,
+        "exit_code": 1,
+    }
+
+
+def test_every_ndjson_line_is_flushed_as_it_is_written():
+    """A monitor whose output appears only when the buffer fills is not a monitor:
+    stdout is block-buffered the moment it is a pipe, so `... | jq` saw nothing for
+    4 KB of events."""
+    stream = _FlushCountingStream()
+    ndjson = NdjsonStream(stream)
+    ndjson.event("event", name="power.on", detail="on", payload={})
+    assert stream.flushes == 1
+    ndjson.summary(count=1, complete=True, exit_code=0)
+    assert stream.flushes == 2
+
+
 def test_unknown_telegram_is_reported_not_dropped():
     """An unrecognised broadcast is `reply.unknown` with its bytes preserved - never
     silently discarded, which is the instrument defect this project exists to avoid.
@@ -292,3 +378,36 @@ def test_every_command_ships_the_three_fixed_help_sections(path: str):
     assert result.exit_code == 0
     for heading in ("OUTPUT", "EXIT CODES", "EXAMPLES"):
         assert heading in result.stdout
+
+
+def test_a_limit_below_one_is_refused_with_a_usage_envelope_and_exit_two(monkeypatch, tmp_path):
+    """`--limit 0` used to mean "emit one event, then stop": the count was checked
+    after the emit. Refusing beats acting on one of two readings of a number that
+    names no run."""
+    station = _EventStation([StationEvent(at=1.0, name="power.on", detail="on", payload={})])
+    app = _wire(monkeypatch, station, tmp_path)
+    result = CliRunner().invoke(app, ["monitor", "--limit", "0", "--format", "json"])
+    assert result.exit_code == 2
+    assert result.stdout == ""
+    envelope = json.loads(result.stderr.strip().splitlines()[-1])
+    assert envelope["code"] == "usage"
+    assert envelope["suggestions"] == [["railctl", "monitor", "--limit", "1"]]
+
+
+def test_a_limit_below_one_is_refused_the_same_way_on_the_ndjson_path(monkeypatch, tmp_path):
+    """`_run_ndjson` never calls `run()`, so without its own branch a bad `--limit`
+    there left a traceback and exit 1 where every other format answers exit 2."""
+    station = _EventStation([StationEvent(at=1.0, name="power.on", detail="on", payload={})])
+    app = _wire(monkeypatch, station, tmp_path)
+    result = CliRunner().invoke(app, ["monitor", "--limit", "-3", "--format", "ndjson"])
+    assert result.exit_code == 2
+    assert result.stdout == ""
+    assert json.loads(result.stderr.strip().splitlines()[-1])["code"] == "usage"
+
+
+def test_monitors_help_explains_what_exit_nine_means_for_a_monitor():
+    """The metadata row's own comment explained 9 while the help text an operator
+    reads printed the generic "aborted by the operator" class summary."""
+    result = CliRunner().invoke(real_app, ["monitor", "--help"])
+    assert result.exit_code == 0
+    assert "Ctrl-C" in result.stdout

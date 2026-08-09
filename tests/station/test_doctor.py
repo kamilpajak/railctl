@@ -1504,6 +1504,33 @@ def test_the_hold_is_re_asserted_after_the_service_mode_batch_released_it(doctor
 STATUS_REPLY_HELD = encode(0x62, 0x22, 0x05)
 
 
+def test_power_on_changes_nothing_on_a_track_that_is_already_live(doctor_bench):
+    """H11: nothing constrained what `--power-on` does to a track it FINDS live, so a
+    mutation narrowing `if status.track_power:` survived - and that mutation makes the
+    doctor energise-and-hold a layout the operator already had running.
+
+    `use_programming_track=False` so `exit_service_mode` cannot supply a
+    resume-operations telegram of its own; the only source of one left in this run
+    would be a `power_on()` that must not happen.
+    """
+    report = run_probe(
+        doctor_bench.station,
+        address=3,
+        allow_power_on=True,
+        use_programming_track=False,
+        now_utc=lambda: "2026-08-09T00:00:00Z",
+    )
+    sent = doctor_bench.sent
+    assert cmd_track_power_on() not in sent
+    assert cmd_emergency_stop_all() not in sent
+    assert (
+        cmd_drive_128(3, 0, Direction.FORWARD, threshold=doctor_bench.station.threshold) not in sent
+    )
+    assert report.check("D3").status == "ok"
+    assert report.layout.energised is False
+    assert report.layout.must_leave_held is False
+
+
 def test_a_plain_run_on_a_held_layout_leaves_it_held(doctor_bench):
     """The C1 reproduction. `railctl power on` ends with the layout HELD, so this is
     the state a following `railctl doctor` finds. Every service-mode session ends with
