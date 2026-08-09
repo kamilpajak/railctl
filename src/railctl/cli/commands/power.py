@@ -161,7 +161,12 @@ def build_power(
     else:
         outcome.say("start mode is manual: locomotives stay stopped until driven")
     if state == "resume":
-        _warn_stored_speeds_released(outcome, confirmed=True)
+        # `confirmed` is read off the station's own answer, not off the fact that the release
+        # telegram went out. Sent unconditionally, it asserted "the hold is cleared" in the
+        # one case where the after-read says it is not - a claim contradicted by a reading
+        # already in hand, which is the mistake this project is built to avoid. The warning
+        # still fires either way, because over-warning about movement is the safe direction.
+        _warn_stored_speeds_released(outcome, confirmed=not status.emergency_stop)
     _say_emergency_state(outcome, state, status)
     if idled is not None:
         direction_text = DIRECTION_TEXT[idled.direction]
@@ -373,7 +378,6 @@ def build_power_partial(
         error_code=error_code(failure),
         **_before_details(before),
     )
-    outcome.say(f"{reached}; {failed_step} did not complete")
     if state == "resume":
         # The release telegram is written before anything here can fail, so the
         # token that says locomotives may be moving belongs in this envelope

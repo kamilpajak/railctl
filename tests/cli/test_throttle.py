@@ -2107,9 +2107,7 @@ def test_a_close_failure_does_not_throw_away_what_the_command_already_did(monkey
     warning is where it belongs; it is not a reason to withhold what just happened to the
     layout.
     """
-    station = FakeStation(
-        status=HELD_STATUS, close_raises=OSError(28, "No space left on device")
-    )
+    station = FakeStation(status=HELD_STATUS, close_raises=OSError(28, "No space left on device"))
     app = _app(station, monkeypatch, address=3, fmt="json")
     result = runner.invoke(app, ["power", "on"])
     assert result.exit_code == 0, result.stderr
@@ -2129,3 +2127,24 @@ def test_a_close_failure_never_masks_the_error_the_command_already_raised(monkey
     result = runner.invoke(app, ["drive", "30"])
     assert result.exit_code == 20
     assert json.loads(result.stderr)["code"] == "track_power"
+
+
+def test_resume_does_not_claim_a_cleared_hold_the_station_still_reports():
+    """`confirmed` reports the station's answer, not the fact that we sent a telegram.
+
+    Sent unconditionally it asserted "the hold is cleared" in the one case where the read
+    taken immediately afterwards says it is not - a claim contradicted by a reading already
+    in hand. The warning still fires, because over-warning about movement is the safe
+    direction; what changes is that it stops asserting a confirmation nobody got.
+    """
+    still_held = power.build_power(
+        "resume", HELD_STATUS, changed=False, idled=None, completed=[power.STEP_READ_STATUS]
+    )
+    released = power.build_power(
+        "resume", AUTO_START_STATUS, changed=True, idled=None, completed=[power.STEP_READ_STATUS]
+    )
+    by_name = {w.name: w for w in still_held.warnings}
+    assert by_name["stored_speeds_released"].details["confirmed"] is False
+    assert {w.name: w for w in released.warnings}["stored_speeds_released"].details[
+        "confirmed"
+    ] is True
