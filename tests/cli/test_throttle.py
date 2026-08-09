@@ -446,7 +446,7 @@ def test_build_drive_changed_unknown_when_prior_step_mode_not_decoded():
     assert any("not decoded" in line for line in result.lines)
 
 
-def test_build_drive_reports_that_another_throttle_holds_the_locomotive():
+def test_build_drive_reports_that_some_other_device_has_driven_the_locomotive():
     """`in_use_by_other` is decoded off the ident byte and was then dropped.
 
     The facade deliberately does not raise on it (`Station.loco_info`: "another
@@ -460,6 +460,29 @@ def test_build_drive_reports_that_another_throttle_holds_the_locomotive():
     assert result.result["in_use_by_other"] is True
     assert [w.name for w in result.warnings] == ["loco_in_use_by_other"]
     assert result.warnings[0].details == {"address": 3}
+
+
+def test_the_in_use_warning_does_not_send_the_operator_looking_for_a_throttle():
+    """MEASURED 2026-08-09 (docs/probe-results.md, "`in_use_by_other` marks any past
+    driver, including us"): the flag fired for loco 3 with nothing but railctl connected,
+    because every railctl run connects as a new device and an earlier run had driven it.
+    Loco 3 read `raw_ident=0x0C`, loco 5 - never driven - read `0x04`; the difference is
+    bit 3, and it survives across connections.
+
+    So the old wording, "another throttle holds loco 3", was a hunt for a throttle that
+    is not there on the second and every later run. The fact still gets published; the
+    sentence has to say what the bit means.
+    """
+    result = throttle.build_drive(
+        3,
+        30,
+        Direction.FORWARD,
+        was=replace(LOCO_128, in_use_by_other=True),
+        direction_source=throttle.DIRECTION_KEPT,
+    )
+    message = result.warnings[0].message
+    assert "another throttle" not in message
+    assert "earlier railctl run" in message
 
 
 def test_build_drive_leaves_in_use_by_other_unknown_when_nothing_was_read():
@@ -487,7 +510,7 @@ def test_drive_prints_the_in_use_warning_in_both_renderings(monkeypatch):
         _app(FakeStation(loco_info=replace(LOCO_128, in_use_by_other=True)), monkeypatch),
         ["drive", "30"],
     )
-    assert "another throttle holds loco 3" in human.stdout
+    assert "has driven loco 3" in human.stdout
 
 
 def test_build_drive_keeps_the_three_outcomes_apart_in_the_human_text():

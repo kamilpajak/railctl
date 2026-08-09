@@ -268,20 +268,31 @@ def build_drive(
         "direction_source": direction_source,
         "changed": changed,
         "previous_speed_decoded": previous_speed_decoded,
-        # Decoded off the ident byte and then dropped. It says another throttle
-        # holds this locomotive - exactly what an operator needs to know before
-        # commanding it, and the one field here whose UNKNOWN (no reply, or a
-        # stop that reads nothing) is a different answer from `false`.
+        # Decoded off the ident byte (bit 3) and then dropped. MEASURED
+        # 2026-08-09 (docs/probe-results.md, "`in_use_by_other` marks any past
+        # driver, including us"): it is set once ANY device has driven this
+        # locomotive, and every railctl run connects as a new device, so an
+        # earlier run of this same tool sets it. Loco 3, driven earlier, read
+        # `raw_ident=0x0C`; loco 5, never driven, read `0x04`. It persists
+        # across connections. Still worth publishing - sometimes it really is
+        # another throttle - and the one field here whose UNKNOWN (no reply, or
+        # a stop that reads nothing) is a different answer from `false`.
         "in_use_by_other": None if was is None else was.in_use_by_other,
     }
     outcome.say(
         f"loco {address} set to speed {speed} {direction_text} ({tri_state(changed)} changed)"
     )
     if was is not None and was.in_use_by_other:
+        # Worded from what the bit means, not from what it looks like it means.
+        # "another throttle holds loco 3" sent the operator hunting for a
+        # throttle that was not there on the second and every later railctl run
+        # against the same locomotive, because the flag marks any past driver
+        # and each run is a new device (measured 2026-08-09).
         outcome.warn(
             "loco_in_use_by_other",
-            f"another throttle holds loco {address}; this command was sent anyway and the "
-            f"two of you are now driving the same locomotive",
+            f"a device other than this connection has driven loco {address} - that may be an "
+            f"earlier railctl run, since every run connects as a new device, or it may be a "
+            f"second throttle driving it now; this command was sent anyway",
             address=address,
         )
     if direction_source == DIRECTION_STOP_DEFAULT:
