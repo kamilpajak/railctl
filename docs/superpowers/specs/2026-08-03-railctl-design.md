@@ -1238,7 +1238,7 @@ railctl [GLOBAL] COMMAND ...
   doctor                    run the capability probe, save ~/.config/railctl/capabilities.json
   status                    command station status (raw byte + decoded bits)
   version                   XpressNet version and command station id
-  power on|off              track power
+  power on|off|resume       track power; `on` comes up held, `resume` releases it
   stop                      emergency stop: all locomotives, or one with --address
   drive SPEED               set speed step 0-126 and direction
   function FUNC [STATE]     set F0-F28 (on|off|toggle)
@@ -1360,7 +1360,7 @@ Consequences: a partial backup exits **9** (`BackupIncompleteError(StationError)
 
 Safety rules:
 
-- `power on` sends `cmd_emergency_stop_all` (`80 80`), then `cmd_track_power_on`, then reads status, then sends speed 0 to `--address` when one is resolvable. Only the last step is proven; the stop-first prefix rests on an inference about the station's refresh buffer and is listed in the verification plan. Status **bit 2 is start mode** (0 manual, 1 automatic), never short circuit; `status` prints the raw byte alongside the decoded names.
+- `power` has three states. **`power on` comes up HELD**: it sends `cmd_track_power_on`, then `cmd_emergency_stop_all` (`80 80`), then reads status, then sends speed 0 to `--address` when one is resolvable — and it stays held. **`power resume`** sends `cmd_track_power_on` (`21 81` RESUME_OPS) and nothing else, which is the release. `power off` is unchanged. Every step of that order is measured: see `docs/probe-results.md`, "`power on`'s stop-all was in the wrong order — SETTLED 2026-08-09". The prefix sent *before* energising did nothing (the locomotive resumed its stored speed in the control run and the test run alike); sent *after*, it held stored steps 15 and 80; the release started a locomotive whose stored speed the hold had never cleared (`loco_info` read 80 throughout); and a speed telegram lands while the layout is held, which is why the idle may follow the hold. This is JMRI's `XNetPowerManager` state model with a safe default — our `power on` is their `IDLE` and our `power resume` is their `ON`. The cost was accepted: `power on` followed by `drive` no longer works in one go, because the pre-flight refuses on emergency stop (exit 20, `condition: emergency_stop`), and that refusal now suggests `power resume`. Status **bit 2 is start mode** (0 manual, 1 automatic), never short circuit; `status` prints the raw byte alongside the decoded names.
 - `drive SPEED>0`, `function` and every POM `cv` command run a status pre-flight and refuse on emergency-off (`TrackPowerError`, 20), emergency stop (20) or an active service-mode session (12). Without the power check the speed would sit in the refresh buffer and start the train when power returns. `speed 0` skips the pre-flight and is always sent.
 - Per-locomotive stop is `92 AH AL XOR`, not `E4 13` with wire value 1.
 - `function` reads current state via `cmd_loco_info` and flips one bit, because a group command carries every bit of its group. If loco info fails, exit 9 with a `--force-group` suggestion, which clears the rest of the group.
