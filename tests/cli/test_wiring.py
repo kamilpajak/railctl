@@ -440,6 +440,21 @@ def test_merge_settings_overrides_only_the_typed_fields():
     assert merged.assume_yes is False
 
 
+def test_merge_settings_applies_the_same_address_bound_build_settings_does():
+    """The bound the manifest publishes has to be the bound a command enforces.
+
+    `build_settings` checked the root-level copy and `merge_settings` did not, so
+    `railctl --address 20000 status` was refused at exit 2 while `railctl status
+    --address 20000` was accepted and reached the station - one published range, two
+    behaviours, decided by where the flag sat.
+    """
+    with pytest.raises(ValueError, match="20000"):
+        merge_settings(_settings(address=None), address=20000)
+    with pytest.raises(ValueError, match="0 is outside"):
+        merge_settings(_settings(address=None), address=0)
+    assert merge_settings(_settings(address=None), address=9999).address == 9999
+
+
 def test_merge_settings_json_flag_is_an_alias_for_format_json():
     merged = merge_settings(_settings(fmt="human"), json_flag=True)
     assert merged.fmt == "json"
@@ -911,6 +926,30 @@ def test_address_out_of_range_exits_2_before_any_command_runs(monkeypatch):
     with pytest.raises(SystemExit) as caught:
         cli_main.main()
     assert caught.value.code == 2
+
+
+def test_an_out_of_range_address_after_the_verb_is_refused_exactly_like_one_before_it(
+    monkeypatch, capsys
+):
+    """The bound the manifest publishes must not depend on where the flag sits.
+
+    Only `build_settings` applied it, so the root copy was refused and a command's own
+    copy was not - `railctl power on --address 20000` reached the station, ran
+    `emergency_stop` and `power_on`, and only then hit the range check inside
+    `Station.drive`. Two mutations for a value that could never have been valid.
+    """
+
+    def fail_if_called(*a, **k):
+        raise AssertionError("Station.open must not run when --address is out of range")
+
+    monkeypatch.setattr(Station, "open", staticmethod(fail_if_called))
+    monkeypatch.setattr(sys, "argv", ["railctl", "power", "on", "--address", "20000"])
+    with pytest.raises(SystemExit) as caught:
+        cli_main.main()
+    assert caught.value.code == 2
+    captured = capsys.readouterr()
+    assert captured.out == ""
+    assert json.loads(captured.err)["code"] == "usage"
 
 
 def test_address_out_of_range_writes_json_error_and_empty_stdout(monkeypatch, capsys):

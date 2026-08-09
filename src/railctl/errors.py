@@ -195,6 +195,63 @@ class TrackPowerError(StationError):
     code: ClassVar[str] = "track_power"
 
 
+#: The values `TrackPowerError.details["condition"]` may carry. Declared here,
+#: next to the class, because three layers write them (`Station._settle_power`,
+#: `cli/commands/throttle.preflight`, `cli/commands/power`) and one layer reads
+#: them back (`cli/_errors.default_suggestions`, which maps each to a runnable
+#: recovery). Free strings in four modules is how the reader and the writers
+#: stop agreeing.
+#:
+#: A `TrackPowerError` whose condition is not one of these gets NO suggestion.
+#: That is the point of naming them: the suggestion table used to answer any
+#: condition-less `TrackPowerError` with `railctl power resume`, the one command
+#: measured to start locomotives (docs/probe-results.md, "`power on`'s stop-all
+#: was in the wrong order", run 5), including for a `power off` that failed to
+#: settle - a failure that has nothing to do with a hold.
+CONDITION_EMERGENCY_STOP: Final[str] = "emergency_stop"
+CONDITION_EMERGENCY_OFF: Final[str] = "emergency_off"
+#: `power resume` asked to release a hold on a track with no voltage. Distinct
+#: from `emergency_off`, which is the same reading refusing a *throttle*
+#: command: the recovery here is `power on` alone, and offering the release a
+#: second time would be offering the command that was just refused.
+CONDITION_TRACK_DEAD: Final[str] = "track_dead"
+#: The station still disagreed with the power state it was commanded into,
+#: after the settle pause and a re-read. Named by what was REQUESTED, because
+#: what the track is actually doing is precisely what is not known.
+CONDITION_POWER_ON_UNSETTLED: Final[str] = "power_on_unsettled"
+CONDITION_POWER_OFF_UNSETTLED: Final[str] = "power_off_unsettled"
+
+
+class FunctionGroupUnreadableError(StationError):
+    """`function` could not read a group's current state before flipping one bit.
+
+    `Station.function_set`/`function_toggle` refuse to blind-write a group
+    rather than seed it all-zeros, because a group command carries every bit of
+    its group and a wrong zero switches off a function nobody touched. This
+    class carries the CLI's own retry command - the function and state tokens
+    the operator actually typed, plus `--force-group` - since
+    `cli/_errors.default_suggestions` is keyed by exception type and could not
+    reconstruct that argv from the exception alone.
+
+    No row in `EXIT_CODES`: like its `StationError` parent it resolves to the
+    base 9, which is what the design spec's L6 safety rules already say this
+    failure exits with.
+    """
+
+    code: ClassVar[str] = "function_group_unreadable"
+
+    def __init__(
+        self,
+        message: str,
+        *,
+        hint: str | None = None,
+        details: dict[str, object] | None = None,
+        retry_argv: list[str],
+    ) -> None:
+        super().__init__(message, hint=hint, details=details)
+        self.retry_argv = retry_argv
+
+
 class ProgrammingError(StationError):
     """Base for CV operations. Carries the human (1-based) CV number when known."""
 

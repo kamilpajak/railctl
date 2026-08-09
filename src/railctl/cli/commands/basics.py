@@ -18,7 +18,14 @@ from railctl import __version__
 from railctl.cli._errors import run
 from railctl.cli._meta import command_meta, global_option, help_epilog
 from railctl.cli.config import capabilities_path
-from railctl.cli.deps import link_info, merged_output, open_station, station_info
+from railctl.cli.deps import (
+    close_after,
+    close_quietly,
+    link_info,
+    merged_output,
+    open_station,
+    station_info,
+)
 from railctl.cli.result import CommandResult, StationInfo
 from railctl.xbus.replies import StationStatus, StationVersion
 
@@ -146,9 +153,10 @@ def register(app: typer.Typer) -> None:
                 outcome = build_status(station.status())
                 outcome.link = link_info(station, settings)
                 outcome.station = station_info(station)
-            finally:
-                station.close()
-            return outcome
+            except BaseException:
+                close_quietly(station)
+                raise
+            return close_after(station, outcome)
 
         run("status", output, work)
 
@@ -194,8 +202,9 @@ def register(app: typer.Typer) -> None:
                     protocol_version=version.version,
                     command_station_id=version.station_id,
                 )
-            finally:
-                station.close()
-            return outcome
+            except BaseException:
+                close_quietly(station)
+                raise
+            return close_after(station, outcome)
 
         run("version", output, work)

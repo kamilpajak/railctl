@@ -14,7 +14,7 @@ import time
 import traceback
 from collections.abc import Callable
 from dataclasses import dataclass
-from typing import NoReturn, TextIO
+from typing import Final, NoReturn, TextIO
 
 import typer
 
@@ -32,10 +32,15 @@ from railctl.cli.result import (
     error_code,
 )
 from railctl.errors import (
+    CONDITION_EMERGENCY_OFF,
+    CONDITION_EMERGENCY_STOP,
+    CONDITION_TRACK_DEAD,
     AbortedError,
     ConfirmationRequiredError,
+    FunctionGroupUnreadableError,
     PomReadUnsupportedError,
     RailctlError,
+    TrackPowerError,
     exit_code_for,
 )
 
@@ -58,14 +63,58 @@ class OutputContext:
     stderr: TextIO
 
 
+#: The runnable recovery for each `TrackPowerError` condition, and nothing for a
+#: condition this table does not name.
+#:
+#: `power on` stopped being the recovery for an emergency stop: as of 2026-08-09
+#: it ENERGISES AND HOLDS (docs/probe-results.md, "`power on`'s stop-all was in
+#: the wrong order"), so offering it to an operator who is already held puts them
+#: back where they started. The release alone is the whole recovery there. A dead
+#: track has to be energised first, and that leaves it held, so the release is
+#: the second half - both argv arrays are runnable, in this order.
+#:
+#: The unconditional fallback this replaced answered ANY condition-less
+#: `TrackPowerError` with those same two commands, and `railctl power resume` is
+#: measured to start every locomotive the station holds a speed for (run 5). A
+#: `power off` that failed to settle got told to release the layout. A command
+#: that may start a locomotive is only ever offered for a condition that
+#: justifies it; where the condition is unknown, the right number of suggestions
+#: is none.
+TRACK_POWER_RECOVERY: Final[dict[str, tuple[tuple[str, ...], ...]]] = {
+    CONDITION_EMERGENCY_STOP: (("railctl", "power", "resume"),),
+    CONDITION_EMERGENCY_OFF: (
+        ("railctl", "power", "on"),
+        ("railctl", "power", "resume"),
+    ),
+    CONDITION_TRACK_DEAD: (("railctl", "power", "on"),),
+}
+
+
 def default_suggestions(
     exc: BaseException, *, command: str, cv: int | None = None
 ) -> list[list[str]]:
-    """The two suggestions this project has actually needed (docs/probe-results.md R1: a POM
-    read the station never answers, and a confirmation nothing can ask for on a non-interactive
-    stdin). Everything else defaults to no suggestion rather than a guess that reads as
-    authoritative advice it is not.
+    """The four suggestions this project has actually needed (docs/probe-results.md R1: a POM
+    read the station never answers; a confirmation nothing can ask for on a non-interactive
+    stdin; a function group whose current state could not be read; and a track this tool
+    refuses to drive because the layout is in an emergency state). Everything else defaults to
+    no suggestion rather than a guess that reads as authoritative advice it is not.
+
+    `FunctionGroupUnreadableError` is the one whose argv this function cannot build. It is
+    keyed by exception type plus at most a `cv`, and the retry command needs the function token
+    (`"f2"`) and the state token (`"on"`) the operator actually typed - neither of which is
+    anywhere in the exception's type. So the raiser (`cli/commands/throttle.py`) assembles the
+    array and this reads it back, rather than the table guessing at a command-specific shape.
+
+    `TrackPowerError` is answered from `TRACK_POWER_RECOVERY` above, keyed by the condition the
+    raiser recorded. An unrecognised or missing condition gets an empty list: this table used to
+    guess there, and the guess was the command that releases the layout.
     """
+    if isinstance(exc, FunctionGroupUnreadableError):
+        # `getattr` and `_argv_arrays`, not a bare `exc.retry_argv`: the manifest builder
+        # (`_meta._class_error_row`) and the error-tree tests probe every class with
+        # `klass.__new__(klass)`, which runs no `__init__` at all, so the attribute may be
+        # absent. `report_for` reaches for `cv` with the same default for the same reason.
+        return _argv_arrays([getattr(exc, "retry_argv", None)])
     if isinstance(exc, PomReadUnsupportedError):
         suggestions = [["railctl", "doctor"]]
         if cv is not None:
@@ -73,6 +122,12 @@ def default_suggestions(
         return suggestions
     if isinstance(exc, ConfirmationRequiredError):
         return [["railctl", *command.split(), "--yes"]]
+    if isinstance(exc, TrackPowerError):
+        # `details` is read with a default because `_meta._class_error_row`
+        # probes every exception class with `klass.__new__(klass)`, which runs
+        # no `__init__` and leaves the attribute absent.
+        condition = (getattr(exc, "details", None) or {}).get("condition")
+        return [list(argv) for argv in TRACK_POWER_RECOVERY.get(condition, ())]
     return []
 
 
@@ -122,16 +177,18 @@ def usage_report(exc: BaseException) -> ErrorReport:
     neither `error_code` nor `exit_code_for` knows anything about it, and a script would then
     be told this tool has a bug when the operator simply typed a bad flag.
 
-    `suggestions` is read off the exception rather than hardcoded to `[]`, so a `UsageProblem`
-    (`cli/deps.py`) reaches the envelope with the runnable argv array it was raised with. Any
-    other `ValueError` has no such attribute and still publishes an empty list.
+    `suggestions` and `details` are read off the exception rather than hardcoded to `[]`/`{}`,
+    so a `UsageProblem` (`cli/deps.py`) reaches the envelope with the runnable argv array and
+    the structured reason it was raised with. Any other `ValueError` has neither attribute and
+    still publishes an empty list and an empty object.
     """
+    details = getattr(exc, "details", None)
     return ErrorReport(
         code=USAGE_CODE,
         message=str(exc),
         retryable=False,
         exit_code=USAGE_EXIT_CODE,
-        details={},
+        details=dict(details) if isinstance(details, dict) else {},
         suggestions=_argv_arrays(getattr(exc, "suggestions", None)),
         hint=getattr(exc, "hint", None),
     )

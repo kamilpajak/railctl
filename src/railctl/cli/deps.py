@@ -13,7 +13,7 @@ from __future__ import annotations
 import dataclasses
 import logging
 import os
-from collections.abc import Mapping
+from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Final, Literal, TextIO
@@ -22,9 +22,20 @@ from railctl import errors
 from railctl.cli._errors import OutputContext
 from railctl.cli.config import DEFAULT_TARGET, VERBOSE_ENV, Config, pick
 from railctl.cli.render import want_color
-from railctl.cli.result import Format, LinkInfo, StationInfo
+from railctl.cli.result import CommandResult, Format, LinkInfo, StationInfo, error_code
 from railctl.station import TIMING, Station
 from railctl.xbus.address import LOCO_ADDR_MAX, LOCO_ADDR_MIN
+from railctl.xbus.replies import LocoInfo
+from railctl.xbus.speed import Direction
+
+#: A direction is a word in every rendering, never a wire value, and it is
+#: spelled here once. `drive` and `power` both report one, and two private
+#: copies of this table are how they start disagreeing about the spelling a
+#: script matches on.
+DIRECTION_TEXT: Final[dict[Direction, str]] = {
+    Direction.FORWARD: "forward",
+    Direction.REVERSE: "reverse",
+}
 
 # Public, not `_ALLOWED_*`, because `cli/_meta.py` publishes these exact tuples as the
 # `enum` list of `--format` and `--color` in `railctl schema`'s manifest. Read there, never
@@ -65,8 +76,19 @@ class UsageProblem(ValueError):
     array instead of a sentence an agent would have to parse back apart.
     """
 
-    def __init__(self, message: str, *, suggestions: list[list[str]]) -> None:
+    def __init__(
+        self,
+        message: str,
+        *,
+        suggestions: list[list[str]],
+        details: dict[str, object] | None = None,
+    ) -> None:
         super().__init__(message)
+        # The same field `RailctlError` carries, for the same reason: the prose
+        # of `message` is free to change and a caller must not have to parse it
+        # to learn WHICH condition fired. `_errors.usage_report` publishes this
+        # in the envelope's `details`.
+        self.details = dict(details or {})
         # Checked, not merely annotated. The envelope hands this field straight to an agent
         # as something to run, and a bare string used to arrive there split into
         # `[["r"], ["a"], ["i"], ["l"], ...]` - valid JSON that runs nothing. Failing here
@@ -115,6 +137,51 @@ def check_choice(name: str, value: object, allowed: tuple[str, ...]) -> None:
         raise ValueError(f"--{name} must be one of {allowed}, got {value!r}")
 
 
+def checked_enum(
+    value: str, *, name: str, allowed: Sequence[str], suggestions: list[list[str]]
+) -> str:
+    """A positional enum, validated HERE and refused through OUR envelope.
+
+    `typer_argument` attaches no Click-level check, for the same reason
+    `typer_option` attaches no `callback=`: a `typer.BadParameter` exits through
+    Click's own usage box and never emits `railctl/error/v1`. That leaves the
+    check to the command body, and `power sideways` was silently running `power
+    off` until someone noticed - the enum was published metadata that nothing
+    enforced.
+
+    `allowed` is passed in from the `Argument` row's own `enum` tuple, never
+    retyped, so the list a caller reads out of `railctl schema` is the list this
+    function compares against.
+    """
+    if value in allowed:
+        return value
+    raise UsageProblem(
+        f"{name} takes {' or '.join(allowed)}, not {value!r}",
+        suggestions=suggestions,
+        details={"argument": name, "allowed": list(allowed), "got": value},
+    )
+
+
+def check_address(value: int | None) -> None:
+    """Reject a locomotive address outside the bound the manifest publishes.
+
+    One function, called wherever an address ENTERS this CLI: the root
+    callback's copy through `build_settings`, a command's own `--address`
+    through `merge_settings`, and `stop`'s command-scoped `--address`, which
+    deliberately goes through neither. The check used to live only in
+    `build_settings`, so the bound the manifest advertises and the bound a
+    command enforced differed by where the flag was typed - `railctl --address
+    20000 status` was refused at exit 2 and `railctl power on --address 20000`
+    was not, and the range check `Station.drive` does on its own arrives after
+    two mutations have already gone out.
+
+    `None` passes: no address is a real answer, and `require_address` is what
+    turns "none given" into a usage error for the commands that need one.
+    """
+    if value is not None and not (LOCO_ADDR_MIN <= value <= LOCO_ADDR_MAX):
+        raise ValueError(f"--address {value} is outside {LOCO_ADDR_MIN}..{LOCO_ADDR_MAX}")
+
+
 def check_format_conflict(*, json_flag: bool, fmt: str | None) -> None:
     """`--json` is an alias for `--format=json`, so it is folded into the same CLI-flag slot
     `pick()` sees - not a second, competing source. Passing both `--format=ndjson` and
@@ -160,10 +227,7 @@ def build_settings(
     resolved_address = pick(
         address, env.get("RAILCTL_ADDRESS"), config.address, None, name="address", cast=int
     )
-    if resolved_address is not None and not (LOCO_ADDR_MIN <= resolved_address <= LOCO_ADDR_MAX):
-        raise ValueError(
-            f"--address {resolved_address} is outside {LOCO_ADDR_MIN}..{LOCO_ADDR_MAX}"
-        )
+    check_address(resolved_address)
 
     resolved_verbose = pick(
         verbose, env.get(VERBOSE_ENV), config.verbose, DEFAULT_VERBOSE, name="verbose", cast=int
@@ -230,6 +294,7 @@ def merge_settings(
     if target is not None:
         updates["target"] = target
     if address is not None:
+        check_address(address)
         updates["address"] = address
     # The union of both flag positions, not this level's copy alone: `--format` before the
     # verb and `--json` after it are one contradiction, however they are spread around the
@@ -364,6 +429,122 @@ def open_station(settings: Settings, *, capabilities_path: Path | None) -> Stati
         capabilities_path=capabilities_path,
         timing=TIMING,
     )
+
+
+#: What a command publishes when closing the link failed after the work was done.
+CLOSE_FAILED_WARNING: Final[str] = "link_close_failed"
+
+
+def close_after(station: Station, outcome: CommandResult) -> CommandResult:
+    """Close the link without letting bookkeeping destroy a finished answer.
+
+    `station.close()` in a bare `finally` looks harmless and is not: a `finally`
+    that raises discards the pending return, so an exception there replaces a
+    complete `CommandResult` with a crash. And `close()` is not a quiet
+    operation - it persists the capabilities file, so it can raise a plain
+    `OSError` out of `mkdir`, `mkstemp`, `json.dump` or `os.replace`.
+
+    Measured consequence before this existed, driven against a stub: a
+    `power on` that had energised the track and could not confirm the hold -
+    the state whose whole point is to be reported loudly - exited 1 `internal`
+    with EMPTY stdout, and the sentence telling the operator to treat the
+    layout as live and free was never printed. Same shape as the energise-
+    outside-the-try defect, reached through the close path instead.
+
+    So the outcome wins. A failure to save capabilities is a real thing to
+    report and a warning is where it belongs; it is not a reason to withhold
+    what the command just did to the layout.
+    """
+    try:
+        station.close()
+    except (errors.RailctlError, OSError) as exc:
+        outcome.warn(
+            CLOSE_FAILED_WARNING,
+            f"the command finished, but closing the link failed: {exc}. Anything this run "
+            f"learned about the station may not have been saved",
+            error_code=error_code(exc) if isinstance(exc, errors.RailctlError) else "os_error",
+        )
+    return outcome
+
+
+def close_quietly(station: Station) -> None:
+    """Close while an exception is already on its way out.
+
+    The original failure is the answer the caller needs; a close error raised
+    on top of it would replace a `TrackPowerError` (exit 20, with a runnable
+    suggestion) by an `OSError` reported as an internal bug (exit 1). Nothing
+    is swallowed that a caller could act on - the command has already failed,
+    and its own exception says why.
+    """
+    try:
+        station.close()
+    except (errors.RailctlError, OSError):
+        pass
+
+
+def read_loco(station: Station, address: int) -> LocoInfo | None:
+    """The locomotive's current state, or None when the station could not say.
+
+    None means UNKNOWN, never "standing still": every caller branches on it
+    separately rather than folding it into a default speed of 0.
+
+    The catch is `RailctlError`, not `StationError`. Every read that reaches
+    this function is cosmetic - a `changed` field, a direction to preserve, a
+    running notice - and none of it may decide whether a mutation goes out.
+    `LinkTimeout`, `TransportError`, `ProtocolError`, `XBusChecksumError` and
+    `UnsupportedCommandError` all subclass `RailctlError` directly rather than
+    `StationError`, so the narrower catch let a `61 82` refusal of the loco-info
+    request - a working link, a healthy track - abort a command whose own
+    telegram would have gone straight through.
+
+    NOT `except Exception`. An address outside 1..9999 raises `ValueError` from
+    `Station._validate_address`, and that has to keep failing: it says the
+    caller asked about a locomotive that cannot exist, which is a different
+    answer from the station declining to describe one that can.
+
+    Lives here rather than in `commands/throttle.py` because `commands/power.py`
+    needs the same guarantee for the direction it preserves, and one command
+    module importing another is how the two copies start disagreeing about
+    which exceptions are cosmetic.
+    """
+    try:
+        return station.loco_info(address)
+    except errors.RailctlError:
+        return None
+
+
+@dataclass(frozen=True, slots=True)
+class LocoRead:
+    """What `read_loco_result` learned, including why it learned nothing.
+
+    `info is None` is UNKNOWN, exactly as before. What this adds is `error`: the
+    published code of the exception that was swallowed, or `None` when the read
+    itself succeeded. Without it, three unlike causes reached the caller as one
+    answer - a link that timed out, a station that refused the loco-info request
+    with `61 82`, and one garbled reply frame all became a bare `None`, and the
+    refusal built from it published `retryable: false` for a fault that a retry
+    might well clear.
+
+    The code string is the same one the error envelope publishes, so a caller
+    can branch on `details.read_error == "link_timeout"` with the vocabulary it
+    already has from `railctl schema`.
+    """
+
+    info: LocoInfo | None
+    error: str | None
+
+
+def read_loco_result(station: Station, address: int) -> LocoRead:
+    """`read_loco`, but it says why when it comes back empty.
+
+    Same catch and the same guarantee: no read that reaches here may decide
+    whether a mutation goes out. `ValueError` from an out-of-range address is
+    still not caught - see `read_loco`.
+    """
+    try:
+        return LocoRead(info=station.loco_info(address), error=None)
+    except errors.RailctlError as exc:
+        return LocoRead(info=None, error=error_code(exc))
 
 
 def link_info(station: Station, settings: Settings) -> LinkInfo:
