@@ -41,6 +41,8 @@ from railctl.cli.deps import (
     DIRECTION_TEXT,
     check_address,
     checked_enum,
+    close_after,
+    close_quietly,
     merged_output,
     open_station,
     read_loco,
@@ -798,12 +800,15 @@ def register(app: typer.Typer) -> None:
             station = open_station(settings, capabilities_path=capabilities_path())
             try:
                 if wanted == "on":
-                    return _power_on(station, settings.address)
-                if wanted == "resume":
-                    return _power_resume(station)
-                return _power_off(station)
-            finally:
-                station.close()
+                    outcome = _power_on(station, settings.address)
+                elif wanted == "resume":
+                    outcome = _power_resume(station)
+                else:
+                    outcome = _power_off(station)
+            except BaseException:
+                close_quietly(station)
+                raise
+            return close_after(station, outcome)
 
         run("power", output, work)
 
@@ -848,8 +853,10 @@ def register(app: typer.Typer) -> None:
                 # Through the facade's own emergency-stop path, which keeps
                 # track power on and is not an ordinary speed-zero command.
                 station.emergency_stop(address=address)
-                return build_stop(address)
-            finally:
-                station.close()
+                outcome = build_stop(address)
+            except BaseException:
+                close_quietly(station)
+                raise
+            return close_after(station, outcome)
 
         run("stop", output, work)

@@ -22,7 +22,7 @@ from railctl import errors
 from railctl.cli._errors import OutputContext
 from railctl.cli.config import DEFAULT_TARGET, VERBOSE_ENV, Config, pick
 from railctl.cli.render import want_color
-from railctl.cli.result import Format, LinkInfo, StationInfo, error_code
+from railctl.cli.result import CommandResult, Format, LinkInfo, StationInfo, error_code
 from railctl.station import TIMING, Station
 from railctl.xbus.address import LOCO_ADDR_MAX, LOCO_ADDR_MIN
 from railctl.xbus.replies import LocoInfo
@@ -429,6 +429,57 @@ def open_station(settings: Settings, *, capabilities_path: Path | None) -> Stati
         capabilities_path=capabilities_path,
         timing=TIMING,
     )
+
+
+#: What a command publishes when closing the link failed after the work was done.
+CLOSE_FAILED_WARNING: Final[str] = "link_close_failed"
+
+
+def close_after(station: Station, outcome: CommandResult) -> CommandResult:
+    """Close the link without letting bookkeeping destroy a finished answer.
+
+    `station.close()` in a bare `finally` looks harmless and is not: a `finally`
+    that raises discards the pending return, so an exception there replaces a
+    complete `CommandResult` with a crash. And `close()` is not a quiet
+    operation - it persists the capabilities file, so it can raise a plain
+    `OSError` out of `mkdir`, `mkstemp`, `json.dump` or `os.replace`.
+
+    Measured consequence before this existed, driven against a stub: a
+    `power on` that had energised the track and could not confirm the hold -
+    the state whose whole point is to be reported loudly - exited 1 `internal`
+    with EMPTY stdout, and the sentence telling the operator to treat the
+    layout as live and free was never printed. Same shape as the energise-
+    outside-the-try defect, reached through the close path instead.
+
+    So the outcome wins. A failure to save capabilities is a real thing to
+    report and a warning is where it belongs; it is not a reason to withhold
+    what the command just did to the layout.
+    """
+    try:
+        station.close()
+    except (errors.RailctlError, OSError) as exc:
+        outcome.warn(
+            CLOSE_FAILED_WARNING,
+            f"the command finished, but closing the link failed: {exc}. Anything this run "
+            f"learned about the station may not have been saved",
+            error_code=error_code(exc) if isinstance(exc, errors.RailctlError) else "os_error",
+        )
+    return outcome
+
+
+def close_quietly(station: Station) -> None:
+    """Close while an exception is already on its way out.
+
+    The original failure is the answer the caller needs; a close error raised
+    on top of it would replace a `TrackPowerError` (exit 20, with a runnable
+    suggestion) by an `OSError` reported as an internal bug (exit 1). Nothing
+    is swallowed that a caller could act on - the command has already failed,
+    and its own exception says why.
+    """
+    try:
+        station.close()
+    except (errors.RailctlError, OSError):
+        pass
 
 
 def read_loco(station: Station, address: int) -> LocoInfo | None:

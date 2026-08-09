@@ -41,6 +41,8 @@ from railctl.cli.deps import (
     DIRECTION_TEXT,
     UsageProblem,
     checked_enum,
+    close_after,
+    close_quietly,
     merged_output,
     open_station,
     read_loco,
@@ -530,9 +532,11 @@ def register(app: typer.Typer) -> None:
                         ),
                         file=output.stderr,
                     )
-                return build_drive(resolved, speed, direction, was=was, direction_source=source)
-            finally:
-                station.close()
+                outcome = build_drive(resolved, speed, direction, was=was, direction_source=source)
+            except BaseException:
+                close_quietly(station)
+                raise
+            return close_after(station, outcome)
 
         run("drive", output, work)
 
@@ -619,8 +623,9 @@ def register(app: typer.Typer) -> None:
                     ) from exc
                 result = build_function(resolved, func_num, wanted_state, now_on=now_on)
                 _warn_if_running(read_loco(station, resolved), resolved, output.stderr)
-                return result
-            finally:
-                station.close()
+            except BaseException:
+                close_quietly(station)
+                raise
+            return close_after(station, result)
 
         run("function", output, work)

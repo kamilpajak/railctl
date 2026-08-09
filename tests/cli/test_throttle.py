@@ -119,11 +119,13 @@ class FakeStation:
         function_toggle_result: bool = True,
         function_raises: bool = False,
         function_post_write_error: BaseException | None = None,
+        close_raises: BaseException | None = None,
     ) -> None:
         self.calls: list[tuple[str, tuple[Any, ...], dict[str, Any]]] = []
         self._status = status
         self._loco_info = loco_info
         self._loco_info_raises = loco_info_raises
+        self._close_raises = close_raises
         self._function_toggle_result = function_toggle_result
         self._function_raises = function_raises
         self._function_post_write_error = function_post_write_error
@@ -182,6 +184,8 @@ class FakeStation:
 
     def close(self) -> None:
         self._record("close")
+        if self._close_raises is not None:
+            raise self._close_raises
 
 
 def _settings(*, address: int | None = 3, fmt: str = "human", yes: bool = False) -> Settings:
@@ -2085,3 +2089,43 @@ def test_function_group_unreadable_carries_its_retry_argv_and_the_station_exit_c
     # No row of its own in EXIT_CODES: it resolves to RailctlError's base 9,
     # which is what the spec's "exit 9 with a --force-group suggestion" says.
     assert exit_code_for(exc) == 9
+
+
+# -- a finished answer survives a failure to close ----------------------------
+
+
+def test_a_close_failure_does_not_throw_away_what_the_command_already_did(monkeypatch):
+    """`station.close()` in a bare `finally` discards the pending return.
+
+    And `close()` is not quiet: it persists the capabilities file, so it can raise a plain
+    `OSError` out of `mkdir`, `mkstemp`, `json.dump` or `os.replace`. Before this was fixed, a
+    `power on` that had energised the track and could not confirm the hold - the state whose
+    entire purpose is to be reported loudly - exited 1 `internal` with EMPTY stdout, and the
+    sentence telling the operator to treat the layout as live and free was never printed.
+
+    The outcome wins. A capabilities file that could not be saved is worth reporting and a
+    warning is where it belongs; it is not a reason to withhold what just happened to the
+    layout.
+    """
+    station = FakeStation(
+        status=HELD_STATUS, close_raises=OSError(28, "No space left on device")
+    )
+    app = _app(station, monkeypatch, address=3, fmt="json")
+    result = runner.invoke(app, ["power", "on"])
+    assert result.exit_code == 0, result.stderr
+    payload = json.loads(result.stdout)
+    assert payload["result"]["state"] == "on"
+    assert "link_close_failed" in [w["name"] for w in payload["warnings"]]
+
+
+def test_a_close_failure_never_masks_the_error_the_command_already_raised(monkeypatch):
+    """The original failure is the answer; a close error on top of it would replace a
+    `TrackPowerError` (exit 20, with a runnable suggestion) by an `OSError` reported as an
+    internal bug (exit 1) - the operator loses both the reason and the remedy."""
+    station = FakeStation(
+        status=EMERGENCY_OFF_STATUS, close_raises=OSError(28, "No space left on device")
+    )
+    app = _app(station, monkeypatch, address=3, fmt="json")
+    result = runner.invoke(app, ["drive", "30"])
+    assert result.exit_code == 20
+    assert json.loads(result.stderr)["code"] == "track_power"
