@@ -12,10 +12,11 @@ import json
 import pytest
 from typer.testing import CliRunner
 
-from railctl.cli._errors import report_for
+from railctl.cli._errors import OutputContext, report_for
 from railctl.cli._meta import COMMANDS
 from railctl.cli.commands import monitor
 from railctl.cli.commands.monitor import MONITOR_SCHEMA, build_monitor, stream_monitor
+from railctl.cli.deps import Settings
 from railctl.cli.main import app as real_app
 from railctl.cli.render import NdjsonStream, render
 from railctl.errors import DecoderNotRespondingError
@@ -411,3 +412,38 @@ def test_monitors_help_explains_what_exit_nine_means_for_a_monitor():
     result = CliRunner().invoke(real_app, ["monitor", "--help"])
     assert result.exit_code == 0
     assert "Ctrl-C" in result.stdout
+
+
+def test_the_human_stream_flushes_each_event_as_it_arrives(monkeypatch, tmp_path):
+    """The other streaming path. `render()` never sees these lines - the command writes
+    them itself as the broadcasts arrive - so nothing else in the pipeline would flush
+    them, and `railctl monitor | grep power` showed nothing until 4 KB had built up."""
+    events = [
+        StationEvent(at=1.0, name="power.on", detail="on", payload={}),
+        StationEvent(at=2.0, name="power.off", detail="off", payload={}),
+    ]
+    monkeypatch.setattr(
+        monitor, "open_station", lambda settings, *, capabilities_path: _EventStation(events)
+    )
+    monkeypatch.setenv("XDG_CONFIG_HOME", str(tmp_path))
+    stdout = _FlushCountingStream()
+    output = OutputContext(
+        fmt="human",
+        stdout_color=False,
+        stderr_color=False,
+        stdout=stdout,
+        stderr=io.StringIO(),
+    )
+    settings = Settings(
+        target="serial:fake",
+        address=None,
+        fmt="human",
+        verbose=0,
+        color="never",
+        assume_yes=True,
+        interactive=False,
+    )
+
+    monitor._work(settings, output, 2)
+
+    assert stdout.flushes == 2
