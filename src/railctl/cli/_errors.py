@@ -89,14 +89,25 @@ def default_suggestions(
     if isinstance(exc, ConfirmationRequiredError):
         return [["railctl", *command.split(), "--yes"]]
     if isinstance(exc, TrackPowerError):
-        # The recovery for both emergency states this tool refuses on, and the
-        # only one it has: `power on` clears emergency stop and re-energises a
-        # dead track. It sat in the prose of the refusal message, where an
-        # agent would have had to parse a sentence to find a command it can
-        # run. Listed after the two above because `TrackPowerError` is a
-        # `StationError` and neither of them is, so no ordering question
-        # arises - this is placement for reading, not for precedence.
-        return [["railctl", "power", "on"]]
+        # The two emergency states this tool refuses on need different argv,
+        # because `power on` stopped being the recovery for one of them: as of
+        # 2026-08-09 it ENERGISES AND HOLDS (docs/probe-results.md, "`power
+        # on`'s stop-all was in the wrong order"), so offering it to an
+        # operator who is already held would put them back where they started.
+        #
+        # - emergency stop: the track has voltage and everything is held, so
+        #   the release alone is the whole recovery.
+        # - anything else, emergency off included: the track is dead, so it has
+        #   to be energised first - and that leaves it held, so the release is
+        #   the second half. Both argv arrays are runnable, in this order.
+        #
+        # `details` is read with a default because `_meta._class_error_row`
+        # probes every exception class with `klass.__new__(klass)`, which runs
+        # no `__init__`, and `Station._settle_power` raises this class with no
+        # details of its own.
+        if (getattr(exc, "details", None) or {}).get("condition") == "emergency_stop":
+            return [["railctl", "power", "resume"]]
+        return [["railctl", "power", "on"], ["railctl", "power", "resume"]]
     return []
 
 

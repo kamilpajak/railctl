@@ -326,11 +326,39 @@ def test_default_suggestions_is_empty_for_an_exception_with_no_known_fix():
     assert default_suggestions(XBusChecksumError("trailing XOR byte"), command="drive") == []
 
 
-def test_default_suggestions_offers_power_on_for_a_refused_track():
-    """The pre-flight refusal names `railctl power on` in its prose. An agent should not
-    have to parse a sentence to find the one command that clears both emergency states."""
-    exc = TrackPowerError("the layout is in emergency stop (the track still has voltage)")
-    assert default_suggestions(exc, command="drive") == [["railctl", "power", "on"]]
+def test_default_suggestions_offers_the_release_when_the_layout_is_merely_held():
+    """`power on` is no longer the recovery for an emergency stop.
+
+    Measured 2026-08-09 (docs/probe-results.md): `power on` now energises the track and
+    LEAVES it held, so suggesting it to an operator whose refusal was an emergency stop
+    hands them back the state they were refused in. The release is `power resume`.
+    """
+    exc = TrackPowerError(
+        "the layout is in emergency stop (the track still has voltage)",
+        details={"condition": "emergency_stop"},
+    )
+    assert default_suggestions(exc, command="drive") == [["railctl", "power", "resume"]]
+
+
+def test_default_suggestions_offers_both_halves_when_the_track_is_dead():
+    """A dead track needs energising AND releasing, in that order, because the first
+    command now ends held. One argv array would leave the operator one command short."""
+    exc = TrackPowerError(
+        "the track has no voltage (emergency off)", details={"condition": "emergency_off"}
+    )
+    assert default_suggestions(exc, command="drive") == [
+        ["railctl", "power", "on"],
+        ["railctl", "power", "resume"],
+    ]
+
+
+def test_default_suggestions_falls_back_to_both_when_the_error_names_no_condition():
+    """`Station._settle_power` raises `TrackPowerError` with no `details` at all, and
+    `_class_error_row` probes the class with `__new__`, so the lookup must not assume
+    the attribute is there."""
+    assert default_suggestions(TrackPowerError("the station still reports off"), command="power")[
+        0
+    ] == ["railctl", "power", "on"]
 
 
 def test_default_suggestions_offers_yes_for_a_blocked_confirmation():

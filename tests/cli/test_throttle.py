@@ -311,16 +311,35 @@ def test_the_service_mode_refusal_carries_its_condition_too():
 
 
 @pytest.mark.parametrize("argv", [["drive", "30"], ["function", "f2", "on"]])
-def test_a_refused_command_hands_back_a_runnable_recovery(monkeypatch, argv):
-    """`railctl power on` was named in the prose only, so an agent had to parse
-    a sentence to find the one command that clears both emergency states."""
-    station = FakeStation(status=EMERGENCY_OFF_STATUS)
+@pytest.mark.parametrize(
+    ("status", "condition", "suggestions"),
+    [
+        (
+            EMERGENCY_OFF_STATUS,
+            "emergency_off",
+            [["railctl", "power", "on"], ["railctl", "power", "resume"]],
+        ),
+        (EMERGENCY_STOP_STATUS, "emergency_stop", [["railctl", "power", "resume"]]),
+    ],
+    ids=["emergency-off", "emergency-stop"],
+)
+def test_a_refused_command_hands_back_a_runnable_recovery(
+    monkeypatch, argv, status, condition, suggestions
+):
+    """The recovery was named in the prose only, so an agent had to parse a sentence to
+    find it - and since 2026-08-09 the two conditions no longer share one answer.
+
+    `power on` ends HELD (docs/probe-results.md), so it recovers a dead track but not a
+    held one: an operator refused on emergency stop who runs it lands back in the state
+    they were refused in. A dead track needs both commands, in the order given.
+    """
+    station = FakeStation(status=status)
     app = _app(station, monkeypatch, fmt="json")
     result = runner.invoke(app, argv)
     assert result.exit_code == 20
     error = json.loads(result.stderr)
-    assert error["suggestions"] == [["railctl", "power", "on"]]
-    assert error["details"]["condition"] == "emergency_off"
+    assert error["suggestions"] == suggestions
+    assert error["details"]["condition"] == condition
 
 
 def test_preflight_names_the_speed_it_refused_when_there_is_one():
