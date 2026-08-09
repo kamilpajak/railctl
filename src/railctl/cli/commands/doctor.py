@@ -48,7 +48,7 @@ from railctl.cli.deps import (
     open_station,
     station_info,
 )
-from railctl.cli.result import PARTIAL_EXIT_CODE, CommandResult, tri_state
+from railctl.cli.result import PARTIAL_EXIT_CODE, CommandResult, ResultWarning, tri_state
 from railctl.station import Capabilities, Check, DoctorReport, exit_code_for_report, verdict_lines
 
 if TYPE_CHECKING:
@@ -109,6 +109,11 @@ _MAY_BE_LIVE: Final[str] = (
     "the power-on telegram went out and was never confirmed, so the track MAY be live"
 )
 _NOT_TOUCHED: Final[str] = "this run did not change the track power"
+
+#: The warning name for a probe that finished and could not write its own record.
+#: `saved_to: null` says a file was not written; this says why, under a name a script
+#: can branch on without matching prose.
+CAPABILITIES_NOT_SAVED_WARNING: Final[str] = "capabilities_not_saved"
 
 # Built once, at import time - see the same B008 note in main.py.
 _TARGET = global_option("--target")
@@ -269,7 +274,9 @@ def build_doctor(report: DoctorReport, *, saved_to: Path | None) -> CommandResul
     return result
 
 
-def _save_capabilities(caps: Capabilities, *, no_save: bool, stderr: TextIO) -> Path | None:
+def _save_capabilities(
+    caps: Capabilities, *, no_save: bool, stderr: TextIO
+) -> tuple[Path | None, ResultWarning | None]:
     """Write the probe's own record, and return the path ONLY when something was
     written. Issue #15: every command reads `capabilities_path()` and nothing wrote
     it, so every run started from `Capabilities.unknown`.
@@ -278,19 +285,44 @@ def _save_capabilities(caps: Capabilities, *, no_save: bool, stderr: TextIO) -> 
     writing when the link identity is unknown - an identity with no stable name has
     nowhere safe to persist to - and reporting the path anyway would tell a caller to
     go and read a file that is not there.
+
+    `OSError` is caught here rather than left to `run()`. `Capabilities.save` mkdirs,
+    writes a temp file and renames, and any of those can fail on a read-only or full
+    config directory; uncaught, that turned a finished 30-second probe into exit 1,
+    `code: internal`, EMPTY stdout - the probe's own measurements gone, and with them
+    the layout block saying whether the run left the track live. Exactly the failure
+    `deps.close_after` records this project fixing for `power on`, on the save path
+    instead of the close path, and worse here because the doctor is the command that
+    may have energised the layout.
+
+    So the probe's result wins: a file that could not be written is a warning and a
+    `saved_to: null`, never a reason to withhold what the doctor just measured. The
+    exit code stays the probe's own - what failed is a side effect, not the
+    measurement - and the warning is what a script branches on.
     """
     if no_save:
         print("capabilities not saved (--no-save)", file=stderr)
-        return None
+        return None, None
     path = capabilities_path(os.environ)
-    if caps.save(path):
-        return path
+    try:
+        written = caps.save(path)
+    except OSError as exc:
+        return None, ResultWarning(
+            name=CAPABILITIES_NOT_SAVED_WARNING,
+            message=(
+                f"the probe finished, but writing {path} failed: {exc}. Every other command "
+                f"reads that file, so they will keep starting from what it held before this run"
+            ),
+            details={"path": str(path), "error": str(exc)},
+        )
+    if written:
+        return path, None
     print(
         f"capabilities not saved: the link identity is {caps.link_identity!r}, which has no "
         f"stable name to file them under",
         file=stderr,
     )
-    return None
+    return None, None
 
 
 def register(app: typer.Typer) -> None:
@@ -344,10 +376,12 @@ def register(app: typer.Typer) -> None:
                     allow_power_on=power_on,
                     use_programming_track=not no_programming_track,
                 )
-                saved_to = _save_capabilities(
+                saved_to, save_warning = _save_capabilities(
                     report.capabilities, no_save=no_save, stderr=output.stderr
                 )
                 outcome = build_doctor(report, saved_to=saved_to)
+                if save_warning is not None:
+                    outcome.warnings.append(save_warning)
                 outcome.link = link_info(station, settings)
                 outcome.station = station_info(station)
             except BaseException:

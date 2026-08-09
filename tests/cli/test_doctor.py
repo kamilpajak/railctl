@@ -17,7 +17,11 @@ from typer.testing import CliRunner
 
 from railctl.cli._errors import report_for
 from railctl.cli.commands import doctor
-from railctl.cli.commands.doctor import DOCTOR_SCHEMA, build_doctor
+from railctl.cli.commands.doctor import (
+    CAPABILITIES_NOT_SAVED_WARNING,
+    DOCTOR_SCHEMA,
+    build_doctor,
+)
 from railctl.cli.deps import HELD_LINES, RESUME_COMMAND
 from railctl.cli.main import app as real_app
 from railctl.cli.render import render
@@ -406,3 +410,28 @@ def test_address_after_the_verb_parses_which_is_m6s_own_acceptance_sentence(monk
     result = CliRunner().invoke(app, ["doctor", "--address", "3", "--no-save"])
     assert result.exit_code == 0, result.stderr
     assert fake_station.calls["address"] == 3
+
+
+def test_a_capabilities_file_that_cannot_be_written_still_prints_the_probe(monkeypatch, tmp_path):
+    """C3: `Capabilities.save` mkdirs, writes a temp file and renames, and every one
+    of those raises a bare `OSError` on a read-only config directory. Uncaught, that
+    turned a finished probe into exit 1, `code: internal`, with EMPTY stdout - the
+    measurements gone, and the layout block that says whether the track is live gone
+    with them. The probe's result wins: a warning and `saved_to: null`.
+    """
+    report = _identified(_bench_report(powered=False), "serial:FAKE:3")
+    app, _ = _wire(monkeypatch, tmp_path, report)
+    config_dir = tmp_path / ".config" / "railctl"
+    config_dir.mkdir(parents=True)
+    config_dir.chmod(0o500)
+    try:
+        result = CliRunner().invoke(app, ["doctor", "--format", "json"])
+    finally:
+        config_dir.chmod(0o700)
+
+    assert result.exit_code == 0, result.stderr
+    body = json.loads(result.stdout)  # stdout is not empty and holds one JSON value
+    assert body["result"]["saved_to"] is None
+    assert body["result"]["checks"][0]["id"] == "D0"
+    assert [w["name"] for w in body["warnings"]] == [CAPABILITIES_NOT_SAVED_WARNING]
+    assert body["warnings"][0]["details"]["path"] == str(config_dir / "capabilities.json")
