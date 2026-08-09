@@ -680,6 +680,26 @@ stop-all and then quietly release it — releasing is exactly what run 5 did. Ei
 command leaves the layout held and says how to release it, or it zeroes the stored speed of
 every locomotive it knows about, and it only ever knows `--address`.
 
+### Two more runs, which fix the order of steps inside the new `power on`
+
+The chosen design energises, holds with `80 80`, then zeroes the addressed locomotive so a
+later release cannot start it. That last telegram goes out while the layout is held, which
+raises two questions neither of the runs above answers.
+
+| # | run | result |
+| --- | --- | --- |
+| 6 | while held at `0x05`, send `drive(3, 0)`, then read `loco_info` | reports **speed 0** |
+| 7 | same run, then read the STATUS again | still `0x05`, **hold intact** |
+
+Run 6 says the zero may be sent after the hold rather than before it. Run 7 is the one that
+matters for what the command is allowed to claim: a per-locomotive speed telegram does **not**
+clear the station-wide emergency stop, so `power on` telling the operator the layout is held
+is true at the moment it says so.
+
+Run 7 was added after a review pointed out that run 6 alone proves the telegram arrives and
+says nothing about whether the hold survives it. Nothing could move during either run — every
+telegram involved is a stop, a zero, or a read.
+
 ### Also observed
 
 - `drive 0` brakes along the decoder's deceleration curve; `80 80` cuts immediately. Watched:
