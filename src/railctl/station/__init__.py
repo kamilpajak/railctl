@@ -44,6 +44,7 @@ from railctl.station.types import (
     ProgMode,
     StationEvent,
     decoder_family,
+    layout_json,
     treats_cv144_as_lock,
 )
 from railctl.xbus.dialect import CvEncoding
@@ -87,6 +88,7 @@ __all__ = [
     "Timing",
     "decoder_family",
     "exit_code_for_report",
+    "layout_json",
     "run_probe",
     "treats_cv144_as_lock",
     "verdict_lines",

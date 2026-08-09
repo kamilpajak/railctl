@@ -49,7 +49,14 @@ from railctl.cli.deps import (
     station_info,
 )
 from railctl.cli.result import PARTIAL_EXIT_CODE, CommandResult, ResultWarning, tri_state
-from railctl.station import Capabilities, Check, DoctorReport, exit_code_for_report, verdict_lines
+from railctl.station import (
+    Capabilities,
+    Check,
+    DoctorReport,
+    exit_code_for_report,
+    layout_json,
+    verdict_lines,
+)
 
 if TYPE_CHECKING:
     from pathlib import Path
@@ -83,23 +90,19 @@ CAPABILITY_FIELDS: Final[tuple[tuple[str, str, str], ...]] = (
     ("single_function_cmd", "Single-function command", "bool"),
 )
 
-#: The fields of `LayoutState`, published in the envelope in one place so the JSON
-#: and the dataclass cannot drift.
-LAYOUT_FIELDS: Final[tuple[str, ...]] = (
-    "energised",
-    "track_power",
-    "held",
-    "idled_address",
-    "idled",
-    "direction_preserved",
-)
-
-#: What an operator is told when this run energised the track and the station then
-#: reported NO emergency stop under it. MEASURED 2026-08-09 (docs/probe-results.md,
-#: runs 1 and 2): a locomotive resumes its stored speed the instant power returns.
+#: What an operator is told when the track is live and the station then reported NO
+#: emergency stop under it. MEASURED 2026-08-09 (docs/probe-results.md, runs 1 and 2):
+#: a locomotive resumes its stored speed the instant power returns.
 _FREE_LAYOUT: Final[str] = (
     "the track is live and the station reports NO emergency stop, so nothing is holding the "
     "layout: a locomotive with a stored speed can start on its own"
+)
+#: The same two readings with the power confirmed off. `_FREE_LAYOUT` and
+#: `_HOLD_UNCONFIRMED` were printed for this too, so a run that energised the track,
+#: failed to hold it and switched it back OFF - the one ending where nothing can move -
+#: told the operator to treat the layout as able to move.
+_POWER_OFF_NOW: Final[str] = (
+    "the station reports the track power off, so nothing can move until it is switched back on"
 )
 _HOLD_UNCONFIRMED: Final[str] = (
     "the hold telegram went out and the station never confirmed it, so treat the layout as "
@@ -109,6 +112,12 @@ _MAY_BE_LIVE: Final[str] = (
     "the power-on telegram went out and was never confirmed, so the track MAY be live"
 )
 _NOT_TOUCHED: Final[str] = "this run did not change the track power"
+#: What the run READ, for a layout it neither energised nor is responsible for
+#: holding. `_layout_lines` never looked at `track_power` at all, so an untouched
+#: layout got one line saying the power was not changed and nothing saying what it is.
+_FOUND_LIVE: Final[str] = "the track was already live before this run started"
+_FOUND_DEAD: Final[str] = "the track was off before this run started and is off now"
+_POWER_UNREAD: Final[str] = "the track power was never read, so it is unknown"
 
 #: The warning name for a probe that finished and could not write its own record.
 #: `saved_to: null` says a file was not written; this says why, under a name a script
@@ -162,17 +171,50 @@ def _layout_lines(layout: LayoutState) -> list[str]:
     defect as a capability recorded absent because the instrument was broken, one
     level up: the report is confident and the state it describes is not the state in
     front of you.
+
+    Two kinds of run, and they get different text. A run that neither energised the
+    track nor found a hold under it is responsible for nothing, so it reports what it
+    READ and stops - no hazard sentence about a layout it never touched. A run that
+    energised the track, or that found the layout held and therefore owes the hold
+    back at the end (`must_leave_held`), reports the hazard: for those, "the station
+    says there is no hold" is something to act on.
     """
-    if layout.energised is False:
-        return [f"  {_NOT_TOUCHED}"]
-    lines = [] if layout.energised else [f"  {_MAY_BE_LIVE}"]
+    if layout.energised is False and not layout.must_leave_held:
+        return [
+            f"  {_NOT_TOUCHED}",
+            f"  {_found_power_line(layout)}",
+            *_idle_lines(layout),
+        ]
+    lines = [f"  {_opening_line(layout)}"] if layout.energised is not True else []
     if layout.held is True:
         lines += [f"  {line}" for line in HELD_LINES]
+    elif layout.track_power is False:
+        # Read off `track_power`, not assumed live: a layout with the power confirmed
+        # OFF cannot move whether or not a hold is under it, and telling an operator a
+        # locomotive may start is how a report loses the credit it needs for the times
+        # when one can.
+        lines.append(f"  {_POWER_OFF_NOW}")
     elif layout.held is False:
         lines.append(f"  {_FREE_LAYOUT}")
     else:
         lines.append(f"  {_HOLD_UNCONFIRMED}")
     return lines + _idle_lines(layout)
+
+
+def _opening_line(layout: LayoutState) -> str:
+    """The power sentence for a run that is responsible for the layout: `None` is the
+    unconfirmed energise, `False` is a run that found the hold rather than making it."""
+    return _MAY_BE_LIVE if layout.energised is None else _NOT_TOUCHED
+
+
+def _found_power_line(layout: LayoutState) -> str:
+    """What the track power WAS, for a run that changed none of it. Three-valued, like
+    everything else here: `None` means D2 never produced a status to read it from."""
+    if layout.track_power is True:
+        return _FOUND_LIVE
+    if layout.track_power is False:
+        return _FOUND_DEAD
+    return _POWER_UNREAD
 
 
 def _idle_lines(layout: LayoutState) -> list[str]:
@@ -186,31 +228,54 @@ def _idle_lines(layout: LayoutState) -> list[str]:
     ]
 
 
-def _warn_about_the_layout(outcome: CommandResult, layout: LayoutState) -> None:
-    """The two things a caller branches on, and the exit code that goes with them.
+def _warn_about_the_layout(
+    outcome: CommandResult, layout: LayoutState, *, may_degrade: bool
+) -> None:
+    """The things a caller branches on, and the exit code that goes with them.
 
     `hold_not_confirmed` is `commands/power.py`'s own warning name, deliberately:
     both commands can leave a live track with nothing proven to be holding it, and a
     script must not need two names for one hazard. Exit 8 for the same reason - the
     probe itself may have gone perfectly, so this is a partial result and not an
     error, exactly as `power on`'s is.
+
+    `may_degrade` is False when the probe itself failed. The WARNINGS still go out -
+    this used to be skipped whole when `report.ok` was False, which dropped the
+    machine-readable layout warning exactly in the runs that end with a possibly live,
+    definitely unheld track - but the exit code stays the probe's own 3, because a
+    doctor that could not establish the basics has measured nothing and that is the
+    bigger answer of the two.
     """
-    if layout.energised is False:
-        return
-    if layout.held is not True:
+    if _responsible_for(layout) and _may_move(layout):
         outcome.warn(
             "hold_not_confirmed",
-            f"this run energised the track and {_FREE_LAYOUT if layout.held is False else _HOLD_UNCONFIRMED}"
+            f"{_hold_lead(layout)} and "
+            f"{_FREE_LAYOUT if layout.held is False else _HOLD_UNCONFIRMED}"
             f"; measured 2026-08-09, a locomotive resumes its stored speed as soon as power "
             f"returns",
             held=layout.held,
             track_power=layout.track_power,
         )
-        # `warn` touches neither `ok` nor `exit_code`, so without this the run exited 0
-        # with `ok: true` and a script branching on `$?` carried on as if the layout
-        # were held. A command that did not do what it says has not succeeded.
-        outcome.ok = False
-        outcome.exit_code = PARTIAL_EXIT_CODE
+        if may_degrade:
+            # `warn` touches neither `ok` nor `exit_code`, so without this the run
+            # exited 0 with `ok: true` and a script branching on `$?` carried on as if
+            # the layout were held. A command that did not do what it says has not
+            # succeeded.
+            outcome.ok = False
+            outcome.exit_code = PARTIAL_EXIT_CODE
+    if layout.idled is False:
+        outcome.warn(
+            "loco_not_idled",
+            f"loco {layout.idled_address} refused the speed-0 telegram, so it still holds "
+            f"whatever speed the station has for it and `{RESUME_COMMAND}` would start it "
+            f"(measured 2026-08-09, run 5)",
+            address=layout.idled_address,
+        )
+        if may_degrade:
+            # The same reading as above: the run did part of what it says it does. A
+            # locomotive left able to start is not a success to be reported as one.
+            outcome.ok = False
+            outcome.exit_code = PARTIAL_EXIT_CODE
     if layout.idled and layout.direction_preserved is False:
         outcome.warn(
             "direction_not_preserved",
@@ -219,6 +284,38 @@ def _warn_about_the_layout(outcome: CommandResult, layout: LayoutState) -> None:
             f"now changed",
             address=layout.idled_address,
         )
+
+
+def _responsible_for(layout: LayoutState) -> bool:
+    """Whether this run has to answer for the state of the layout.
+
+    True when it touched the power (`energised` is `True` or the unconfirmed `None`)
+    and when it owes a hold back. False for the ordinary diagnostic run on somebody
+    else's live, free layout: warning there would make the token that says "a
+    locomotive may start because of this command" fire on runs that changed nothing,
+    and a warning that fires on every run is one nobody reads.
+    """
+    return layout.energised is not False or layout.must_leave_held
+
+
+def _may_move(layout: LayoutState) -> bool:
+    """`held is not True` is the hazard, unless the power is confirmed off.
+
+    `track_power is False` is the one reading that rules movement out, and it is a
+    reading - never an assumption. `None` counts as a hazard: an unconfirmed power-on
+    telegram has gone out and nobody knows what the track is doing.
+    """
+    return layout.held is not True and layout.track_power is not False
+
+
+def _hold_lead(layout: LayoutState) -> str:
+    """Which run this is, in the warning's own first clause. A run that energised the
+    track made the hazard; a run that found the layout held and could not put the hold
+    back released one that was already there - a distinction an operator standing at
+    the layout needs, and the second case used to produce no warning at all."""
+    if layout.energised is False:
+        return "this run released the hold it found on the layout"
+    return "this run energised the track"
 
 
 def build_doctor(report: DoctorReport, *, saved_to: Path | None) -> CommandResult:
@@ -235,7 +332,7 @@ def build_doctor(report: DoctorReport, *, saved_to: Path | None) -> CommandResul
     ]
     result.result["capabilities"] = _capabilities_payload(caps)
     result.result["notes"] = list(caps.notes)
-    result.result["layout"] = {name: getattr(report.layout, name) for name in LAYOUT_FIELDS}
+    result.result["layout"] = layout_json(report.layout)
     verdict = list(verdict_lines(report))
     result.result["verdict"] = verdict
     result.result["saved_to"] = None if saved_to is None else str(saved_to)
@@ -265,12 +362,13 @@ def build_doctor(report: DoctorReport, *, saved_to: Path | None) -> CommandResul
     for line in verdict:
         result.say(line)
 
-    if report.ok:
-        # Only when the probe itself succeeded: a doctor whose D0-D2 could not
-        # establish the basics has measured nothing at all, and exit 3 is the bigger
-        # answer of the two. Softening it to the partial would report the smaller
-        # failure and hide the larger one.
-        _warn_about_the_layout(result, report.layout)
+    # Always, on every ending. `may_degrade` carries the exit-code precedence that
+    # used to be spelled by skipping this call: a doctor whose D0-D2 could not
+    # establish the basics has measured nothing at all, and exit 3 is the bigger
+    # answer of the two, so the partial must not soften it. The WARNINGS belong in
+    # both cases - a failed probe is if anything more likely to have left a live,
+    # unheld track, and that was the run publishing no layout warning at all.
+    _warn_about_the_layout(result, report.layout, may_degrade=report.ok)
     return result
 
 

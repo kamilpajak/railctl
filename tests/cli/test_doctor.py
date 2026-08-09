@@ -185,9 +185,11 @@ def test_a_run_that_changed_no_track_power_says_so_and_still_exits_zero():
         "idled_address": None,
         "idled": None,
         "direction_preserved": None,
+        "must_leave_held": False,
     }
     assert "  this run did not change the track power" in result.lines
     assert result.exit_code == 0
+    assert result.warnings == []
 
 
 def test_a_confirmed_hold_is_reported_with_power_ons_own_two_sentences():
@@ -239,10 +241,14 @@ def test_an_unconfirmed_energise_never_reads_as_a_dead_track():
     assert any("MAY be live" in line for line in result.lines)
 
 
-def test_a_probe_failure_outranks_the_partial_hold_code():
+def test_a_probe_failure_outranks_the_partial_hold_code_but_still_warns():
     """Both readings are bad and they are not equally bad: a doctor whose D0-D2
     could not establish the basics has not measured the layout at all, so exit 3
-    stays rather than being softened to the partial."""
+    stays rather than being softened to the partial.
+
+    The WARNING is not part of that precedence. It used to be dropped whole for a
+    failed report, which silenced the machine-readable layout token in exactly the
+    runs most likely to end with a live, unheld track."""
     checks = (Check(id="D0", title="link", status="fail", detail="port not found"),)
     report = DoctorReport(
         checks=checks,
@@ -251,6 +257,7 @@ def test_a_probe_failure_outranks_the_partial_hold_code():
     )
     result = build_doctor(report, saved_to=None)
     assert result.exit_code == 3
+    assert [w.name for w in result.warnings] == ["hold_not_confirmed"]
 
 
 def test_an_idle_telegram_that_did_not_land_is_named_never_left_out():
@@ -260,6 +267,89 @@ def test_an_idle_telegram_that_did_not_land_is_named_never_left_out():
     result = build_doctor(report, saved_to=None)
     assert any("still holds its stored speed" in line for line in result.lines)
     assert result.result["layout"]["idled"] is False
+    # H8: a refused speed-0 telegram used to exit 0 with no warning at all, so a
+    # script saw a clean run and `railctl power resume` then started the locomotive.
+    assert [w.name for w in result.warnings] == ["loco_not_idled"]
+    assert result.exit_code == PARTIAL_EXIT_CODE
+    assert result.ok is False
+
+
+# -- C1: the hold this run found, and what releasing it has to say ------------
+
+
+def test_a_run_that_found_the_layout_held_and_left_it_held_says_so():
+    """A plain `railctl doctor` on a live, held layout: every service-mode session
+    clears the hold with resume-operations (run 5), so this run is responsible for
+    putting it back, and the report has to say the layout is still held. It used to
+    print only "this run did not change the track power" - about a layout it had
+    quietly released.
+    """
+    report = _powered_on_report(energised=False, track_power=True, held=True, must_leave_held=True)
+    result = build_doctor(report, saved_to=None)
+    assert "  this run did not change the track power" in result.lines
+    for line in HELD_LINES:
+        assert f"  {line}" in result.lines
+    assert result.warnings == []
+    assert result.exit_code == 0
+
+
+def test_a_hold_this_run_found_and_could_not_put_back_is_the_loudest_ending():
+    """The C1 runaway: the doctor released a hold it never applied and the re-assert
+    did not confirm. Naming which run this is matters - "this run energised the track"
+    would be a false statement about a track that was live before it started."""
+    report = _powered_on_report(energised=False, track_power=True, held=False, must_leave_held=True)
+    result = build_doctor(report, saved_to=None)
+    assert [w.name for w in result.warnings] == ["hold_not_confirmed"]
+    assert "released the hold it found" in result.warnings[0].message
+    assert result.exit_code == PARTIAL_EXIT_CODE
+    assert any("stored speed" in line for line in result.lines)
+
+
+def test_a_live_layout_this_run_neither_energised_nor_held_gets_no_hazard_line():
+    """The ordinary diagnostic on somebody else's running layout. It reports what it
+    READ - the old text never mentioned the track power at all - and it does not warn:
+    a token that fires on runs which changed nothing is one nobody reads."""
+    report = _powered_on_report(energised=False, track_power=True, held=False)
+    result = build_doctor(report, saved_to=None)
+    assert "  the track was already live before this run started" in result.lines
+    assert not any("can start on its own" in line for line in result.lines)
+    assert result.warnings == []
+    assert result.exit_code == 0
+
+
+def test_a_declined_power_on_says_the_track_was_off_and_still_is():
+    report = _powered_on_report(energised=False, track_power=False)
+    result = build_doctor(report, saved_to=None)
+    assert "  the track was off before this run started and is off now" in result.lines
+    assert result.warnings == []
+
+
+def test_a_failed_probe_that_could_not_idle_the_loco_keeps_exit_three():
+    """Same precedence as the hold warning, in the other partial: the locomotive is
+    still named as able to start, and the bigger failure keeps the exit code."""
+    checks = (Check(id="D0", title="link", status="fail", detail="port not found"),)
+    report = DoctorReport(
+        checks=checks,
+        capabilities=Capabilities.unknown("unknown"),
+        layout=LayoutState(
+            energised=True, track_power=True, held=True, idled_address=3, idled=False
+        ),
+    )
+    result = build_doctor(report, saved_to=None)
+    assert [w.name for w in result.warnings] == ["loco_not_idled"]
+    assert result.exit_code == 3
+
+
+def test_a_track_switched_back_off_is_never_reported_as_able_to_move():
+    """`_abandon_energised_track`: the hold failed, so the doctor put the power back
+    off. `held` is UNKNOWN there - the stop telegram raised - and the old text turned
+    that into "treat the layout as able to move" for a track the station reports
+    dead."""
+    report = _powered_on_report(energised=True, track_power=False, held=None)
+    result = build_doctor(report, saved_to=None)
+    assert any("nothing can move until it is switched back on" in line for line in result.lines)
+    assert not any("able to move" in line for line in result.lines)
+    assert result.warnings == []
 
 
 def test_a_direction_that_could_not_be_read_is_not_claimed_preserved():

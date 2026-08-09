@@ -28,6 +28,7 @@ verified by reading the CV back, never written and trusted.
 
 from __future__ import annotations
 
+import dataclasses
 import enum
 from dataclasses import dataclass
 from typing import Final, Literal
@@ -136,12 +137,39 @@ class LayoutState:
     #: Whether the locomotive's stored direction was read and kept. `None` when no
     #: speed-0 telegram was accepted, so there is nothing to say either way.
     direction_preserved: bool | None = None
+    #: Whether this run is RESPONSIBLE for leaving the layout held, and therefore for
+    #: putting the hold back every time one of its own telegrams clears it.
+    #:
+    #: `True` in two cases: the run energised a dead track and held it, and the run
+    #: found the layout already held. The second is not defensive - every service-mode
+    #: session ends with resume-operations, which is exactly the telegram that releases
+    #: an emergency stop (MEASURED 2026-08-09, run 5: a locomotive held with step 80
+    #: stored accelerated away on it), so a plain `railctl doctor` on a held layout
+    #: releases a hold it never applied.
+    #:
+    #: `False` means there is no hold to maintain: the run found none and applied none.
+    #: The doctor must not invent one - stopping a layout that was running is a change
+    #: nobody asked for - which is why this is a flag and not "hold whenever you can".
+    #: Not tri-state, unlike every field above: this says what this run OWES, which is
+    #: decided by code and always known, not what the station reported.
+    must_leave_held: bool = False
 
 
 #: The layout as a run that never touched the track power leaves it: nothing
 #: energised, nothing held, nothing zeroed. Named once so a doctor report can be
-#: compared against it rather than against six separate fields.
+#: compared against it rather than against seven separate fields.
 LAYOUT_UNTOUCHED: Final[LayoutState] = LayoutState()
+
+
+def layout_json(layout: LayoutState) -> dict[str, object]:
+    """`LayoutState` as a JSON object, keys read off the dataclass.
+
+    One definition, two callers: the `doctor` envelope's `layout` block, and the
+    `details.layout` a probe that died partway attaches to its own exception. A
+    second hand-written key list is how the successful ending and the failed one
+    start describing the layout with different words.
+    """
+    return {f.name: getattr(layout, f.name) for f in dataclasses.fields(layout)}
 
 
 @dataclass(frozen=True, slots=True)

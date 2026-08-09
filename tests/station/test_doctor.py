@@ -35,11 +35,11 @@ from railctl.station.doctor import (
     verdict_lines,
 )
 from railctl.station.types import (
-    LAYOUT_UNTOUCHED,
     Check,
     CvReadOutcome,
     CvSpec,
     DoctorReport,
+    LayoutState,
 )
 from railctl.transport.fake import FakeTransport
 from railctl.xbus.codec import encode
@@ -1401,30 +1401,35 @@ def test_power_on_holds_the_layout_and_zeroes_the_address_it_is_about_to_probe(d
     assert report.check("D3").status == "ok"
 
 
-def test_a_run_that_did_not_energise_leaves_the_layout_untouched(doctor_bench):
+def test_a_run_that_did_not_energise_leaves_a_free_layout_alone(doctor_bench):
     """The doctor is a diagnostic. It holds the layout only when it was the thing that
-    energised it: a track the operator already had live is a state this command was not
-    asked to change, and holding it would stop a layout that was running.
+    energised it, or when it found a hold already there: a track the operator had live
+    and RUNNING is a state this command was not asked to change, and holding it would
+    stop a layout that was moving.
+
+    `STATUS_REPLY_POWERED` is 0x04 - auto-start only, no emergency stop - so this is
+    the free-layout case, and no `80 80` may go out anywhere in the run.
     """
     report = run_probe(
         doctor_bench.station, use_programming_track=False, now_utc=lambda: "2026-08-09T00:00:00Z"
     )
     assert cmd_emergency_stop_all() not in doctor_bench.sent
-    assert report.layout == LAYOUT_UNTOUCHED
     assert report.layout.energised is False
-    assert report.layout.held is None
+    assert report.layout.track_power is True
+    assert report.layout.held is False
+    assert report.layout.must_leave_held is False
 
 
 def test_a_declined_power_on_leaves_the_layout_untouched(doctor_bench):
     """No `--power-on`, so nothing was energised and nothing is held. `held` stays
     `None` - the doctor sent no stop and read no bit for it, and "unknown" is what that
-    is."""
+    is. The track power IS known: D2 read it, and it is off."""
     doctor_bench.transport.on_write.set(cmd_station_status(), STATUS_REPLY_UNPOWERED)
     report = run_probe(
         doctor_bench.station, use_programming_track=False, now_utc=lambda: "2026-08-09T00:00:00Z"
     )
     assert cmd_emergency_stop_all() not in doctor_bench.sent
-    assert report.layout == LAYOUT_UNTOUCHED
+    assert report.layout == LayoutState(energised=False, track_power=False)
 
 
 def test_a_failed_hold_switches_the_track_back_off_and_fails_d3(doctor_bench):
@@ -1444,8 +1449,11 @@ def test_a_failed_hold_switches_the_track_back_off_and_fails_d3(doctor_bench):
     )
     assert report.check("D3").status == "fail"
     assert cmd_track_power_off() in doctor_bench.sent
-    assert report.layout.held is False
+    # UNKNOWN, not False: this branch is reached because `emergency_stop()` RAISED,
+    # so nobody knows whether the stop took - only that the track is off again.
+    assert report.layout.held is None
     assert report.layout.track_power is False
+    assert report.layout.must_leave_held is False
     assert report.ok is False
     assert exit_code_for_report(report) == 3
 
@@ -1465,7 +1473,7 @@ def test_a_failed_hold_that_cannot_be_switched_off_says_the_track_may_be_live(do
     d3 = report.check("D3")
     assert d3.status == "fail"
     assert "MAY BE LIVE with nothing holding it" in d3.detail
-    assert report.layout.held is False
+    assert report.layout.held is None
     assert report.layout.track_power is None
 
 
@@ -1487,6 +1495,87 @@ def test_the_hold_is_re_asserted_after_the_service_mode_batch_released_it(doctor
     last_hold = len(sent) - 1 - sent[::-1].index(cmd_emergency_stop_all())
     assert last_hold > last_release
     assert report.layout.held is True
+
+
+#: Live, and held: bit 0 is emergency STOP on this hardware (the reverse of the Lenz
+#: spec, measured), bit 1 - emergency OFF - is clear, so `track_power` reads True.
+#: This is the state `railctl power on` now leaves behind, which is why an ordinary
+#: `railctl doctor` run meets it.
+STATUS_REPLY_HELD = encode(0x62, 0x22, 0x05)
+
+
+def test_a_plain_run_on_a_held_layout_leaves_it_held(doctor_bench):
+    """The C1 reproduction. `railctl power on` ends with the layout HELD, so this is
+    the state a following `railctl doctor` finds. Every service-mode session ends with
+    `exit_service_mode`, whose resume-operations telegram CLEARS that hold (run 5: a
+    locomotive with step 80 stored accelerated away on it) - and the closing re-assert
+    used to be gated on `energised is True`, which this run is not.
+
+    So the run released a hold it never applied and reported that it had changed
+    nothing. The assertion is about ORDER: the last hold telegram must come after the
+    last release, or the layout is free when the command exits.
+    """
+    doctor_bench.transport.on_write.set(cmd_station_status(), STATUS_REPLY_HELD)
+    report = run_probe(doctor_bench.station, now_utc=lambda: "2026-08-09T00:00:00Z")
+    sent = doctor_bench.sent
+    assert cmd_track_power_on() in sent  # exit_service_mode really did release it
+    last_release = len(sent) - 1 - sent[::-1].index(cmd_track_power_on())
+    last_hold = len(sent) - 1 - sent[::-1].index(cmd_emergency_stop_all())
+    assert last_hold > last_release
+    assert report.layout.must_leave_held is True
+    assert report.layout.held is True
+    assert report.layout.energised is False
+
+
+def test_a_plain_run_on_a_held_layout_re_asserts_the_hold_inside_the_batch_too(doctor_bench):
+    """Not only at the end. The window between `exit_service_mode` and the closing
+    re-assert holds D9's identity reads, and a locomotive released there has the whole
+    of D9 to accelerate. `exit_service_mode` puts the hold back itself, so the hold
+    telegram count is at least one per release."""
+    doctor_bench.transport.on_write.set(cmd_station_status(), STATUS_REPLY_HELD)
+    run_probe(doctor_bench.station, now_utc=lambda: "2026-08-09T00:00:00Z")
+    sent = doctor_bench.sent
+    assert sent.count(cmd_emergency_stop_all()) >= sent.count(cmd_track_power_on())
+
+
+def test_a_plain_run_on_a_free_layout_never_holds_it_even_with_the_programming_track(
+    doctor_bench,
+):
+    """The other half, and the reason this is a flag rather than "hold whenever you
+    can": a layout the operator has running must come out of a diagnostic still
+    running. `STATUS_REPLY_POWERED` is 0x04 - live, no emergency stop."""
+    run_probe(doctor_bench.station, now_utc=lambda: "2026-08-09T00:00:00Z")
+    assert cmd_emergency_stop_all() not in doctor_bench.sent
+
+
+def test_a_probe_that_dies_after_the_energise_still_reports_the_layout(doctor_bench, monkeypatch):
+    """H5: `work()` catches `BaseException` and re-raises without a result, so a probe
+    that died after D3 energised the track told the caller nothing about a track that
+    may be live. The layout rides out on the exception's own `details`, under the same
+    key names the success envelope publishes."""
+    _unpowered(doctor_bench)
+    doctor_bench.transport.on_write.set(
+        cmd_loco_info(3, threshold=doctor_bench.station.threshold), STANDING_LOCO_REPLY
+    )
+
+    def _boom(*_args: object, **_kwargs: object) -> Check:
+        raise StationBusyError("the station stopped answering")
+
+    monkeypatch.setattr(doctor_module, "_check_d9", _boom)
+
+    with pytest.raises(StationBusyError) as caught:
+        run_probe(
+            doctor_bench.station,
+            address=3,
+            allow_power_on=True,
+            use_programming_track=False,
+            now_utc=lambda: "2026-08-09T00:00:00Z",
+        )
+    layout = caught.value.details["layout"]
+    assert layout["energised"] is True
+    assert layout["idled_address"] == 3
+    # And the hold is re-asserted on the way out, not left to whatever released it.
+    assert layout["held"] is True
 
 
 def test_the_direction_is_not_claimed_preserved_when_the_station_could_not_report_one(
