@@ -55,6 +55,10 @@ AUTO_START_STATUS = StationStatus.from_raw(0x04)
 EMERGENCY_STOP_STATUS = StationStatus.from_raw(0x01)
 EMERGENCY_OFF_STATUS = StationStatus.from_raw(0x02)
 SERVICE_MODE_STATUS = StationStatus.from_raw(0x08)
+#: What the station reads back after the new `power on`: track live, emergency
+#: stop set, automatic start mode. `0x05` is the byte the 2026-08-09 bench run
+#: read while the layout was held (docs/probe-results.md, run 6).
+HELD_STATUS = StationStatus.from_raw(0x05)
 
 LOCO_128 = LocoInfo(
     raw_ident=0b10000100,
@@ -603,15 +607,15 @@ def test_build_power_names_the_direction_the_idle_telegram_carried():
         address=3, direction=Direction.REVERSE, direction_preserved=True, changed=True
     )
     result = power.build_power(
-        "on", AUTO_START_STATUS, changed=True, idled=idled, completed=[power.STEP_READ_STATUS]
+        "on", HELD_STATUS, changed=True, idled=idled, completed=[power.STEP_READ_STATUS]
     )
     assert result.result["idled_address"] == 3
     assert result.result["idled_direction"] == "reverse"
     assert result.result["idled_direction_preserved"] is True
     assert "loco 3 was sent speed 0 reverse" in result.lines[-1]
-    # Automatic start mode, so the scope warning fires: this command idles ONE locomotive
-    # and leaves every other one to the unproven stop-all broadcast.
-    assert [w.name for w in result.warnings] == ["unaddressed_locomotives_may_resume"]
+    # The layout came up held, which is what this command is for now, so there is nothing
+    # to warn about.
+    assert result.warnings == []
 
 
 def test_build_power_warns_when_the_idle_telegram_may_have_changed_the_direction():
@@ -621,55 +625,78 @@ def test_build_power_warns_when_the_idle_telegram_may_have_changed_the_direction
         address=3, direction=Direction.FORWARD, direction_preserved=False, changed=None
     )
     result = power.build_power(
-        "on", AUTO_START_STATUS, changed=True, idled=idled, completed=[power.STEP_READ_STATUS]
+        "on", HELD_STATUS, changed=True, idled=idled, completed=[power.STEP_READ_STATUS]
     )
     assert result.result["idled_direction_preserved"] is False
-    assert [w.name for w in result.warnings] == [
-        "unaddressed_locomotives_may_resume",
-        "direction_not_preserved",
-    ]
+    assert [w.name for w in result.warnings] == ["direction_not_preserved"]
     assert result.warnings[-1].details == {"address": 3, "sent": "forward"}
 
 
-def test_power_on_says_that_only_the_addressed_locomotive_got_a_stop_of_its_own():
-    """What `power on` protects, stated rather than assumed.
+def test_power_on_reports_the_hold_and_names_the_command_that_releases_it():
+    """The ending this command now has, said plainly rather than warned about.
 
-    Two of the three steps are belt and braces for ONE locomotive: `--address` gets its own
-    speed-0 telegram, so it is covered whether or not the `80 80` prefix did anything. Every
-    other locomotive on the layout has only that prefix - and that a stop-all clears a stored
-    speed out of the station's refresh buffer is inferred, never measured. `docs/probe-
-    results.md` records that a stored speed resumes on power-up and nothing more.
-
-    So if the inference is wrong, `power on` reports success while unaddressed locomotives
-    start moving. The warning is the only thing standing between that and an operator who
-    read the output and believed the layout was safe.
+    MEASURED 2026-08-09 (docs/probe-results.md, runs 3 and 4): `80 80` sent after the track
+    is live holds the layout, and stored steps 15 and 80 both stayed put. That is the
+    intended outcome, so `power on` states it - the track has voltage, nothing will move -
+    and names the one command that ends it.
     """
     idled = power.Idled(
         address=3, direction=Direction.FORWARD, direction_preserved=True, changed=False
     )
     result = power.build_power(
-        "on", AUTO_START_STATUS, changed=True, idled=idled, completed=[power.STEP_READ_STATUS]
+        "on", HELD_STATUS, changed=True, idled=idled, completed=[power.STEP_READ_STATUS]
     )
-    warning = next(w for w in result.warnings if w.name == "unaddressed_locomotives_may_resume")
-    assert "inferred, not measured" in warning.message
-    assert warning.details == {"idled_address": 3}
+    assert any("the layout is held" in line for line in result.lines)
+    assert any("railctl power resume" in line for line in result.lines)
+    assert result.warnings == []
 
 
-def test_power_off_and_manual_start_mode_do_not_carry_the_resume_warning():
-    """The warning is about locomotives resuming, so it belongs only where they can.
+def test_power_on_warns_when_the_station_reports_no_hold_at_all():
+    """The mirror of the test above, and the reason it is not enough to report what
+    was SENT.
 
-    `power off` energises nothing, and in manual start mode the station holds everything at
-    standstill until it is driven - the measured meaning of bit 2. A warning that fired in
-    either case would be noise, and noise is how a real warning stops being read.
+    Runs 1 and 2 measured the runaway this warning describes: with the track live and no
+    emergency stop, the locomotive resumed its stored speed. If the station answers a
+    `power on` with no emergency-stop bit, the hold did not take, and saying "held" off the
+    back of the telegram we sent would be a capability recorded by a broken instrument.
     """
+    result = power.build_power(
+        "on", AUTO_START_STATUS, changed=True, idled=None, completed=[power.STEP_READ_STATUS]
+    )
+    assert [w.name for w in result.warnings] == ["hold_not_confirmed"]
+    assert result.warnings[0].details == {"emergency_stop": False, "track_power": True}
+
+
+def test_power_resume_warns_that_stored_speeds_may_now_move():
+    """Where the hazard lives now.
+
+    MEASURED 2026-08-09 (run 5): released from a hold with step 80 stored, the locomotive
+    accelerated away, and `loco_info` read speed=80 both while held and after. The hold
+    holds the refresh buffer and never clears it, so the release is the moment locomotives
+    start - and it is a measurement, not an inference about a buffer nobody looked into.
+    """
+    result = power.build_power(
+        "resume", CLEAR_STATUS, changed=True, idled=None, completed=[power.STEP_READ_STATUS]
+    )
+    assert [w.name for w in result.warnings] == ["stored_speeds_released"]
+    assert "2026-08-09" in result.warnings[0].message
+    assert result.result["state"] == "resume"
+
+
+def test_power_on_does_not_carry_the_release_warning():
+    """The warning belongs to the command that releases, not to the one that holds.
+
+    `power on` ends held, so a warning about stored speeds starting locomotives would be
+    false there - and a false warning is how a real one stops being read.
+    """
+    held = power.build_power(
+        "on", HELD_STATUS, changed=True, idled=None, completed=[power.STEP_READ_STATUS]
+    )
     off = power.build_power(
         "off", AUTO_START_STATUS, changed=True, idled=None, completed=[power.STEP_READ_STATUS]
     )
-    manual = power.build_power(
-        "on", CLEAR_STATUS, changed=True, idled=None, completed=[power.STEP_READ_STATUS]
-    )
-    for result in (off, manual):
-        assert "unaddressed_locomotives_may_resume" not in [w.name for w in result.warnings]
+    for result in (held, off):
+        assert "stored_speeds_released" not in [w.name for w in result.warnings]
 
 
 def test_build_power_publishes_the_two_bits_that_decide_whether_anything_can_move():
@@ -683,8 +710,21 @@ def test_build_power_publishes_the_two_bits_that_decide_whether_anything_can_mov
     assert result.result["emergency_stop"] is True
     assert result.result["emergency_off"] is False
     assert any("emergency stop is active" in line for line in result.lines)
-    assert [w.name for w in result.warnings] == ["layout_cannot_move"]
-    assert result.warnings[0].details == {"emergency_stop": True, "emergency_off": False}
+
+
+def test_a_resume_that_left_an_emergency_state_set_is_a_warning():
+    """After `power resume` the same bit means the opposite of what it means after
+    `power on`: the release did not take."""
+    result = power.build_power(
+        "resume",
+        EMERGENCY_STOP_STATUS,
+        changed=False,
+        idled=None,
+        completed=[power.STEP_READ_STATUS],
+    )
+    assert [w.name for w in result.warnings] == ["stored_speeds_released", "layout_cannot_move"]
+    assert result.warnings[-1].details == {"emergency_stop": True, "emergency_off": False}
+    assert "after power resume" in result.warnings[-1].message
 
 
 def test_build_power_reports_emergency_off_too():
@@ -693,6 +733,10 @@ def test_build_power_reports_emergency_off_too():
     )
     assert result.result["emergency_off"] is True
     assert any("emergency off is active" in line for line in result.lines)
+    # A dead track is still the power-on failing to take, so this half of the old
+    # `layout_cannot_move` warning stays.
+    assert [w.name for w in result.warnings] == ["layout_cannot_move"]
+    assert "after power on" in result.warnings[0].message
 
 
 def test_power_off_reporting_an_emergency_state_is_not_a_warning():
@@ -1287,26 +1331,32 @@ def test_function_human_and_json_report_the_same_facts(monkeypatch):
 # --- power ---
 
 
-def test_power_on_runs_stop_all_then_power_on_then_status_then_idles_address(monkeypatch):
-    # BENCH CHECK: with a speed stored for address 3 and the station in
-    # automatic start mode, `railctl power on` must leave the locomotive
-    # standing. docs/probe-results.md records the opposite happening to the
-    # doctor's D3; what nobody has measured is whether the stop-all prefix is
-    # what clears it.
-    station = FakeStation(status=AUTO_START_STATUS)
+def test_power_on_energises_then_holds_the_layout_then_idles_the_address(monkeypatch):
+    """The order, which is the whole change.
+
+    MEASURED 2026-08-09 (docs/probe-results.md, "`power on`'s stop-all was in the wrong
+    order"): the stop-all sent BEFORE the power-on did nothing - the locomotive resumed its
+    stored speed in the control run and in the test run alike (runs 1 and 2). Sent after,
+    it held stored steps 15 and 80 with no movement (runs 3 and 4). `power_on()` also
+    clears an existing hold, so a hold sent first would be undone by it.
+
+    This test reads a call list. Only a person watching the rolling road settles whether
+    the locomotive stays put, and on 2026-08-09 one did.
+    """
+    station = FakeStation(status=HELD_STATUS)
     app = _app(station, monkeypatch, address=3)
     result = runner.invoke(app, ["power", "on"])
     assert result.exit_code == 0
     assert station.call_names == [
         "status",
-        "emergency_stop",
         "power_on",
+        "emergency_stop",
         "status",
         "loco_info",
         "drive",
         "close",
     ]
-    assert station.calls[1] == ("emergency_stop", (), {"address": None})
+    assert station.calls[2] == ("emergency_stop", (), {"address": None})
     assert station.calls[-2] == ("drive", (3, 0, Direction.FORWARD), {})
 
 
@@ -1322,7 +1372,7 @@ def test_power_on_keeps_the_stored_direction_of_the_locomotive_it_idles(monkeypa
     whether the decoder kept the direction; this reads a call list.
     """
     station = FakeStation(
-        status=AUTO_START_STATUS, loco_info=replace(LOCO_128, direction=Direction.REVERSE)
+        status=HELD_STATUS, loco_info=replace(LOCO_128, direction=Direction.REVERSE)
     )
     app = _app(station, monkeypatch, address=3, fmt="json")
     result = runner.invoke(app, ["power", "on"])
@@ -1339,21 +1389,18 @@ def test_power_on_still_idles_and_says_so_when_the_direction_cannot_be_read(monk
     cost the operator the speed 0 that stops a locomotive resuming by itself.
     So it goes out forward, and the envelope and a warning both say the stored
     direction was not preserved rather than presenting forward as measured."""
-    station = FakeStation(status=AUTO_START_STATUS, loco_info_raises=failure)
+    station = FakeStation(status=HELD_STATUS, loco_info_raises=failure)
     app = _app(station, monkeypatch, address=3, fmt="json")
     result = runner.invoke(app, ["power", "on"])
     assert result.exit_code == 0, result.stderr
     assert station.calls[-2] == ("drive", (3, 0, Direction.FORWARD), {})
     payload = json.loads(result.stdout)
     assert payload["result"]["idled_direction_preserved"] is False
-    assert [w["name"] for w in payload["warnings"]] == [
-        "unaddressed_locomotives_may_resume",
-        "direction_not_preserved",
-    ]
+    assert [w["name"] for w in payload["warnings"]] == ["direction_not_preserved"]
 
 
 def test_power_on_does_not_preserve_a_direction_the_reply_never_decoded(monkeypatch):
-    station = FakeStation(status=AUTO_START_STATUS, loco_info=LOCO_14_STEP)
+    station = FakeStation(status=HELD_STATUS, loco_info=LOCO_14_STEP)
     app = _app(station, monkeypatch, address=3, fmt="json")
     result = runner.invoke(app, ["power", "on"])
     assert result.exit_code == 0
@@ -1361,38 +1408,118 @@ def test_power_on_does_not_preserve_a_direction_the_reply_never_decoded(monkeypa
     assert json.loads(result.stdout)["result"]["idled_direction_preserved"] is False
 
 
-def test_power_on_does_not_idle_when_no_address_is_configured(monkeypatch):
-    station = FakeStation(status=AUTO_START_STATUS)
+def test_power_on_holds_the_layout_even_when_no_address_resolves(monkeypatch):
+    """No `--address` costs the operator the speed 0 for one locomotive; it must not cost
+    them the hold that covers every other one."""
+    station = FakeStation(status=HELD_STATUS)
     app = _app(station, monkeypatch, address=None)
     result = runner.invoke(app, ["power", "on"])
     assert result.exit_code == 0
-    assert station.call_names == ["status", "emergency_stop", "power_on", "status", "close"]
+    assert station.call_names == ["status", "power_on", "emergency_stop", "status", "close"]
+    assert "drive" not in station.call_names
+
+
+def test_power_resume_sends_power_on_and_nothing_else(monkeypatch):
+    """`21 81` RESUME_OPS, and no other telegram at all.
+
+    The only mutation is `power_on`: no stop-all, no speed telegram, no locomotive read.
+    The two status reads bracket it so `changed` is computed rather than asserted.
+    """
+    station = FakeStation(status=CLEAR_STATUS)
+    app = _app(station, monkeypatch, address=3, fmt="json")
+    result = runner.invoke(app, ["power", "resume"])
+    assert result.exit_code == 0, result.stderr
+    assert station.call_names == ["status", "power_on", "status", "close"]
+    payload = json.loads(result.stdout)
+    assert payload["result"]["state"] == "resume"
+    assert payload["result"]["idled_address"] is None
+    assert [w["name"] for w in payload["warnings"]] == ["stored_speeds_released"]
+
+
+def test_power_resume_reports_changed_when_the_hold_actually_cleared(monkeypatch):
+    class _Releases(FakeStation):
+        def status(self):
+            self._record("status")
+            return CLEAR_STATUS if "power_on" in self.call_names else EMERGENCY_STOP_STATUS
+
+    station = _Releases()
+    app = _app(station, monkeypatch, address=3, fmt="json")
+    result = runner.invoke(app, ["power", "resume"])
+    assert result.exit_code == 0
+    payload = json.loads(result.stdout)
+    assert payload["result"]["changed"] is True
+    assert payload["result"]["completed"] == ["read_status_before", "power_on", "read_status"]
+
+
+def test_power_resume_that_changed_nothing_says_so(monkeypatch):
+    station = FakeStation(status=CLEAR_STATUS)
+    app = _app(station, monkeypatch, address=3, fmt="json")
+    result = runner.invoke(app, ["power", "resume"])
+    assert json.loads(result.stdout)["result"]["changed"] is False
+
+
+def test_power_resume_reports_a_partial_run_when_the_release_landed_and_the_read_did_not(
+    monkeypatch,
+):
+    """A released layout that then loses the link is not "nothing happened".
+
+    MEASURED 2026-08-09 (run 5): the release is what starts locomotives. Reporting that as a
+    plain `link_timeout` would tell a script the command failed while the layout it just
+    freed is live.
+    """
+
+    class _DiesAfterRelease(FakeStation):
+        def status(self):
+            if "power_on" in self.call_names:
+                self._record("status")
+                raise LinkTimeout("no status reply after the release")
+            return super().status()
+
+    station = _DiesAfterRelease(status=EMERGENCY_STOP_STATUS)
+    app = _app(station, monkeypatch, address=3, fmt="json")
+    result = runner.invoke(app, ["power", "resume"])
+    assert result.exit_code == 8, result.stderr
+    payload = json.loads(result.stdout)
+    assert payload["result"]["state"] == "resume"
+    assert payload["result"]["completed"] == ["read_status_before", "power_on"]
+    assert payload["result"]["failed_step"] == "read_status"
+    assert "the hold was released" in payload["warnings"][0]["message"]
 
 
 @pytest.mark.parametrize(
     ("failing", "completed", "failed_step"),
     [
-        ("status", ["read_status_before", "stop_all", "power_on"], "read_status"),
+        ("emergency_stop", ["read_status_before", "power_on"], "stop_all"),
+        ("status", ["read_status_before", "power_on", "stop_all"], "read_status"),
         (
             "loco_info",
-            ["read_status_before", "stop_all", "power_on", "read_status"],
+            ["read_status_before", "power_on", "stop_all", "read_status"],
             "idle_address",
         ),
     ],
-    ids=["status-read", "idle"],
+    ids=["hold", "status-read", "idle"],
 )
 def test_power_on_reports_a_partial_run_rather_than_a_plain_failure(
     monkeypatch, failing, completed, failed_step
 ):
-    """The second step energises the track. After that, "the command failed" is
-    not the whole answer: the caller has to be able to tell "nothing happened"
-    from "the track is on but the locomotive was not idled".
+    """The FIRST step now energises the track. After that, "the command failed" is
+    not the whole answer: the caller has to be able to tell "nothing happened" from "the
+    track is live and the hold never went out".
+
+    The hold case is new with the reordering and it is the worst of the three - a live
+    track with nothing holding it is the runaway measured in runs 1 and 2 on 2026-08-09.
 
     BENCH CHECK: only a person at the layout can confirm the track really is
     live after this exit code; the fake proves the CLI reports it.
     """
 
     class _FailsAfterPowerOn(FakeStation):
+        def emergency_stop(self, address=None):
+            if failing == "emergency_stop":
+                self._record("emergency_stop_attempt", address=address)
+                raise LinkTimeout("no ack for the stop-all broadcast")
+            return super().emergency_stop(address=address)
+
         def status(self):
             if failing == "status" and "power_on" in self.call_names:
                 self._record("status")
@@ -1405,7 +1532,7 @@ def test_power_on_reports_a_partial_run_rather_than_a_plain_failure(
                 raise LinkTimeout("no ack for the idle telegram")
             return super().drive(address, speed, direction)
 
-    station = _FailsAfterPowerOn(status=AUTO_START_STATUS)
+    station = _FailsAfterPowerOn(status=HELD_STATUS)
     app = _app(station, monkeypatch, address=3, fmt="json")
     result = runner.invoke(app, ["power", "on"])
     assert result.exit_code == 8, result.stderr
@@ -1440,13 +1567,13 @@ def test_a_failure_before_the_track_is_live_is_a_plain_error_not_a_partial(monke
 
 
 def test_a_complete_power_run_names_the_steps_it_ran(monkeypatch):
-    station = FakeStation(status=AUTO_START_STATUS)
+    station = FakeStation(status=HELD_STATUS)
     app = _app(station, monkeypatch, address=3, fmt="json")
     payload = json.loads(runner.invoke(app, ["power", "on"]).stdout)
     assert payload["result"]["completed"] == [
         "read_status_before",
-        "stop_all",
         "power_on",
+        "stop_all",
         "read_status",
         "idle_address",
     ]
@@ -1506,7 +1633,7 @@ def test_power_off_reports_changed_true_when_it_was_on(monkeypatch):
     assert "power_off" in station.call_names
 
 
-def test_power_rejects_a_state_that_is_neither_on_nor_off(monkeypatch):
+def test_power_rejects_a_state_that_is_none_of_the_three(monkeypatch):
     """`typer_argument` builds no Click-level enum check on purpose (`_meta`:
     a Click callback exits through Click's own usage box instead of the
     railctl/error/v1 envelope), so the enum row is enforced here, in the
@@ -1518,25 +1645,49 @@ def test_power_rejects_a_state_that_is_neither_on_nor_off(monkeypatch):
     assert station.calls == []
     error = json.loads(result.stderr)
     assert error["code"] == "usage"
-    assert error["details"] == {"argument": "state", "allowed": ["on", "off"], "got": "sideways"}
-    assert error["suggestions"] == [["railctl", "power", "on"], ["railctl", "power", "off"]]
+    assert error["details"] == {
+        "argument": "state",
+        "allowed": ["on", "off", "resume"],
+        "got": "sideways",
+    }
+    assert error["suggestions"] == [
+        ["railctl", "power", "on"],
+        ["railctl", "power", "off"],
+        ["railctl", "power", "resume"],
+    ]
 
 
 def test_power_human_and_json_report_the_same_facts(monkeypatch):
-    station = FakeStation(status=AUTO_START_STATUS)
+    station = FakeStation(status=HELD_STATUS)
     app = _app(station, monkeypatch, address=3, fmt="json")
     result = runner.invoke(app, ["power", "on"])
     payload = json.loads(result.stdout)
     assert payload["result"]["state"] == "on"
     assert payload["result"]["auto_start_mode"] is True
     assert payload["result"]["idled_address"] == 3
+    assert payload["result"]["emergency_stop"] is True
 
-    station_human = FakeStation(status=AUTO_START_STATUS)
+    station_human = FakeStation(status=HELD_STATUS)
     app_human = _app(station_human, monkeypatch, address=3, fmt="human")
     human = runner.invoke(app_human, ["power", "on"])
     assert "track power is on" in human.stdout
     assert "loco 3 was sent speed 0" in human.stdout
     assert "start mode is automatic" in human.stdout
+    # The two facts the operator has to leave this command with: nothing will move, and
+    # here is what releases it.
+    assert "the layout is held" in human.stdout
+    assert "railctl power resume" in human.stdout
+
+
+def test_power_resume_says_in_both_renderings_that_locomotives_may_now_move(monkeypatch):
+    station = FakeStation(status=CLEAR_STATUS)
+    app = _app(station, monkeypatch, address=3, fmt="json")
+    payload = json.loads(runner.invoke(app, ["power", "resume"]).stdout)
+    assert payload["warnings"][0]["name"] == "stored_speeds_released"
+
+    human = runner.invoke(_app(FakeStation(status=CLEAR_STATUS), monkeypatch), ["power", "resume"])
+    assert "warning: stored_speeds_released" in human.stdout
+    assert "may now move" in human.stdout
 
 
 # --- stop ---
@@ -1602,6 +1753,7 @@ def test_none_of_the_four_commands_ever_calls_confirm(monkeypatch):
     for args in (
         ["power", "on"],
         ["power", "off"],
+        ["power", "resume"],
         ["stop"],
         ["drive", "10"],
         ["function", "f2", "on"],
@@ -1610,12 +1762,13 @@ def test_none_of_the_four_commands_ever_calls_confirm(monkeypatch):
         assert result.exit_code == 0, (args, result.stdout, result.stderr)
 
 
-def test_all_five_invocations_succeed_without_yes_and_without_a_prompt(monkeypatch):
+def test_all_six_invocations_succeed_without_yes_and_without_a_prompt(monkeypatch):
     station = FakeStation(status=AUTO_START_STATUS)
     app = _app(station, monkeypatch, address=3)
     for args in (
         ["power", "on"],
         ["power", "off"],
+        ["power", "resume"],
         ["stop"],
         ["drive", "10"],
         ["function", "f2", "on"],

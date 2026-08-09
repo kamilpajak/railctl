@@ -211,11 +211,12 @@ BASE_EXIT_CODES: Final[tuple[int, ...]] = (0, 1, 2)
 # describes, running the other way.
 STATION_EXIT_CODES: Final[tuple[int, ...]] = (0, 1, 2, 3, 4, 5, 6, 7, 9)
 
-# `power on`/`power off` go through `Station._settle_power`, which raises
+# All three `power` states go through `Station._settle_power`, which raises
 # `TrackPowerError` (20) when the station still disagrees after the settle
-# pause. `power on` also publishes the partial code: it runs three mutations in
-# sequence, and a failure after the second leaves the track live, which is a
-# different thing from the command having done nothing.
+# pause. `power on` and `power resume` also publish the partial code: each one
+# energises the track before its remaining steps, and `power resume` releases
+# the hold in the same call, so a failure after that point leaves the layout in
+# a state that is a different thing from the command having done nothing.
 POWER_EXIT_CODES: Final[tuple[int, ...]] = (*STATION_EXIT_CODES, PARTIAL_EXIT_CODE, 20)
 
 # `drive SPEED>0` and `function` both run `throttle.preflight`, which refuses
@@ -326,20 +327,33 @@ _FUNCTION = CommandMeta(
     options=(FUNCTION_FORCE_GROUP_OPT,),
 )
 
+#: Three states, and `resume` is not an invented word: it is the name of the
+#: XpressNet primitive `RESUME_OPS` (`21 81`). It exists as a state of its own
+#: because `power on` now ends with the layout HELD - MEASURED 2026-08-09,
+#: docs/probe-results.md, "`power on`'s stop-all was in the wrong order". An
+#: emergency stop holds the station's refresh buffer and never clears it, so
+#: nothing can hold and then quietly release; the release is a separate command
+#: the operator runs when they are watching the layout.
+_POWER_STATES: Final[tuple[str, ...]] = ("on", "off", "resume")
 #: `enum` here is published metadata that `power_cmd` enforces in its own body.
 #: `typer_argument` attaches no Click-level check, for the same reason
 #: `typer_option` attaches no `callback=`: a `typer.BadParameter` exits through
 #: Click's own usage box and never emits the `railctl/error/v1` envelope.
-POWER_STATE_ARG = Argument(name="state", help="on or off", type="enum", enum=("on", "off"))
+POWER_STATE_ARG = Argument(
+    name="state", help=_one_of(_POWER_STATES), type="enum", enum=_POWER_STATES
+)
 #: Named in the row rather than only in the source, because a caller cannot see
-#: it from the command's name and nothing else published it: `power on` sends a
-#: speed-0 telegram to `--address`. That telegram is why the locomotive does
-#: not resume its stored speed when the track comes back (start mode is
-#: automatic on this station - docs/probe-results.md), and it is also a write
-#: to a locomotive from a command called "power".
+#: either fact from the command's name and nothing else published them: `power
+#: on` leaves the whole layout held in emergency stop, and it sends a speed-0
+#: telegram to `--address` - a write to a locomotive from a command called
+#: "power". The speed 0 is what keeps that one locomotive standing when the
+#: hold is later released; every other locomotive is still holding whatever
+#: speed the station had for it (measured 2026-08-09).
 _POWER_HELP: Final[str] = (
-    "Track power on or off; `power on` also sends speed 0 to --address, keeping its stored "
-    "direction where the station reports one, so it does not resume by itself"
+    "Track power on, off, or resume. `power on` energises the track and leaves every "
+    "locomotive held in emergency stop, and sends speed 0 to --address, keeping its stored "
+    "direction where the station reports one; `power resume` releases the hold, which is the "
+    "moment stored speeds start locomotives"
 )
 _POWER = CommandMeta(
     path="power",

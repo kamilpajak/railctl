@@ -133,6 +133,20 @@ def test_the_enum_rows_are_the_same_tuples_deps_validates_against():
     assert by_name["--color"].enum is ALLOWED_COLORS
 
 
+def test_the_manifest_publishes_resume_as_a_power_state():
+    """The third state has to be discoverable from the manifest alone.
+
+    `power on` comes up HELD (measured 2026-08-09, docs/probe-results.md), so `power
+    resume` is the only way to release the layout. An agent that reads `["on", "off"]`
+    here has no way to find it except by guessing a word and reading the refusal - and
+    the help text is built from the same tuple, so both say all three or neither does.
+    """
+    state = manifest(["power"])["command"]["arguments"][0]  # type: ignore[index]
+    assert state["enum"] == ["on", "off", "resume"]
+    assert state["type"] == "enum"
+    assert "resume" in command_meta("power").arguments[0].help
+
+
 def test_every_row_with_a_fixed_set_of_values_publishes_it_as_an_enum():
     """`type` and `enum` are two fields describing one fact, so they can drift.
 
@@ -813,7 +827,7 @@ def test_the_status_that_refuses_every_other_speed_does_not_refuse_the_stop(monk
     assert json.loads(result.stdout)["result"]["speed"] == 0
 
 
-@pytest.mark.parametrize("state", ["on", "off"])
+@pytest.mark.parametrize("state", ["on", "off", "resume"])
 def test_power_reaches_the_track_power_exit_code_it_publishes(monkeypatch, state):
     """`POWER_EXIT_CODES` adds 20 and no test drove `power` to it.
 
@@ -821,6 +835,10 @@ def test_power_reaches_the_track_power_exit_code_it_publishes(monkeypatch, state
     after the settle pause, which is the only way this command produces 20 - and the
     reachability rule the two throttle drives already follow says a published refusal
     code needs a run, not a reading of the source.
+
+    `resume` is here because it is a new path to the same published codes: it calls
+    `power_on()` like `on` does, and a state added to the enum without a drive is the
+    silent omission this file already caught twice.
     """
 
     class _WillNotSettle(_FakeStatusStation):
@@ -866,6 +884,37 @@ def test_power_on_reaches_the_partial_exit_code_it_publishes(monkeypatch):
     payload = json.loads(result.stdout)
     assert payload["exit_code"] == result.exit_code
     assert payload["ok"] is False
+
+
+def test_power_resume_reaches_the_partial_exit_code_too(monkeypatch):
+    """The same published 8, from the state that releases the layout.
+
+    `power resume` sends `21 81` and only then reads the status back. If that read
+    fails, the hold is already gone - measured 2026-08-09, that is the moment stored
+    speeds start locomotives - so the caller gets a partial result naming the step,
+    not a bare error that reads as "nothing happened".
+    """
+
+    class _DiesAfterRelease(_FakeStatusStation):
+        released = False
+
+        def status(self) -> StationStatus:
+            if self.released:
+                raise LinkTimeout("no status reply after the release")
+            return super().status()
+
+        def power_on(self) -> None:
+            self.released = True
+
+    monkeypatch.setattr(Station, "open", staticmethod(lambda *a, **k: _DiesAfterRelease(0x01)))
+    result = runner.invoke(
+        app, ["power", "resume", "--address", "3", "--format", "json", "--non-interactive"]
+    )
+    assert result.exit_code == PARTIAL_EXIT_CODE, result.stderr
+    assert result.exit_code in command_meta("power").exit_codes
+    payload = json.loads(result.stdout)
+    assert payload["result"]["state"] == "resume"
+    assert payload["result"]["failed_step"] == "read_status"
 
 
 def test_the_root_group_carries_the_global_options_and_no_positionals():
