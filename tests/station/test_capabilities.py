@@ -358,6 +358,54 @@ def test_a_run_that_measured_something_new_overwrites_the_stored_value(tmp_path:
     assert Capabilities.load(path, IDENTITY).pom_read is True
 
 
+def test_a_re_probed_pom_read_does_not_keep_the_reason_for_the_verdict_it_replaced(
+    tmp_path: Path,
+):
+    """A provenance belongs to the verdict it explains, and dies with it.
+
+    The merge rule is "`None` means this run learned nothing here, so leave what was
+    stored". `pom_read_provenance` is the one field that rule must not reach:
+    `CvProgrammer.pom_read` writes `{"pom_read": True, "pom_read_provenance": None}` in
+    one call, deliberately, so a stale reason cannot outlive the answer it was about.
+
+    Fit a RailCom detector and re-run the doctor, and the merge put the old reason back:
+    the file held `pom_read: true` beside `pom_read_provenance: "silence"` - "it works,
+    because nothing came back". CLAUDE.md names this as the field a reader who must not
+    act on a guess consults instead of `pom_read`, so a wrong value here is worse than
+    none. The test above writes the same pair and asserts only `pom_read`, which is how
+    it walked past.
+    """
+    path = tmp_path / "capabilities.json"
+    Capabilities(
+        link_identity=IDENTITY,
+        pom_read=False,
+        pom_read_provenance="silence",
+        service_direct_cv=True,
+    ).save(path)
+    Capabilities(link_identity=IDENTITY, pom_read=True, pom_read_provenance=None).save(path)
+
+    reloaded = Capabilities.load(path, IDENTITY)
+    assert reloaded.pom_read is True
+    assert reloaded.pom_read_provenance is None
+    # A field this run said nothing about is still kept - the merge rule itself is intact,
+    # and this exception is narrow rather than a hole in it.
+    assert reloaded.service_direct_cv is True
+
+
+def test_a_run_that_did_not_touch_pom_read_leaves_its_reason_alone(tmp_path: Path):
+    """The other side of the exception. `pom_read_provenance` follows `pom_read`, so a
+    run that established nothing about the verdict may not discard the reason either -
+    otherwise a plain `railctl doctor` on a dead track would strip the provenance off a
+    measurement that is still perfectly current."""
+    path = tmp_path / "capabilities.json"
+    Capabilities(link_identity=IDENTITY, pom_read=False, pom_read_provenance="silence").save(path)
+    Capabilities(link_identity=IDENTITY, service_ext_cv=True).save(path)
+
+    reloaded = Capabilities.load(path, IDENTITY)
+    assert reloaded.pom_read is False
+    assert reloaded.pom_read_provenance == "silence"
+
+
 def test_a_run_that_re_probed_pom_clears_the_note_that_described_the_old_verdict(
     tmp_path: Path,
 ):

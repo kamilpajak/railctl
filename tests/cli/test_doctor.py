@@ -525,3 +525,41 @@ def test_a_capabilities_file_that_cannot_be_written_still_prints_the_probe(monke
     assert body["result"]["checks"][0]["id"] == "D0"
     assert [w["name"] for w in body["warnings"]] == [CAPABILITIES_NOT_SAVED_WARNING]
     assert body["warnings"][0]["details"]["path"] == str(config_dir / "capabilities.json")
+
+
+def test_the_envelope_describes_the_file_it_names_not_the_run_that_wrote_it(monkeypatch, tmp_path):
+    """`saved_to` points at a file; `capabilities` must describe THAT file.
+
+    `Capabilities.save` merges this run's record over the stored one, so a field this run
+    established nothing about keeps whatever an earlier, wider run measured. The envelope
+    used to publish the run's own record beside the path, so a doctor whose D4 was
+    inconclusive printed `pom_read: null` while the file it had just named held `true` -
+    two answers under one `saved_to`, and the JSON one is what a script reads.
+    """
+    identity = "serial:FAKE:3"
+    base = _bench_report(powered=False)
+    # This run establishes nothing about POM; it does learn a service-mode encoding.
+    report = _identified(
+        DoctorReport(
+            checks=base.checks,
+            capabilities=Capabilities(link_identity=identity, z21_cv_opcodes=True),
+        ),
+        identity,
+    )
+    app, _ = _wire(monkeypatch, tmp_path, report, identity=identity)
+    cap_path = tmp_path / ".config" / "railctl" / "capabilities.json"
+    cap_path.parent.mkdir(parents=True)
+    Capabilities(link_identity=identity, pom_read=True, service_direct_cv=True).save(cap_path)
+
+    result = CliRunner().invoke(app, ["doctor", "--format", "json"])
+    assert result.exit_code == 0, result.stderr
+
+    payload = json.loads(result.stdout)["result"]
+    on_disk = json.loads(cap_path.read_text(encoding="utf-8"))["links"][identity]
+    assert payload["saved_to"] == str(cap_path)
+    # The field this run said nothing about: the file kept it, so the envelope must too.
+    assert on_disk["pom_read"] is True
+    assert payload["capabilities"]["pom_read"] is True
+    # And what the run did learn reaches both.
+    assert on_disk["z21_cv_opcodes"] is True
+    assert payload["capabilities"]["z21_cv_opcodes"] is True

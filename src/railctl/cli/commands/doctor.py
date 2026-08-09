@@ -22,6 +22,7 @@ means standing next to a locomotive that may start.
 
 from __future__ import annotations
 
+import dataclasses
 import os
 from typing import TYPE_CHECKING, Final, TextIO
 
@@ -374,7 +375,7 @@ def build_doctor(report: DoctorReport, *, saved_to: Path | None) -> CommandResul
 
 def _save_capabilities(
     caps: Capabilities, *, no_save: bool, stderr: TextIO
-) -> tuple[Path | None, ResultWarning | None]:
+) -> tuple[Path | None, ResultWarning | None, Capabilities]:
     """Write the probe's own record, and return the path ONLY when something was
     written. Issue #15: every command reads `capabilities_path()` and nothing wrote
     it, so every run started from `Capabilities.unknown`.
@@ -397,30 +398,43 @@ def _save_capabilities(
     `saved_to: null`, never a reason to withhold what the doctor just measured. The
     exit code stays the probe's own - what failed is a side effect, not the
     measurement - and the warning is what a script branches on.
+
+    The third return value is what the ENVELOPE should publish. `save()` merges this
+    run's record over the stored one internally (`Capabilities.merged_over`), so the
+    object handed in is not the object on disk: a field this run established nothing
+    about keeps whatever an earlier, wider run measured. Publishing the run's own record
+    beside a `saved_to` path would describe a file that says something else - a doctor
+    whose D4 was inconclusive would print `pom_read: null` while the file it just named
+    holds `true`. So after a successful write the file is read back and THAT is
+    published: not the merge recomputed, but what is actually there.
     """
     if no_save:
         print("capabilities not saved (--no-save)", file=stderr)
-        return None, None
+        return None, None, caps
     path = capabilities_path(os.environ)
     try:
         written = caps.save(path)
     except OSError as exc:
-        return None, ResultWarning(
-            name=CAPABILITIES_NOT_SAVED_WARNING,
-            message=(
-                f"the probe finished, but writing {path} failed: {exc}. Every other command "
-                f"reads that file, so they will keep starting from what it held before this run"
+        return (
+            None,
+            ResultWarning(
+                name=CAPABILITIES_NOT_SAVED_WARNING,
+                message=(
+                    f"the probe finished, but writing {path} failed: {exc}. Every other command "
+                    f"reads that file, so they will keep starting from what it held before this run"
+                ),
+                details={"path": str(path), "error": str(exc)},
             ),
-            details={"path": str(path), "error": str(exc)},
+            caps,
         )
     if written:
-        return path, None
+        return path, None, Capabilities.load(path, caps.link_identity)
     print(
         f"capabilities not saved: the link identity is {caps.link_identity!r}, which has no "
         f"stable name to file them under",
         file=stderr,
     )
-    return None, None
+    return None, None, caps
 
 
 def register(app: typer.Typer) -> None:
@@ -474,10 +488,12 @@ def register(app: typer.Typer) -> None:
                     allow_power_on=power_on,
                     use_programming_track=not no_programming_track,
                 )
-                saved_to, save_warning = _save_capabilities(
+                saved_to, save_warning, published = _save_capabilities(
                     report.capabilities, no_save=no_save, stderr=output.stderr
                 )
-                outcome = build_doctor(report, saved_to=saved_to)
+                outcome = build_doctor(
+                    dataclasses.replace(report, capabilities=published), saved_to=saved_to
+                )
                 if save_warning is not None:
                     outcome.warnings.append(save_warning)
                 outcome.link = link_info(station, settings)

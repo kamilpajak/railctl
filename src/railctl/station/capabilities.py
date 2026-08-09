@@ -304,9 +304,35 @@ class Capabilities:
         kept = {
             name: getattr(stored, name)
             for name in PERSISTED_FIELDS
-            if name != "notes" and getattr(self, name) is None
+            if name != "notes"
+            and getattr(self, name) is None
+            and not self._explains_a_new_verdict(name)
         }
         return replace(self, notes=self._merged_notes(stored), **kept)
+
+    def _explains_a_new_verdict(self, name: str) -> bool:
+        """Whether `name` is a provenance whose subject THIS run re-measured.
+
+        `pom_read_provenance` is not an independent fact: it says which of the
+        two roads `pom_read` arrived by, a `61 82` or silence. So it belongs to
+        the verdict it explains, and the rule "`None` means this run learned
+        nothing here" does not reach it. `CvProgrammer.pom_read` sets
+        `{"pom_read": True, "pom_read_provenance": None}` in one call, on
+        purpose, precisely so a stale reason cannot outlive the answer it was
+        about.
+
+        Without this, fitting a RailCom detector produced
+        `pom_read: true, pom_read_provenance: "silence"` on disk - a verdict of
+        "it works" carrying the reason it was once thought not to. That is the
+        field `CLAUDE.md` names as the one a reader who must not act on a guess
+        consults, so a wrong value there is worse than no value.
+
+        `_merged_notes` already carries the same exception in prose, for the
+        same event: D4 must be able to erase the silence note once a detector
+        is fitted. This is its sibling, and the two are kept next to each other
+        so a third dependent field cannot be added without meeting both.
+        """
+        return name == "pom_read_provenance" and self.pom_read is not None
 
     def _merged_notes(self, stored: Capabilities) -> tuple[str, ...]:
         """Notes annotate a measurement, so they follow the one they belong to.
