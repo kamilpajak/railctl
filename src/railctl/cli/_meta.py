@@ -413,6 +413,27 @@ _POWER = CommandMeta(
     arguments=(POWER_STATE_ARG,),
 )
 
+#: `monitor`-only, never a global: no other command runs a loop there is anything to
+#: bound. It exists so a caller - a test, or a script sampling the bus - can end the
+#: run without an interrupt at all.
+MONITOR_LIMIT = Option(
+    name="--limit",
+    type="integer",
+    default=None,
+    help="stop after N events instead of running until Ctrl-C",
+)
+_MONITOR = CommandMeta(
+    path="monitor",
+    help="Decode broadcasts and own traffic until Ctrl-C",
+    schema="railctl/monitor/v1",  # matches commands/monitor.py's MONITOR_SCHEMA
+    mutates=False,
+    # `STATION_EXIT_CODES` already carries 9, which is how a monitor normally ends:
+    # `run()` turns the operator's Ctrl-C into `AbortedError`, and the ndjson path
+    # exits with the same 9 by hand after its stream has been closed off.
+    exit_codes=STATION_EXIT_CODES,
+    options=(MONITOR_LIMIT,),
+)
+
 #: Command-scoped, and deliberately NOT the global `--address` /
 #: RAILCTL_ADDRESS / config default that `drive` and `function` read through
 #: `settings.address`. A user with `address = 3` configured who hits the panic
@@ -455,6 +476,7 @@ COMMANDS: Final[tuple[CommandMeta, ...]] = (
     _STOP,
     _DRIVE,
     _FUNCTION,
+    _MONITOR,
     _SCHEMA,
 )
 

@@ -216,6 +216,7 @@ def test_manifest_with_no_path_returns_the_tree_shape():
         "stop",
         "drive",
         "function",
+        "monitor",
         "schema",
     ]
     assert {o["name"] for o in payload["global_options"]} == {o.name for o in GLOBAL_OPTIONS}
@@ -457,6 +458,7 @@ def test_build_schema_returns_the_tree_when_no_path_is_given():
         "stop",
         "drive",
         "function",
+        "monitor",
         "schema",
     ]
 
@@ -608,6 +610,12 @@ class _FakeStatusStation:
             ),
             capabilities=Capabilities.unknown(self.identity),
         )
+
+    def events(self, *, interval: float = 0.25):
+        """No broadcasts, and the generator ends rather than blocking. `monitor` is
+        the only command that reads this, and a fake that never returns would hang the
+        suite instead of failing it."""
+        return iter(())
 
     def close(self) -> None:
         pass
@@ -810,7 +818,11 @@ def test_a_station_that_refuses_exits_with_a_code_the_command_publishes(meta, mo
     result = runner.invoke(app, [*_invocation(meta), "--format", "json", "--non-interactive"])
     assert result.exit_code == 6, result.stderr
     assert result.exit_code in meta.exit_codes
-    assert json.loads(result.stderr)["code"] == "unsupported_command"
+    # The LAST line, not the whole stream: stderr carries logs, progress notices and
+    # warnings as well as the error object, by design - `monitor` prints "monitoring
+    # broadcasts" there before it reads anything. stdout is the stream that holds
+    # exactly one value; stderr is the mixed one, and a consumer reads its last line.
+    assert json.loads(result.stderr.strip().splitlines()[-1])["code"] == "unsupported_command"
 
 
 PREFLIGHT_COMMANDS = [c for c in COMMANDS if c.path in ("drive", "function")]
@@ -1045,6 +1057,7 @@ def test_schema_json_prints_one_envelope_with_the_registered_paths_in_tree_order
         "stop",
         "drive",
         "function",
+        "monitor",
         "schema",
     ]
 
