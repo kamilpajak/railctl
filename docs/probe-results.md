@@ -24,6 +24,11 @@
 | Decoder firmware | **5.15** — `CV7=5` main, `CV65=15` sub-version | service read, 2026-08-06 |
 | RailCom **in the decoder** | **enabled** — `CV29` bit 3 set, `CV28=3` | doctor D8, 2026-08-06 |
 | Broadcasts | `61 00`, `61 01`, `81 00` arrive **unsolicited**, three times each | `Station.events()`, 2026-08-06 |
+| `80 80` **before** energising | does **nothing** — the loco resumes exactly as without it | 2026-08-09, control vs test |
+| `80 80` **after** energising | **holds** the layout; caught the loco before it moved at steps 15 and 80 | 2026-08-09 |
+| Emergency stop and the refresh buffer | **holds, never clears** — releasing resumes the stored speed | 2026-08-09, `loco_info` still read 80 |
+| Decoder acceleration | **several seconds** to reach step 80 — why a 0.5 s window showed no motion | 2026-08-09, watched |
+| `in_use_by_other` | set once **any** device has driven the loco, including an earlier railctl run | 2026-08-09, loco 3 vs loco 5 |
 
 The speed step question was one of the five left open in the design. It is answered:
 this locomotive runs 128 steps.
@@ -614,3 +619,95 @@ their last speed. Send an emergency stop before a backup, not only after.
 while the decoder was demonstrably powered and responding. **Do not use `TC` to decide
 whether a locomotive is on the track** — it does not resolve a standing sound decoder's
 current draw. That reading caused a wrong diagnosis during this session.
+
+## `power on`'s stop-all was in the wrong order — SETTLED 2026-08-09
+
+`power on` sends `80 80` (emergency stop, all locomotives) **before** it energises the track,
+on the reasoning that a locomotive resuming its stored speed unattended is the thing to
+prevent. The design spec called that step inferred, never measured. It is now measured, and
+the inference was wrong.
+
+Setup: locomotive 3 (ZIMO MS450P22) on the rolling road, nothing else connected to the
+station — checked, because a second throttle refreshing its own speed would invalidate every
+row below.
+
+### What was measured
+
+The question needs a control. Had only the test run happened and the locomotive stayed put,
+that would not distinguish "the prefix worked" from "this station never resumes".
+
+| # | run | prefix `80 80` | locomotive after power returned |
+| --- | --- | --- | --- |
+| 1 | control — `station.power_on()` alone, CLI bypassed | no | **runs** |
+| 2 | test — `railctl power on` | yes | **runs** |
+
+So the prefix changes nothing. The station resumes a stored speed either way, which also
+confirms what status bit 2 (automatic start mode) claims.
+
+The prefix is not useless, though — it is misordered. `railctl stop` on a **live** track
+works: status goes to `62 22 05`, emergency stop set, voltage kept. So the station either
+ignores `80 80` while the track is dead, or the subsequent power-on clears it.
+
+| # | run | locomotive |
+| --- | --- | --- |
+| 3 | energise, then `80 80` 0.51 s later, stored step **15** | **never moved** |
+| 4 | same, stored step **80** | **never moved** |
+
+### The 0.5 s window, and why it did not matter
+
+That gap is railctl's own, not the station's: `power_on()` pays `power_settle` plus a status
+round trip because the YD7010 never answers `21 81` with `61 01` (measured 2026-08-05).
+Sending the stop straight after the power-on telegram, before the verify, would cut it to
+milliseconds.
+
+It did not matter here because **the decoder's acceleration curve is several seconds long** —
+watched directly: released from a stored step 80, the locomotive spent several seconds
+winding up. Half a second produces no visible motion at either speed tested. That is a fact
+about this decoder's CV3, not about the window being inherently safe, and a decoder with a
+short ramp would behave differently.
+
+### The part that constrains the fix
+
+Reordering alone is not enough, because of run 5:
+
+| # | run | locomotive |
+| --- | --- | --- |
+| 5 | from emergency stop with step 80 stored, send `21 81` to release | **accelerates away** |
+
+`loco_info` still reported `speed=80` after the emergency stop and after the release. **The
+emergency stop holds the refresh buffer; it never clears it.** So `power on` cannot send a
+stop-all and then quietly release it — releasing is exactly what run 5 did. Either the
+command leaves the layout held and says how to release it, or it zeroes the stored speed of
+every locomotive it knows about, and it only ever knows `--address`.
+
+### Also observed
+
+- `drive 0` brakes along the decoder's deceleration curve; `80 80` cuts immediately. Watched:
+  the same locomotive coasted to a stop under the first and stopped hard under the second.
+- The pre-flight refusal works on hardware. With emergency stop active, `railctl drive 15
+  --address 3` exits **20** with `code: track_power`, `condition: emergency_stop`, and the
+  runnable suggestion `["railctl","power","on"]` — and its message distinguishes emergency
+  stop (voltage present) from emergency off (no voltage), which is the distinction the swapped
+  bit order exists to preserve.
+- Status `0x06` was read while the operator measured **0.6 V** on the main track. Under the
+  Lenz bit order `0x06` would mean emergency stop, which leaves the track energised, so
+  railctl would have reported a dead track as powered. This is independent confirmation of the
+  swapped order recorded on 2026-08-05, from a state that discriminates.
+
+## `in_use_by_other` marks any past driver, including us — SETTLED 2026-08-09
+
+The flag fired for locomotive 3 with **nothing but railctl connected to the station**, which
+first looked like a confounded measurement. It is not: the flag tracks "some device has driven
+this locomotive", and every railctl run connects as a new device.
+
+| locomotive | ever driven | `raw_ident` | `in_use_by_other` |
+| --- | --- | --- | --- |
+| 3 | yes, by an earlier railctl run | `0x0C` | **True** |
+| 5 | never | `0x04` | False |
+
+Both report 128 speed steps (`0x04`); the difference is bit 3. It survives across connections
+and does not clear on a re-read within one session.
+
+Consequence for the CLI: a warning worded "another throttle holds loco 3" sends the operator
+looking for a throttle that is not there, on the second and every later run against the same
+locomotive. The fact belongs in the envelope; the wording has to say what the bit means.
