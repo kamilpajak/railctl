@@ -209,12 +209,14 @@ def test_manifest_with_no_path_returns_the_tree_shape():
     payload = manifest(None)
     assert payload["schema"] == "railctl/schema/v1"
     assert [c["path"] for c in payload["commands"]] == [
+        "doctor",
         "status",
         "version",
         "power",
         "stop",
         "drive",
         "function",
+        "monitor",
         "schema",
     ]
     assert {o["name"] for o in payload["global_options"]} == {o.name for o in GLOBAL_OPTIONS}
@@ -449,12 +451,14 @@ def test_build_schema_returns_the_tree_when_no_path_is_given():
     assert result.schema == "railctl/schema/v1"
     assert result.command == "schema"
     assert [c["path"] for c in result.result["commands"]] == [
+        "doctor",
         "status",
         "version",
         "power",
         "stop",
         "drive",
         "function",
+        "monitor",
         "schema",
     ]
 
@@ -488,14 +492,20 @@ import sys  # noqa: E402
 import typer  # noqa: E402
 from typer.testing import CliRunner  # noqa: E402
 
-from railctl.cli._meta import CommandMeta  # noqa: E402
+from railctl.cli._meta import _COMMAND_EXIT_MEANINGS, CommandMeta  # noqa: E402
 from railctl.cli.main import app  # noqa: E402
 from railctl.errors import (  # noqa: E402
     LinkTimeout,
     TrackPowerError,
     UnsupportedCommandError,
 )
-from railctl.station import Station  # noqa: E402
+from railctl.station import (  # noqa: E402
+    Capabilities,
+    Check,
+    DoctorReport,
+    LayoutState,
+    Station,
+)
 from railctl.xbus.replies import LocoInfo, StationStatus, StationVersion  # noqa: E402
 from railctl.xbus.speed import Direction  # noqa: E402
 
@@ -580,6 +590,32 @@ class _FakeStatusStation:
 
     def function_toggle(self, address: int, function: int, *, force_group: bool = False) -> bool:
         return True
+
+    def probe(
+        self,
+        *,
+        address: int | None = None,
+        allow_power_on: bool = False,
+        use_programming_track: bool = True,
+    ) -> DoctorReport:
+        """A report whose D0-D2 all passed, so `doctor` exits 0 like every other row
+        this file drives. The capabilities carry `identity` above, which is what lets
+        `save()` write into the tmp config directory `_isolated_environment` points at
+        rather than refusing an unknown identity."""
+        return DoctorReport(
+            checks=(
+                Check("D0", "link", "ok", "opened"),
+                Check("D1", "link alive", "ok", "XpressNet 4.0"),
+                Check("D2", "station status", "ok", "decoded"),
+            ),
+            capabilities=Capabilities.unknown(self.identity),
+        )
+
+    def events(self, *, interval: float = 0.25):
+        """No broadcasts, and the generator ends rather than blocking. `monitor` is
+        the only command that reads this, and a fake that never returns would hang the
+        suite instead of failing it."""
+        return iter(())
 
     def close(self) -> None:
         pass
@@ -782,7 +818,11 @@ def test_a_station_that_refuses_exits_with_a_code_the_command_publishes(meta, mo
     result = runner.invoke(app, [*_invocation(meta), "--format", "json", "--non-interactive"])
     assert result.exit_code == 6, result.stderr
     assert result.exit_code in meta.exit_codes
-    assert json.loads(result.stderr)["code"] == "unsupported_command"
+    # The LAST line, not the whole stream: stderr carries logs, progress notices and
+    # warnings as well as the error object, by design - `monitor` prints "monitoring
+    # broadcasts" there before it reads anything. stdout is the stream that holds
+    # exactly one value; stderr is the mixed one, and a consumer reads its last line.
+    assert json.loads(result.stderr.strip().splitlines()[-1])["code"] == "unsupported_command"
 
 
 PREFLIGHT_COMMANDS = [c for c in COMMANDS if c.path in ("drive", "function")]
@@ -965,6 +1005,33 @@ def test_power_resume_reaches_the_partial_exit_code_too(monkeypatch):
     assert payload["result"]["failed_step"] == "read_status"
 
 
+def test_doctor_reaches_the_partial_exit_code_it_publishes(monkeypatch):
+    """`DOCTOR_EXIT_CODES` publishes 8, so something has to be able to produce it.
+
+    A `--power-on` run that energised the track and then read NO emergency stop back
+    off the station is the measured runaway (docs/probe-results.md, runs 1 and 2): the
+    probe itself succeeded, so this is a partial result carrying the hazard, not an
+    error saying nothing happened.
+    """
+
+    class _Unheld(_FakeStatusStation):
+        def probe(self, **kwargs) -> DoctorReport:
+            report = super().probe(**kwargs)
+            return DoctorReport(
+                checks=report.checks,
+                capabilities=report.capabilities,
+                layout=LayoutState(energised=True, track_power=True, held=False),
+            )
+
+    monkeypatch.setattr(Station, "open", staticmethod(lambda *a, **k: _Unheld()))
+    result = runner.invoke(app, ["doctor", "--power-on", "--format", "json", "--non-interactive"])
+    assert result.exit_code == PARTIAL_EXIT_CODE, result.stderr
+    assert result.exit_code in command_meta("doctor").exit_codes
+    payload = json.loads(result.stdout)
+    assert payload["ok"] is False
+    assert payload["warnings"][0]["name"] == "hold_not_confirmed"
+
+
 def test_the_root_group_carries_the_global_options_and_no_positionals():
     root = typer.main.get_command(app)
     assert _parsed_surface(root) == {
@@ -983,12 +1050,14 @@ def test_schema_json_prints_one_envelope_with_the_registered_paths_in_tree_order
     payload = json.loads(result.stdout)["result"]
     assert payload["schema"] == "railctl/schema/v1"
     assert [c["path"] for c in payload["commands"]] == [
+        "doctor",
         "status",
         "version",
         "power",
         "stop",
         "drive",
         "function",
+        "monitor",
         "schema",
     ]
 
@@ -1350,3 +1419,20 @@ def test_double_verbose_after_the_subcommand_reaches_the_traceback_switch(fake_s
     # resolved and inert: no decoded diagnostics, no traceback.
     runner.invoke(app, ["status", "-vv"])
     assert os.environ["RAILCTL_VERBOSE"] == "2"
+
+
+@pytest.mark.parametrize("path", sorted(_COMMAND_EXIT_MEANINGS))
+def test_a_command_specific_exit_meaning_reaches_that_command_s_help(path: str):
+    """Every override in the table is printed, and printed for the right command.
+
+    `_COMMAND_EXIT_MEANINGS` exists because the class docstring behind an exit code is
+    not always what the code means for a particular command - `drive` exits 12 because a
+    service-mode session is open, not because "a programming operation is already
+    running". Nothing constrained the table: renaming a key left the whole suite green,
+    so an override could be added, misspelled, and silently never used.
+    """
+    meta = command_meta(path)
+    epilog = help_epilog(meta)
+    for code, meaning in _COMMAND_EXIT_MEANINGS[path].items():
+        assert code in meta.exit_codes, f"{path} overrides {code} but does not publish it"
+        assert meaning in epilog, f"{path}'s override for {code} never reaches its help"

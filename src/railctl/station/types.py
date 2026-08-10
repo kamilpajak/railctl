@@ -28,6 +28,7 @@ verified by reading the CV back, never written and trusted.
 
 from __future__ import annotations
 
+import dataclasses
 import enum
 from dataclasses import dataclass
 from typing import Final, Literal
@@ -99,6 +100,79 @@ class StationEvent:
 
 
 @dataclass(frozen=True, slots=True)
+class LayoutState:
+    """What a `railctl doctor --power-on` run did to the layout, and the state it
+    left behind. Issue #14.
+
+    Every field is tri-state for the same reason every capability is, and for a
+    sharper one: an operator reads this before walking up to the track. "The doctor
+    did not confirm the hold" and "the doctor confirmed there is no hold" are
+    different things to know, and both are different from "the doctor never touched
+    the power".
+
+    A hazard is the one place where UNKNOWN is not neutral. A capability nobody
+    measured is simply not yet known; a hold nobody confirmed has to be treated as
+    absent, because acting on it means standing next to a locomotive that may start.
+    So the CLI's own reading of `held` is "anything but True is not safe" - which is
+    the opposite direction from `pom_read`, deliberately, and only because this
+    field describes a moving train rather than a decoder feature.
+    """
+
+    #: `False` - this run did not energise the track and changed nothing about its
+    #: power. `True` - it energised it and the station confirmed. `None` - the
+    #: power-on telegram went out and the verify failed, so the track MAY be live.
+    energised: bool | None = False
+    #: The track power the doctor left behind, read off the station's own status at
+    #: the end of the run. `None` when the doctor changed nothing, or could not read
+    #: it back.
+    track_power: bool | None = None
+    #: Whether the whole layout is held in emergency stop, read off the station's own
+    #: bit and never off the fact that a stop telegram was sent.
+    held: bool | None = None
+    #: The address that was sent speed 0 so a later release cannot start it, and
+    #: whether that telegram was accepted. `idled_address` is `None` when the run had
+    #: no address to zero.
+    idled_address: int | None = None
+    idled: bool | None = None
+    #: Whether the locomotive's stored direction was read and kept. `None` when no
+    #: speed-0 telegram was accepted, so there is nothing to say either way.
+    direction_preserved: bool | None = None
+    #: Whether this run is RESPONSIBLE for leaving the layout held, and therefore for
+    #: putting the hold back every time one of its own telegrams clears it.
+    #:
+    #: `True` in two cases: the run energised a dead track and held it, and the run
+    #: found the layout already held. The second is not defensive - every service-mode
+    #: session ends with resume-operations, which is exactly the telegram that releases
+    #: an emergency stop (MEASURED 2026-08-09, run 5: a locomotive held with step 80
+    #: stored accelerated away on it), so a plain `railctl doctor` on a held layout
+    #: releases a hold it never applied.
+    #:
+    #: `False` means there is no hold to maintain: the run found none and applied none.
+    #: The doctor must not invent one - stopping a layout that was running is a change
+    #: nobody asked for - which is why this is a flag and not "hold whenever you can".
+    #: Not tri-state, unlike every field above: this says what this run OWES, which is
+    #: decided by code and always known, not what the station reported.
+    must_leave_held: bool = False
+
+
+#: The layout as a run that never touched the track power leaves it: nothing
+#: energised, nothing held, nothing zeroed. Named once so a doctor report can be
+#: compared against it rather than against seven separate fields.
+LAYOUT_UNTOUCHED: Final[LayoutState] = LayoutState()
+
+
+def layout_json(layout: LayoutState) -> dict[str, object]:
+    """`LayoutState` as a JSON object, keys read off the dataclass.
+
+    One definition, two callers: the `doctor` envelope's `layout` block, and the
+    `details.layout` a probe that died partway attaches to its own exception. A
+    second hand-written key list is how the successful ending and the failed one
+    start describing the layout with different words.
+    """
+    return {f.name: getattr(layout, f.name) for f in dataclasses.fields(layout)}
+
+
+@dataclass(frozen=True, slots=True)
 class Check:
     """One row of a `railctl doctor` report."""
 
@@ -120,6 +194,12 @@ _MUST_NOT_FAIL: Final[str] = "D3"
 class DoctorReport:
     checks: tuple[Check, ...]
     capabilities: Capabilities
+    #: What the run did to the layout. Defaulted rather than required because the
+    #: overwhelming majority of runs - every one without `--power-on`, and every one
+    #: that found the track already live - leave it exactly as `LAYOUT_UNTOUCHED`
+    #: describes, and a report that has to state that explicitly invites the one
+    #: caller who forgets to.
+    layout: LayoutState = LAYOUT_UNTOUCHED
 
     @property
     def ok(self) -> bool:

@@ -44,6 +44,7 @@ from railctl.station.types import (
     ProgMode,
 )
 from railctl.xbus.commands import (
+    cmd_emergency_stop_all,
     cmd_pom_read_byte,
     cmd_pom_write_byte,
     cmd_service_direct_read,
@@ -420,7 +421,7 @@ class CvProgrammer:
             self._station.pause(self._station.timing.pom_write_settle)
             return CvEncoding.POM_ZERO_BASED, False
         telegram, encoding, page_index = self.service_write_telegram(cv, value)
-        power_before = self._track_power()
+        before = self._status_before()
         echo_confirmed_only = False
         try:
             reply = self._station.exchange(
@@ -518,7 +519,9 @@ class CvProgrammer:
                     f"unexpected reply writing CV{cv} in service mode: {outcome!r}", cv=cv
                 )
         finally:
-            self.exit_service_mode(restore_power=power_before)
+            self.exit_service_mode(
+                restore_power=before.track_power, restore_hold=before.emergency_stop
+            )
         return encoding, echo_confirmed_only
 
     def raw_cv_write(self, cv: int, value: int, *, address: int | None, mode: ProgMode) -> None:
@@ -693,14 +696,30 @@ class CvProgrammer:
             return cmd_service_direct_write(cv, value), encoding, page_index
         return cmd_service_ext_write(cv, value), encoding, page_index
 
-    def exit_service_mode(self, *, restore_power: bool) -> None:
-        """Leave service mode and restore the pre-operation track power state.
+    def exit_service_mode(self, *, restore_power: bool, restore_hold: bool) -> None:
+        """Leave service mode and restore the track state this session found.
 
         Always called from a `finally` by every service-mode caller: a
         `DecoderNoAckError` raised mid-read must still send resume-operations,
         because that is what re-energises the main track, and skipping it
         here would leave the layout dead until the next unrelated command
         happens to touch power.
+
+        `restore_hold` is not optional and has no default, deliberately.
+        Resume-operations is the telegram that CLEARS an emergency stop -
+        MEASURED 2026-08-09 (docs/probe-results.md, run 5): a locomotive held
+        with step 80 stored accelerated away on it, and its stored speed read
+        80 both before and after, because the hold keeps the station's refresh
+        buffer and never clears it. So every service-mode session on a held
+        layout releases the hold halfway through, and this is the method that
+        does it. A caller has to say what it found; a default would let the
+        next service-mode path silently start a locomotive, which is the
+        defect this parameter exists to close.
+
+        The hold goes back BEFORE any power-off, never after: runs 1 and 2
+        measured that a stop telegram sent to a dead track changes nothing,
+        and runs 3 and 4 measured the same telegram holding stored steps 15
+        and 80 on a live one.
 
         Every exchange in this method uses `TIMING.li_ack_programming`, the
         same 95 s budget as the read itself, through completion: the LI-USB
@@ -726,6 +745,10 @@ class CvProgrammer:
                 raise StationBusyError(
                     "the command station is still reporting service mode after "
                     "resume-operations was sent twice"
+                )
+            if restore_hold:
+                self._station.exchange(
+                    cmd_emergency_stop_all(), timeout=self._station.timing.li_ack_programming
                 )
             if not restore_power:
                 # Not optional: the measured state of this hardware is an
@@ -768,17 +791,19 @@ class CvProgrammer:
 
         The reason this method cannot honour a given `page` yet is narrower:
         `select_page` over SERVICE routes through `_write_and_confirm`'s
-        SERVICE branch, whose `service_write_telegram`/`_track_power` are
+        SERVICE branch, whose `service_write_telegram`/`_status_before` are
         added by Task 6b, not this one. Rather than silently drop a `page`
         this method cannot act on, a non-`None` page emits `page.not_selected`
         so a caller relying on paging in service mode finds out immediately,
         instead of reading whatever page the decoder already had selected.
         """
-        power_before = self._station.status().track_power
+        before = self._station.status()
         try:
             return self._read_in_open_session(cv, page=page)
         finally:
-            self.exit_service_mode(restore_power=power_before)
+            self.exit_service_mode(
+                restore_power=before.track_power, restore_hold=before.emergency_stop
+            )
 
     def service_read_many(self, cvs: Sequence[int]) -> list[CvReadOutcome]:
         """Read several CVs inside ONE service-mode session.
@@ -815,7 +840,7 @@ class CvProgrammer:
             # for nothing would stamp `_last_session_end` and make the NEXT
             # real read wait out a gap it does not owe.
             return []
-        power_before = self._station.status().track_power
+        before = self._station.status()
         outcomes: list[CvReadOutcome] = []
         try:
             for cv in cvs:
@@ -841,7 +866,9 @@ class CvProgrammer:
                 else:
                     outcomes.append(CvReadOutcome(spec=spec, result=result, error=None))
         finally:
-            self.exit_service_mode(restore_power=power_before)
+            self.exit_service_mode(
+                restore_power=before.track_power, restore_hold=before.emergency_stop
+            )
         return outcomes
 
     def _read_in_open_session(self, cv: int, *, page: CvPage | None = None) -> CvResult:
@@ -1501,18 +1528,24 @@ class CvProgrammer:
             elapsed=self._station.now() - started,
         )
 
-    def _track_power(self) -> bool:
+    def _status_before(self) -> StationStatus:
         """Read `21 24 05` once, self-contained: `service_write` needs this
         BEFORE entering service mode (to know what to restore afterwards, spec
         line 782), and it is simple enough not to need `await_result`'s poll
         machinery - a status reply is immediate, never paged.
+
+        Returns the whole status rather than one bit. `exit_service_mode`
+        restores two things - the track power and the hold - and reading them
+        from one reply is what keeps them describing the same moment; a second
+        round trip for the second bit would also cost a telegram on a link
+        whose rule is one command at a time.
         """
         reply = self._station.exchange(
             cmd_station_status(), timeout=self._station.timing.li_ack_normal
         )
         if not isinstance(reply, StationStatus):
             raise ProtocolError(f"expected a station status reply, got {reply!r}")
-        return reply.track_power
+        return reply
 
     def service_write(
         self, cv: int, value: int, *, verify: bool, page: CvPage | None = None

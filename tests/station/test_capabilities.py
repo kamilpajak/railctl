@@ -18,6 +18,7 @@ from railctl.errors import RailctlError
 from railctl.station.capabilities import (
     CAPABILITIES_VERSION,
     LEARNABLE_FIELDS,
+    PERSISTED_FIELDS,
     UNKNOWN_IDENTITY,
     Capabilities,
 )
@@ -263,3 +264,212 @@ def test_capabilities_is_frozen():
     caps = Capabilities.unknown(IDENTITY)
     with pytest.raises(dataclasses.FrozenInstanceError):
         caps.pom_read = True
+
+
+# -- the writer: every persistable field, and what a narrower run may not erase --
+
+#: One non-default value per persisted field. Compared against `PERSISTED_FIELDS`
+#: below, so a field added to `Capabilities` fails this file until someone gives it
+#: a value here - which is what makes the round-trip test cover the NEXT field as
+#: well as today's thirteen. `pom_read_provenance` is the one that was missing from
+#: the writer while the loader, `LEARNABLE_FIELDS` and the CLI envelope all carried
+#: it.
+_SAMPLE_VALUES: dict[str, object] = {
+    "probed_at": "2026-08-09T12:00:00Z",
+    "xpressnet_version": "4.0",
+    "command_station_id": 0x12,
+    "pom_read": False,
+    "pom_read_provenance": "silence",
+    "pom_result_channel": "none",
+    "pom_echo_zero_based": True,
+    "loco_address_threshold": 128,
+    "service_direct_cv": True,
+    "service_ext_cv": False,
+    "z21_cv_opcodes": True,
+    "function_groups_4_5": False,
+    "single_function_cmd": True,
+    "notes": ("POM read produced no result at all",),
+}
+
+
+def test_every_persistable_field_is_named_in_this_files_sample_values():
+    """The guard on the guard: the round-trip test below can only cover a field it
+    has a value for, so a new field must fail HERE, loudly, rather than quietly
+    dropping out of the coverage of every test under it."""
+    assert set(_SAMPLE_VALUES) == set(PERSISTED_FIELDS)
+
+
+def test_every_persistable_field_survives_a_save_and_a_load(tmp_path: Path):
+    """The writer used to enumerate its keys by hand, and `pom_read_provenance` was
+    not among them: `Capabilities(pom_read=False, pom_read_provenance="silence")`
+    saved and reloaded came back with the provenance gone. That field is what tells
+    "the station refused" (`61 82`) from "nothing came back", and it is the entire
+    reason `pom_read=False` from silence is allowed at all.
+    """
+    path = tmp_path / "capabilities.json"
+    caps = Capabilities(link_identity=IDENTITY, **_SAMPLE_VALUES)
+    assert caps.save(path) is True
+    assert Capabilities.load(path, IDENTITY) == caps
+
+
+def test_the_provenance_of_a_false_from_silence_reaches_the_file(tmp_path: Path):
+    """The measured case, written out rather than derived, because it is the one
+    exception to "only a 61 82 earns a false" and a reader that must not act on a
+    guess reads this field and not `pom_read`."""
+    path = tmp_path / "capabilities.json"
+    Capabilities(link_identity=IDENTITY, pom_read=False, pom_read_provenance="silence").save(path)
+    raw = json.loads(path.read_text(encoding="utf-8"))
+    assert raw["links"][IDENTITY]["pom_read_provenance"] == "silence"
+
+
+def test_a_narrower_run_does_not_erase_what_a_wider_run_measured(tmp_path: Path):
+    """`doctor --power-on` establishes four capabilities; a later plain `doctor` -
+    track dead, so D4 never runs, and D5-D8 may be skipped outright - holds `None`
+    for all four. `None` is "this run learned nothing here", so it must not be
+    written over a measurement that cost 6.7 s per silent POM attempt to make.
+    """
+    path = tmp_path / "capabilities.json"
+    wide = Capabilities(
+        link_identity=IDENTITY,
+        pom_read=False,
+        pom_read_provenance="silence",
+        service_direct_cv=True,
+        z21_cv_opcodes=True,
+    )
+    assert wide.save(path) is True
+
+    narrow = Capabilities(link_identity=IDENTITY, xpressnet_version="4.0")
+    assert narrow.save(path) is True
+
+    after = Capabilities.load(path, IDENTITY)
+    assert after.pom_read is False
+    assert after.pom_read_provenance == "silence"
+    assert after.service_direct_cv is True
+    assert after.z21_cv_opcodes is True
+    assert after.xpressnet_version == "4.0"  # what this run DID measure still lands
+
+
+def test_a_run_that_measured_something_new_overwrites_the_stored_value(tmp_path: Path):
+    """The other half: merging must not freeze the file. A re-probe that reaches a
+    different verdict replaces it - only `None` is barred from overwriting."""
+    path = tmp_path / "capabilities.json"
+    Capabilities(link_identity=IDENTITY, pom_read=False, pom_read_provenance="silence").save(path)
+    Capabilities(link_identity=IDENTITY, pom_read=True).save(path)
+    assert Capabilities.load(path, IDENTITY).pom_read is True
+
+
+def test_a_re_probed_pom_read_does_not_keep_the_reason_for_the_verdict_it_replaced(
+    tmp_path: Path,
+):
+    """A provenance belongs to the verdict it explains, and dies with it.
+
+    The merge rule is "`None` means this run learned nothing here, so leave what was
+    stored". `pom_read_provenance` is the one field that rule must not reach:
+    `CvProgrammer.pom_read` writes `{"pom_read": True, "pom_read_provenance": None}` in
+    one call, deliberately, so a stale reason cannot outlive the answer it was about.
+
+    Fit a RailCom detector and re-run the doctor, and the merge put the old reason back:
+    the file held `pom_read: true` beside `pom_read_provenance: "silence"` - "it works,
+    because nothing came back". CLAUDE.md names this as the field a reader who must not
+    act on a guess consults instead of `pom_read`, so a wrong value here is worse than
+    none. The test above writes the same pair and asserts only `pom_read`, which is how
+    it walked past.
+    """
+    path = tmp_path / "capabilities.json"
+    Capabilities(
+        link_identity=IDENTITY,
+        pom_read=False,
+        pom_read_provenance="silence",
+        service_direct_cv=True,
+    ).save(path)
+    Capabilities(link_identity=IDENTITY, pom_read=True, pom_read_provenance=None).save(path)
+
+    reloaded = Capabilities.load(path, IDENTITY)
+    assert reloaded.pom_read is True
+    assert reloaded.pom_read_provenance is None
+    # A field this run said nothing about is still kept - the merge rule itself is intact,
+    # and this exception is narrow rather than a hole in it.
+    assert reloaded.service_direct_cv is True
+
+
+def test_a_run_that_did_not_touch_pom_read_leaves_its_reason_alone(tmp_path: Path):
+    """The other side of the exception. `pom_read_provenance` follows `pom_read`, so a
+    run that established nothing about the verdict may not discard the reason either -
+    otherwise a plain `railctl doctor` on a dead track would strip the provenance off a
+    measurement that is still perfectly current."""
+    path = tmp_path / "capabilities.json"
+    Capabilities(link_identity=IDENTITY, pom_read=False, pom_read_provenance="silence").save(path)
+    Capabilities(link_identity=IDENTITY, service_ext_cv=True).save(path)
+
+    reloaded = Capabilities.load(path, IDENTITY)
+    assert reloaded.pom_read is False
+    assert reloaded.pom_read_provenance == "silence"
+
+
+def test_a_run_that_re_probed_pom_clears_the_note_that_described_the_old_verdict(
+    tmp_path: Path,
+):
+    """D4 clears the silence note before it re-probes, and the note itself tells the
+    operator to fit a RailCom detector and run the doctor again. A run where POM then
+    answers must be able to erase it, or the file keeps telling them to fix something
+    that is already fixed."""
+    path = tmp_path / "capabilities.json"
+    Capabilities(
+        link_identity=IDENTITY,
+        pom_read=False,
+        pom_read_provenance="silence",
+        notes=("POM read produced no result at all",),
+    ).save(path)
+
+    Capabilities(link_identity=IDENTITY, pom_read=True).save(path)
+    assert Capabilities.load(path, IDENTITY).notes == ()
+
+
+def test_a_run_that_established_no_pom_verdict_keeps_the_stored_notes(tmp_path: Path):
+    """The note describes the stored `pom_read`, and `merged_over` is keeping that
+    value, so it keeps the prose with it: the two are decided by one condition and
+    cannot drift apart."""
+    path = tmp_path / "capabilities.json"
+    Capabilities(
+        link_identity=IDENTITY,
+        pom_read=False,
+        pom_read_provenance="silence",
+        notes=("POM read produced no result at all",),
+    ).save(path)
+
+    Capabilities(link_identity=IDENTITY, xpressnet_version="4.0").save(path)
+    after = Capabilities.load(path, IDENTITY)
+    assert after.notes == ("POM read produced no result at all",)
+    assert after.pom_read is False
+
+
+def test_a_note_from_a_run_that_probed_no_pom_is_still_written(tmp_path: Path):
+    """Nothing but D4 writes a note today. The first thing that does must not have it
+    dropped by the writer - which is exactly how `pom_read_provenance` was lost."""
+    path = tmp_path / "capabilities.json"
+    Capabilities(link_identity=IDENTITY, notes=("something else worth saying",)).save(path)
+    assert Capabilities.load(path, IDENTITY).notes == ("something else worth saying",)
+
+
+def test_merged_over_refuses_another_links_record():
+    """Two links' facts must never be folded together - the same reason `save`
+    refuses `UNKNOWN_IDENTITY`."""
+    mine = Capabilities.unknown(IDENTITY)
+    theirs = Capabilities.unknown("other-station").with_learned(pom_read=True)
+    with pytest.raises(ValueError, match="two different links"):
+        mine.merged_over(theirs)
+
+
+def test_a_malformed_entry_for_this_link_is_replaced_rather_than_blocking_the_save(
+    tmp_path: Path,
+):
+    """Same policy as a file that is not JSON at all (`_merged_links`): `save` is how
+    a fresh probe recovers a mangled capabilities.json. A merge that raised here
+    would leave the file permanently unwritable, with the doctor - the one command
+    that could fix it - the one command unable to."""
+    path = tmp_path / "capabilities.json"
+    path.write_text(
+        json.dumps({"version": 1, "links": {IDENTITY: {"pom_read": "yes"}}}), encoding="utf-8"
+    )
+    assert Capabilities(link_identity=IDENTITY, pom_read=True).save(path) is True
+    assert Capabilities.load(path, IDENTITY).pom_read is True

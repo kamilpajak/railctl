@@ -39,6 +39,7 @@ from railctl.cli._meta import (
 from railctl.cli.config import capabilities_path
 from railctl.cli.deps import (
     DIRECTION_TEXT,
+    HELD_LINES,
     check_address,
     checked_enum,
     close_after,
@@ -79,11 +80,6 @@ _NON_INTERACTIVE = global_option("--non-interactive")
 
 _STATE_ARG = typer_argument(POWER_STATE_ARG)
 _STOP_ADDRESS = typer_option(STOP_ADDRESS_OPT)
-
-
-#: The one command that releases the hold `power on` leaves behind, named once
-#: so the human text, the JSON and this module all quote the same string.
-RESUME_COMMAND: Final[str] = "railctl power resume"
 
 
 @dataclass(frozen=True, slots=True)
@@ -271,11 +267,8 @@ def _say_the_hold(outcome: CommandResult, status: StationStatus) -> None:
     if status.emergency_off:
         _warn_cannot_move(outcome, status, after="power on")
     elif status.emergency_stop:
-        outcome.say(
-            "the layout is held: the track has voltage and nothing will move until the hold "
-            "is released"
-        )
-        outcome.say(f"run `{RESUME_COMMAND}` to release it, with the layout in view")
+        for line in HELD_LINES:
+            outcome.say(line)
     else:
         # Not a report of what we asked for - a report of what the station
         # answered. Saying "held" off the back of a telegram we sent, without
