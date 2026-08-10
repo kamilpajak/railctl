@@ -34,6 +34,7 @@ from railctl.station.timing import TIMING
 from railctl.station.types import EVENT_NAMES, ProgMode
 from railctl.xbus.codec import encode
 from railctl.xbus.commands import (
+    cmd_emergency_stop_all,
     cmd_service_direct_read,
     cmd_service_ext_read,
     cmd_service_result_request,
@@ -195,7 +196,7 @@ def test_exit_service_mode_retries_once_then_raises_station_busy_error(bench):
     bench.expect(STATUS_REQUEST, reply=STATUS_SERVICE_MODE)
 
     with pytest.raises(StationBusyError):
-        bench.station.programmer.exit_service_mode(restore_power=True)
+        bench.station.programmer.exit_service_mode(restore_power=True, restore_hold=False)
     assert bench.transport.script_pending == []
 
 
@@ -210,7 +211,7 @@ def test_exit_service_mode_succeeds_on_the_second_attempt(bench):
     bench.expect(cmd_track_power_on(), reply=ACK)
     bench.expect(STATUS_REQUEST, reply=STATUS_POWER_ON)
 
-    bench.station.programmer.exit_service_mode(restore_power=True)
+    bench.station.programmer.exit_service_mode(restore_power=True, restore_hold=False)
 
     assert bench.transport.script_pending == []
 
@@ -219,7 +220,7 @@ def test_exit_service_mode_does_not_power_off_when_track_was_powered_before(benc
     bench.expect(cmd_track_power_on(), reply=ACK)
     bench.expect(STATUS_REQUEST, reply=STATUS_POWER_ON)
 
-    bench.station.programmer.exit_service_mode(restore_power=True)
+    bench.station.programmer.exit_service_mode(restore_power=True, restore_hold=False)
 
     # No track_power_off exchange is scripted: if the implementation sent one
     # anyway, FakeTransport would raise its own AssertionError ("unexpected
@@ -236,7 +237,56 @@ def test_exit_service_mode_powers_off_when_track_was_unpowered_before(bench):
     bench.expect(STATUS_REQUEST, reply=STATUS_POWER_OFF)
     bench.expect(cmd_track_power_off(), reply=ACK)
 
-    bench.station.programmer.exit_service_mode(restore_power=False)
+    bench.station.programmer.exit_service_mode(restore_power=False, restore_hold=False)
+
+    assert bench.transport.script_pending == []
+
+
+def test_exit_service_mode_puts_back_a_hold_the_session_found(bench):
+    """Resume-operations is the telegram that CLEARS an emergency stop - MEASURED
+    2026-08-09, run 5, where a locomotive held with step 80 stored accelerated away on
+    it. A session that started on a held layout must therefore hold it again before it
+    returns, or every service-mode command silently releases the layout.
+    """
+    bench.expect(cmd_track_power_on(), reply=ACK)
+    bench.expect(STATUS_REQUEST, reply=STATUS_POWER_ON)
+    bench.expect(cmd_emergency_stop_all(), reply=ACK)
+
+    bench.station.programmer.exit_service_mode(restore_power=True, restore_hold=True)
+
+    assert bench.transport.script_pending == []
+
+
+def test_exit_service_mode_holds_before_it_powers_the_track_back_off(bench):
+    """The order is the measurement, not a preference: runs 1 and 2 measured that a
+    stop telegram sent to a DEAD track changes nothing at all, and runs 3 and 4 that
+    the same telegram held stored steps 15 and 80 on a live one. The ordered script
+    below fails if the two are swapped."""
+    bench.expect(cmd_track_power_on(), reply=ACK)
+    bench.expect(STATUS_REQUEST, reply=STATUS_POWER_OFF)
+    bench.expect(cmd_emergency_stop_all(), reply=ACK)
+    bench.expect(cmd_track_power_off(), reply=ACK)
+
+    bench.station.programmer.exit_service_mode(restore_power=False, restore_hold=True)
+
+    assert bench.transport.script_pending == []
+
+
+def test_a_service_read_on_a_held_layout_leaves_it_held(bench_factory):
+    """The whole path, not just the exit: `service_read` reads the status BEFORE it
+    opens the session, and that reading is what decides whether the hold goes back.
+    `0x05` is the measured held-and-live byte - bit 0 is emergency stop on this
+    hardware, the reverse of the Lenz spec."""
+    bench = bench_factory(capabilities=make_capabilities(service_direct_cv=True))
+    held_and_live = encode(0x62, 0x22, 0x05)
+    bench.expect(STATUS_REQUEST, reply=held_and_live)
+    bench.expect(cmd_service_direct_read(8), reply=ACK)
+    bench.expect(POLL, reply=encode(0x63, 0x14, 0x08, 145))
+    bench.expect(cmd_track_power_on(), reply=ACK)
+    bench.expect(STATUS_REQUEST, reply=STATUS_POWER_ON)
+    bench.expect(cmd_emergency_stop_all(), reply=ACK)
+
+    bench.station.programmer.service_read(8)
 
     assert bench.transport.script_pending == []
 
@@ -250,7 +300,7 @@ def test_exit_service_mode_every_exchange_uses_the_programming_timeout(bench):
 
     started = bench.clock.monotonic()
     with pytest.raises(LinkTimeout):
-        bench.station.programmer.exit_service_mode(restore_power=False)
+        bench.station.programmer.exit_service_mode(restore_power=False, restore_hold=False)
     elapsed = bench.clock.monotonic() - started
 
     assert elapsed == pytest.approx(TIMING.li_ack_programming, abs=0.5)
@@ -264,7 +314,7 @@ def test_exit_service_mode_always_invalidates_the_page_cache(bench, monkeypatch)
     bench.expect(cmd_track_power_on(), reply=ACK)
     bench.expect(STATUS_REQUEST, reply=STATUS_POWER_ON)
 
-    bench.station.programmer.exit_service_mode(restore_power=True)
+    bench.station.programmer.exit_service_mode(restore_power=True, restore_hold=False)
 
     assert len(calls) == 1
 
@@ -278,7 +328,7 @@ def test_exit_service_mode_invalidates_the_cache_even_when_it_raises(bench, monk
     bench.expect(STATUS_REQUEST, reply=STATUS_SERVICE_MODE)
 
     with pytest.raises(StationBusyError):
-        bench.station.programmer.exit_service_mode(restore_power=True)
+        bench.station.programmer.exit_service_mode(restore_power=True, restore_hold=False)
     assert len(calls) == 1
 
 

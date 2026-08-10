@@ -28,6 +28,20 @@ from railctl.xbus.address import LOCO_ADDR_MAX, LOCO_ADDR_MIN
 from railctl.xbus.replies import LocoInfo
 from railctl.xbus.speed import Direction
 
+#: The one command that releases the hold `power on` - and now `doctor --power-on`
+#: (issue #14) - leaves behind. Named once, here rather than in `commands/power.py`,
+#: for exactly the reason `DIRECTION_TEXT` below is: two command modules quote this
+#: string at an operator standing next to a live layout, and a second private copy is
+#: how they start telling them to run two different things.
+RESUME_COMMAND: Final[str] = "railctl power resume"
+
+#: What both of those commands say once the station has confirmed the hold. Kept
+#: beside the command name so the sentence and the recovery cannot drift apart.
+HELD_LINES: Final[tuple[str, ...]] = (
+    "the layout is held: the track has voltage and nothing will move until the hold is released",
+    f"run `{RESUME_COMMAND}` to release it, with the layout in view",
+)
+
 #: A direction is a word in every rendering, never a wire value, and it is
 #: spelled here once. `drive` and `power` both report one, and two private
 #: copies of this table are how they start disagreeing about the spelling a

@@ -657,7 +657,7 @@ def test_service_write_succeeds_when_the_wait_loop_reports_ready(bench_factory, 
     bench.expect(cmd_station_status(), reply=STATUS_POWERED)
     bench.expect(cmd_z21_cv_write(8, 145), reply=ACK)
     monkeypatch.setattr(programmer, "await_result", lambda *a, **k: Ready())
-    monkeypatch.setattr(programmer, "exit_service_mode", lambda *, restore_power: None)
+    monkeypatch.setattr(programmer, "exit_service_mode", lambda **_: None)
     result = programmer.service_write(8, 145, verify=True)
     assert result.verified is True
     assert result.mode is ProgMode.SERVICE
@@ -673,7 +673,7 @@ def test_service_write_raises_decoder_no_ack_when_the_wait_loop_reports_no_ack(
     bench.expect(cmd_station_status(), reply=STATUS_POWERED)
     bench.expect(cmd_z21_cv_write(8, 145), reply=ACK)
     monkeypatch.setattr(programmer, "await_result", lambda *a, **k: NoAck())
-    monkeypatch.setattr(programmer, "exit_service_mode", lambda *, restore_power: None)
+    monkeypatch.setattr(programmer, "exit_service_mode", lambda **_: None)
     with pytest.raises(DecoderNoAckError):
         programmer.service_write(8, 145, verify=True)
 
@@ -688,16 +688,19 @@ def test_service_write_calls_exit_service_mode_and_invalidates_cache_on_failure(
     invalidated = watch_invalidations(bench.station)
     bench.expect(cmd_station_status(), reply=STATUS_POWERED)
     bench.expect(cmd_z21_cv_write(8, 145), reply=ACK)
-    exit_calls: list[bool] = []
+    exit_calls: list[tuple[bool, bool]] = []
     monkeypatch.setattr(programmer, "await_result", lambda *a, **k: NoAck())
     monkeypatch.setattr(
         programmer,
         "exit_service_mode",
-        lambda *, restore_power: exit_calls.append(restore_power),
+        lambda *, restore_power, restore_hold: exit_calls.append((restore_power, restore_hold)),
     )
     with pytest.raises(DecoderNoAckError):
         programmer.service_write(8, 145, verify=True)
-    assert exit_calls == [True]
+    # STATUS_POWERED carries no emergency-stop bit, so this write found the layout
+    # live and free: nothing to restore, and re-asserting a hold nobody had would
+    # stop a layout the operator was running.
+    assert exit_calls == [(True, False)]
     assert len(invalidated) == 1
 
 
@@ -709,7 +712,7 @@ def test_service_write_with_verify_false_is_blind(bench_factory, monkeypatch):
     bench.expect(cmd_station_status(), reply=STATUS_POWERED)
     bench.expect(cmd_z21_cv_write(8, 145), reply=ACK)
     monkeypatch.setattr(programmer, "await_result", lambda *a, **k: Ready())
-    monkeypatch.setattr(programmer, "exit_service_mode", lambda *, restore_power: None)
+    monkeypatch.setattr(programmer, "exit_service_mode", lambda **_: None)
     result = programmer.service_write(8, 145, verify=False)
     assert result.verified is False
     name, payload = bench.events[-1]
@@ -738,7 +741,7 @@ def test_service_write_raises_decoder_not_responding_when_the_wait_loop_times_ou
         "await_result",
         lambda *a, **k: TimedOut(polls=190, ready_streak=0, saw_no_ack=False),
     )
-    monkeypatch.setattr(programmer, "exit_service_mode", lambda *, restore_power: None)
+    monkeypatch.setattr(programmer, "exit_service_mode", lambda **_: None)
     with pytest.raises(DecoderNotRespondingError):
         programmer.service_write(8, 145, verify=True)
 
@@ -755,7 +758,7 @@ def test_service_write_raises_decoder_no_ack_when_the_wait_loop_times_out_after_
         "await_result",
         lambda *a, **k: TimedOut(polls=190, ready_streak=0, saw_no_ack=True),
     )
-    monkeypatch.setattr(programmer, "exit_service_mode", lambda *, restore_power: None)
+    monkeypatch.setattr(programmer, "exit_service_mode", lambda **_: None)
     with pytest.raises(DecoderNoAckError):
         programmer.service_write(8, 145, verify=True)
 
@@ -776,7 +779,7 @@ def test_service_write_raises_short_circuit_error_on_a_track_short_circuit(
     bench.expect(cmd_station_status(), reply=STATUS_POWERED)
     bench.expect(cmd_z21_cv_write(8, 145), reply=ACK)
     monkeypatch.setattr(programmer, "await_result", lambda *a, **k: TrackShortCircuit())
-    monkeypatch.setattr(programmer, "exit_service_mode", lambda *, restore_power: None)
+    monkeypatch.setattr(programmer, "exit_service_mode", lambda **_: None)
     with pytest.raises(ShortCircuitError):
         programmer.service_write(8, 145, verify=True)
 
@@ -791,7 +794,7 @@ def test_service_write_raises_station_busy_error_when_the_wait_loop_reports_busy
     bench.expect(cmd_station_status(), reply=STATUS_POWERED)
     bench.expect(cmd_z21_cv_write(8, 145), reply=ACK)
     monkeypatch.setattr(programmer, "await_result", lambda *a, **k: StationBusy())
-    monkeypatch.setattr(programmer, "exit_service_mode", lambda *, restore_power: None)
+    monkeypatch.setattr(programmer, "exit_service_mode", lambda **_: None)
     with pytest.raises(StationBusyError):
         programmer.service_write(8, 145, verify=True)
 
@@ -821,7 +824,7 @@ def test_service_write_treats_a_matching_cv_value_echo_as_confirmed_but_not_veri
         "await_result",
         lambda *a, **k: CvValue(raw_cv=8, value=145, ident=0x14, z21_form=True),
     )
-    monkeypatch.setattr(programmer, "exit_service_mode", lambda *, restore_power: None)
+    monkeypatch.setattr(programmer, "exit_service_mode", lambda **_: None)
     result = programmer.service_write(8, 145, verify=True)
     assert result.verified is False
     assert result.value == 145
@@ -845,7 +848,7 @@ def test_service_write_raises_cv_verify_error_when_the_echoed_cv_value_does_not_
         "await_result",
         lambda *a, **k: CvValue(raw_cv=8, value=99, ident=0x14, z21_form=True),
     )
-    monkeypatch.setattr(programmer, "exit_service_mode", lambda *, restore_power: None)
+    monkeypatch.setattr(programmer, "exit_service_mode", lambda **_: None)
     with pytest.raises(CvVerifyError) as caught:
         programmer.service_write(8, 145, verify=True)
     assert caught.value.cv == 8
@@ -867,7 +870,7 @@ def test_service_write_raises_decoder_not_responding_when_paged_cv_value_collide
     monkeypatch.setattr(
         programmer, "await_result", lambda *a, **k: PagedCvValue(raw_register=8, value=145)
     )
-    monkeypatch.setattr(programmer, "exit_service_mode", lambda *, restore_power: None)
+    monkeypatch.setattr(programmer, "exit_service_mode", lambda **_: None)
     with pytest.raises(DecoderNotRespondingError, match="register mode"):
         programmer.service_write(8, 145, verify=True)
     assert bench.station.capabilities.service_direct_cv is False
@@ -885,7 +888,7 @@ def test_service_write_raises_decoder_not_responding_when_paged_cv_value_does_no
     monkeypatch.setattr(
         programmer, "await_result", lambda *a, **k: PagedCvValue(raw_register=250, value=200)
     )
-    monkeypatch.setattr(programmer, "exit_service_mode", lambda *, restore_power: None)
+    monkeypatch.setattr(programmer, "exit_service_mode", lambda **_: None)
     with pytest.raises(DecoderNotRespondingError, match="does not correspond"):
         programmer.service_write(9, 200, verify=True)
 
@@ -902,7 +905,7 @@ def test_service_write_treats_a_matching_paged_cv_value_echo_as_confirmed_but_no
     monkeypatch.setattr(
         programmer, "await_result", lambda *a, **k: PagedCvValue(raw_register=9, value=200)
     )
-    monkeypatch.setattr(programmer, "exit_service_mode", lambda *, restore_power: None)
+    monkeypatch.setattr(programmer, "exit_service_mode", lambda **_: None)
     result = programmer.service_write(9, 200, verify=True)
     assert result.verified is False
     assert result.value == 200
@@ -920,7 +923,7 @@ def test_service_write_raises_cv_verify_error_when_the_paged_echoed_value_does_n
     monkeypatch.setattr(
         programmer, "await_result", lambda *a, **k: PagedCvValue(raw_register=9, value=1)
     )
-    monkeypatch.setattr(programmer, "exit_service_mode", lambda *, restore_power: None)
+    monkeypatch.setattr(programmer, "exit_service_mode", lambda **_: None)
     with pytest.raises(CvVerifyError) as caught:
         programmer.service_write(9, 200, verify=True)
     assert caught.value.cv == 9
@@ -944,7 +947,7 @@ def test_service_write_raises_decoder_not_responding_on_an_unrecognised_outcome(
     bench.expect(cmd_station_status(), reply=STATUS_POWERED)
     bench.expect(cmd_z21_cv_write(8, 145), reply=ACK)
     monkeypatch.setattr(programmer, "await_result", lambda *a, **k: Other(b"\x00"))
-    monkeypatch.setattr(programmer, "exit_service_mode", lambda *, restore_power: None)
+    monkeypatch.setattr(programmer, "exit_service_mode", lambda **_: None)
     with pytest.raises(DecoderNotRespondingError, match="unexpected reply"):
         programmer.service_write(8, 145, verify=True)
 

@@ -122,6 +122,11 @@ class NdjsonStream:
         body: dict[str, object] = {"type": type_, "sequence": self.sequence, **fields}
         self._stream.write(json.dumps(body, separators=_JSON_SEPARATORS))
         self._stream.write("\n")
+        # Per line, because the whole point of NDJSON is that a consumer can act on
+        # line N before line N+1 exists. `sys.stdout` is block-buffered as soon as it
+        # is a pipe, so `railctl monitor --format ndjson | jq` showed nothing until
+        # 4 KB of events had accumulated - on a quiet layout, until the run ended.
+        self._stream.flush()
         self.sequence += 1
 
     def summary(self, **fields: object) -> None:

@@ -731,3 +731,77 @@ and does not clear on a re-read within one session.
 Consequence for the CLI: a warning worded "another throttle holds loco 3" sends the operator
 looking for a throttle that is not there, on the second and every later run against the same
 locomotive. The fact belongs in the envelope; the wording has to say what the bit means.
+
+## M6 acceptance run — PASSED 2026-08-10
+
+Four stages, all passed, 19 minutes. First end-to-end exercise of the CLI against the real
+station; everything before this ran against fakes.
+
+**Bench:** locomotive 3 (ZIMO MS450P22) on the PROGRAMMING track. The rolling road is wired to
+TRACK OUT and was empty. Nothing else connected.
+
+**Locomotive 3 did not turn a wheel at any point, in any stage.** Watched by the owner.
+
+**Final status byte: `0x07`** — track dead, hold still set under it, which is how stage 1 found
+the bench.
+
+### What each stage established
+
+| stage | command | what it showed |
+| --- | --- | --- |
+| 1 | `doctor --address 3` | `pom_read: null` with the track dead — never asked, never answered |
+| 2 | `doctor --address 3 --power-on` | the layout held, loco 3 idled, and `pom_read: false` carrying `pom_read_provenance: "silence"` |
+| 3 | `monitor --limit 1 --format ndjson` | `61 00 61` decoded as `power.off`; two NDJSON lines ending in `summary` |
+| 4 | `power off` on a dead track | `changed: false`, `completed: ["read_status_before"]`, no telegram sent |
+
+Stage 1's `pom_read: null` is the founding rule running end to end on hardware for the first
+time — station, dataclass, JSON envelope, file on disk. Stage 2's `"silence"` beside the `false`
+is the other half: the one place this codebase allows a `false` without a `61 82`, with the
+reason attached. Both had only ever been exercised against fakes.
+
+Stage 2 also closes issue #14. D3 reported "track power turned on, then the whole layout was
+held and loco 3 was sent speed 0; the hold is re-asserted and read back at the end of the run",
+and `layout` came back `held: true, idled_address: 3, direction_preserved: true`. The hold is
+read back from the status bit, not asserted from the fact that a telegram was sent.
+
+### What this run does NOT establish
+
+**D4's silence was trivial here.** The main track was empty, so the POM read had nothing to
+answer it. That is consistent with R1 but does not confirm it: this run cannot separate "a
+decoder is present and there is no RailCom detector" from "nothing was there". `capabilities.py`
+already records that ambiguity — pointing the doctor at an address with no decoder produces the
+same result. Settling it needs a second decoder on the rolling road while the first stays on the
+programming track.
+
+**Window 1 of stage 2 was not stressed.** Locomotive 3 entered the run with a stored speed of 0,
+so the gap between energising and holding had nothing to resume. That window was measured
+separately on 2026-08-09 at stored steps 15 and 80, with no movement either time.
+
+### New: what the station's two buttons do
+
+Undocumented until now, and worth knowing before designing any experiment around the front panel.
+The buttons do not SET a state, they MOVE it:
+
+- **green** — always jumps to green steady (voltage on, no hold), whatever the current state
+- **red (STOP)** — degrades one step: green steady -> green flashing -> red
+
+So the red button cuts power only from the flashing state. From green steady the same press
+produces an emergency stop with the voltage still on. The acceptance document's stage-3 line
+"That also cuts track power" happened to be true because stage 2 had left the layout in the
+flashing state; it is not true in general.
+
+This also gave an independent witness for stage 2's claim. Before stage 3 the panel showed green
+FLASHING — emergency stop with voltage present — which is what the doctor's `layout` block had
+claimed by reading the status bit. Panel and byte agreed.
+
+### Two defects in the acceptance document itself, found by running it
+
+- Stage 1's gate asks for "locomotive 3 on the rolling road" AND "readable on the programming
+  track" in the same breath. Those are two places. The file was written for a bench with a
+  decoder on each.
+- Stage 1's gate says "safe, nothing is energised". It is not: `exit_service_mode` ends every
+  service-mode session with `21 81`, which energises, before restoring the state it found. The
+  track flickers several times during stage 1. It is safe here only because loco 3 has no stored
+  speed.
+
+Both are corrected in the file.

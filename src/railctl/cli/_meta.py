@@ -234,6 +234,47 @@ POWER_EXIT_CODES: Final[tuple[int, ...]] = tuple(
 # tests/cli/test_schema.py drives both, per the rule in design spec L6.
 THROTTLE_EXIT_CODES: Final[tuple[int, ...]] = (*STATION_EXIT_CODES, 12, 20)
 
+#: `doctor` publishes 8 for the same reading `power on` publishes it for: the track
+#: is live because this run energised it, and the station never confirmed the hold
+#: that should be under it. The probe itself may have gone perfectly - what did not
+#: is the promise about the layout - so that is a partial result, not an error.
+DOCTOR_EXIT_CODES: Final[tuple[int, ...]] = tuple(sorted({*STATION_EXIT_CODES, PARTIAL_EXIT_CODE}))
+
+DOCTOR_POWER_ON = Option(
+    name="--power-on",
+    type="boolean",
+    default=False,
+    help=(
+        "energise the track if it is off, so D4 and D10 can run; the layout comes up HELD "
+        "and stays held - `railctl power resume` is the release"
+    ),
+)
+DOCTOR_NO_PROGRAMMING_TRACK = Option(
+    name="--no-programming-track",
+    type="boolean",
+    default=False,
+    help=(
+        "skip D5-D8 (they need a decoder on the programming track); records their "
+        "capabilities as unknown, never as false"
+    ),
+)
+DOCTOR_NO_SAVE = Option(
+    name="--no-save",
+    type="boolean",
+    default=False,
+    help="do not write capabilities.json",
+)
+_DOCTOR = CommandMeta(
+    path="doctor",
+    help="Probe the command station's capabilities and save capabilities.json",
+    # Matches commands/doctor.py's own DOCTOR_SCHEMA, which reads it back off this
+    # row - `_meta` never imports a command module, so the row is the source.
+    schema="railctl/doctor/v1",
+    mutates=True,  # --power-on energises the track and holds the layout
+    exit_codes=DOCTOR_EXIT_CODES,
+    options=(DOCTOR_POWER_ON, DOCTOR_NO_PROGRAMMING_TRACK, DOCTOR_NO_SAVE),
+)
+
 _STATUS = CommandMeta(
     path="status",
     help="Command station status: raw byte and decoded bits",
@@ -372,6 +413,27 @@ _POWER = CommandMeta(
     arguments=(POWER_STATE_ARG,),
 )
 
+#: `monitor`-only, never a global: no other command runs a loop there is anything to
+#: bound. It exists so a caller - a test, or a script sampling the bus - can end the
+#: run without an interrupt at all.
+MONITOR_LIMIT = Option(
+    name="--limit",
+    type="integer",
+    default=None,
+    help="stop after N events instead of running until Ctrl-C",
+)
+_MONITOR = CommandMeta(
+    path="monitor",
+    help="Decode broadcasts and own traffic until Ctrl-C",
+    schema="railctl/monitor/v1",  # matches commands/monitor.py's MONITOR_SCHEMA
+    mutates=False,
+    # `STATION_EXIT_CODES` already carries 9, which is how a monitor normally ends:
+    # `run()` turns the operator's Ctrl-C into `AbortedError`, and the ndjson path
+    # exits with the same 9 by hand after its stream has been closed off.
+    exit_codes=STATION_EXIT_CODES,
+    options=(MONITOR_LIMIT,),
+)
+
 #: Command-scoped, and deliberately NOT the global `--address` /
 #: RAILCTL_ADDRESS / config default that `drive` and `function` read through
 #: `settings.address`. A user with `address = 3` configured who hits the panic
@@ -407,12 +469,14 @@ _STOP = CommandMeta(
 # command registered out of order fails rather than quietly giving an agent and an operator
 # two different tables of contents.
 COMMANDS: Final[tuple[CommandMeta, ...]] = (
+    _DOCTOR,
     _STATUS,
     _VERSION,
     _POWER,
     _STOP,
     _DRIVE,
     _FUNCTION,
+    _MONITOR,
     _SCHEMA,
 )
 
@@ -633,6 +697,33 @@ def _output_lines(schema: str) -> list[str]:
 _COMMAND_EXIT_MEANINGS: Final[dict[str, dict[int, str]]] = {
     "drive": {12: _SERVICE_MODE_MEANING},
     "function": {12: _SERVICE_MODE_MEANING},
+    "doctor": {
+        # 3 is TransportError everywhere else, and that class summary is still true of
+        # the class - it is just not why `doctor` exits 3. The doctor's own 3 is the
+        # verdict `station.exit_code_for_report` returns for a report that failed.
+        3: (
+            "the probe could not establish the basics - D0, D1 or D2 failed, or D3 failed "
+            "outright. A capability that came back unknown is NOT this: that is exit 0 with "
+            "the gap named in the report"
+        ),
+        8: (
+            "partial - the probe ran, but the layout is not confirmed held: this run either "
+            "energised the track or released a hold it found, and the station never confirmed "
+            "the hold that should be under it, or a locomotive refused the speed-0 telegram. "
+            "Treat the layout as able to move"
+        ),
+    },
+    # 9 is AbortedError everywhere else, and for `monitor` that IS how a normal run
+    # ends - the operator's Ctrl-C. The row exists because the class summary reads as
+    # a failure, and here it is the documented ending: this is the one command whose
+    # metadata comment already explained 9 while its own help text did not.
+    "monitor": {
+        9: (
+            "the operator stopped the monitor with Ctrl-C. The ndjson stream still ends with "
+            "its summary line, carrying complete: false - a monitor that ran until it was "
+            "interrupted did its job"
+        )
+    },
 }
 
 

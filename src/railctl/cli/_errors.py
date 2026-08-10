@@ -37,6 +37,7 @@ from railctl.errors import (
     CONDITION_TRACK_DEAD,
     AbortedError,
     ConfirmationRequiredError,
+    DecoderNotRespondingError,
     FunctionGroupUnreadableError,
     PomReadUnsupportedError,
     RailctlError,
@@ -115,7 +116,13 @@ def default_suggestions(
         # `klass.__new__(klass)`, which runs no `__init__` at all, so the attribute may be
         # absent. `report_for` reaches for `cv` with the same default for the same reason.
         return _argv_arrays([getattr(exc, "retry_argv", None)])
-    if isinstance(exc, PomReadUnsupportedError):
+    if isinstance(exc, (PomReadUnsupportedError, DecoderNotRespondingError)):
+        # Both are what "a POM read failed" looks like on this hardware, and the design's own
+        # rule - a failed POM read always suggests `railctl doctor` first - is written about
+        # the failure, not about one of its two shapes. `DecoderNotRespondingError` is the
+        # SILENT one (three attempts, no result at all: docs/probe-results.md R1), and left
+        # out of this branch it fell through to the final `return []`: the exact case where
+        # the operator most needs to be told to re-probe got no runnable answer at all.
         suggestions = [["railctl", "doctor"]]
         if cv is not None:
             suggestions.append(["railctl", "cv", "read", str(cv), "--mode", "service"])

@@ -214,9 +214,10 @@ class Capabilities:
 
     def save(self, path: Path) -> bool:
         """Write this station's entry into `path`, merged with whatever else
-        is already there, atomically. Returns `False` and touches nothing
-        when `link_identity` is `UNKNOWN_IDENTITY`: an identity with no
-        stable name has nowhere safe to persist to, and inventing a key
+        is already there - including this link's own previous entry, field by
+        field, see `merged_over` - atomically. Returns `False` and touches
+        nothing when `link_identity` is `UNKNOWN_IDENTITY`: an identity with
+        no stable name has nowhere safe to persist to, and inventing a key
         would silently merge two different stations' facts together."""
         if self.link_identity == UNKNOWN_IDENTITY:
             return False
@@ -240,16 +241,119 @@ class Capabilities:
         return True
 
     def _merged_links(self, path: Path) -> dict[str, object]:
-        links: dict[str, object] = {}
-        if path.exists():
-            try:
-                raw = json.loads(path.read_text(encoding="utf-8"))
-            except json.JSONDecodeError:
-                raw = None
-            if isinstance(raw, dict) and isinstance(raw.get("links"), dict):
-                links = dict(raw["links"])
-        links[self.link_identity] = self.as_json()
+        links = self._existing_links(path)
+        stored = self._stored_entry(links, path)
+        links[self.link_identity] = self.merged_over(stored).as_json()
         return links
+
+    def _existing_links(self, path: Path) -> dict[str, object]:
+        if not path.exists():
+            return {}
+        try:
+            raw = json.loads(path.read_text(encoding="utf-8"))
+        except json.JSONDecodeError:
+            return {}
+        if isinstance(raw, dict) and isinstance(raw.get("links"), dict):
+            return dict(raw["links"])
+        return {}
+
+    def _stored_entry(self, links: dict[str, object], path: Path) -> Capabilities:
+        """This link's previous record, or `unknown` when there is none.
+
+        A malformed entry reads as "none" rather than raising, for the same
+        reason `_existing_links` tolerates a file that is not JSON at all:
+        `save` is how a fresh probe recovers from a capabilities.json
+        something else mangled, and a merge that raised here would make a
+        corrupt file permanently unwritable. `load` is the strict reader - it
+        refuses to hand a caller a measurement it could not parse - and this
+        is the writer, which has a whole fresh probe in hand.
+        """
+        entry = links.get(self.link_identity)
+        if not isinstance(entry, dict):
+            return Capabilities.unknown(self.link_identity)
+        try:
+            fields_read = self._fields_from(entry, self.link_identity, path)
+        except RailctlError:
+            return Capabilities.unknown(self.link_identity)
+        return Capabilities(link_identity=self.link_identity, **fields_read)
+
+    def merged_over(self, stored: Capabilities) -> Capabilities:
+        """This run's measurements laid over `stored`'s, field by field.
+
+        `None` means "this run established nothing here", exactly as it does
+        everywhere else in this module, so it may not be persisted over a
+        value some earlier run measured. That is the three-valued rule one
+        layer down: on disk `null` is "not established" too, and writing this
+        object's `None` over a stored `false` turns a measurement back into a
+        gap - the failure this package exists to prevent, arriving through the
+        writer instead of through a parser.
+
+        The case that forced it: `railctl doctor --power-on` learns
+        `pom_read=False` from silence, which costs
+        `TIMING.pom_read_attempts` timeouts (6.7 s per silent POM attempt,
+        measured) to establish. A later plain `railctl doctor` cannot reach D4
+        at all with the track dead, so every POM field it holds is `None` -
+        and it used to write that whole object over the entry, erasing the
+        expensive measurement and every service-mode capability with it.
+        """
+        if stored.link_identity != self.link_identity:
+            raise ValueError(
+                f"cannot merge {stored.link_identity!r}'s record into "
+                f"{self.link_identity!r}'s: these are two different links"
+            )
+        kept = {
+            name: getattr(stored, name)
+            for name in PERSISTED_FIELDS
+            if name != "notes"
+            and getattr(self, name) is None
+            and not self._explains_a_new_verdict(name)
+        }
+        return replace(self, notes=self._merged_notes(stored), **kept)
+
+    def _explains_a_new_verdict(self, name: str) -> bool:
+        """Whether `name` is a provenance whose subject THIS run re-measured.
+
+        `pom_read_provenance` is not an independent fact: it says which of the
+        two roads `pom_read` arrived by, a `61 82` or silence. So it belongs to
+        the verdict it explains, and the rule "`None` means this run learned
+        nothing here" does not reach it. `CvProgrammer.pom_read` sets
+        `{"pom_read": True, "pom_read_provenance": None}` in one call, on
+        purpose, precisely so a stale reason cannot outlive the answer it was
+        about.
+
+        Without this, fitting a RailCom detector produced
+        `pom_read: true, pom_read_provenance: "silence"` on disk - a verdict of
+        "it works" carrying the reason it was once thought not to. That is the
+        field `CLAUDE.md` names as the one a reader who must not act on a guess
+        consults, so a wrong value there is worse than no value.
+
+        `_merged_notes` already carries the same exception in prose, for the
+        same event: D4 must be able to erase the silence note once a detector
+        is fitted. This is its sibling, and the two are kept next to each other
+        so a third dependent field cannot be added without meeting both.
+        """
+        return name == "pom_read_provenance" and self.pom_read is not None
+
+    def _merged_notes(self, stored: Capabilities) -> tuple[str, ...]:
+        """Notes annotate a measurement, so they follow the one they belong to.
+
+        Every note written today is the doctor's D4 silence note, which is
+        recorded beside `pom_read=False` and deliberately CLEARED by the next
+        D4 that reaches the wire - a note telling the operator to fit a
+        RailCom detector and re-run must disappear once POM answers. So a run
+        that established a `pom_read` verdict replaces the stored notes, empty
+        list included, because the verdict it wrote is the one they describe.
+        A run that established nothing keeps them, alongside the `pom_read`
+        value `merged_over` is keeping for the same reason - the two never
+        drift apart because they are decided by the same condition.
+
+        `or self.notes` covers a note from anything that is not D4: nothing
+        writes one today, and silently dropping the first thing that does
+        would be a measurement lost in the writer again.
+        """
+        if self.pom_read is not None or self.notes:
+            return self.notes
+        return stored.notes
 
     def with_learned(self, **updates: object) -> Capabilities:
         """Return a new `Capabilities` with `updates` applied. Accepts any
@@ -272,23 +376,34 @@ class Capabilities:
 
     def as_json(self) -> dict[str, object]:
         """This station's entry as written to disk - no `link_identity` key,
-        because that name is the dict key one level up in the file."""
-        return {
-            "probed_at": self.probed_at,
-            "xpressnet_version": self.xpressnet_version,
-            "command_station_id": self.command_station_id,
-            "pom_read": self.pom_read,
-            "pom_result_channel": self.pom_result_channel,
-            "pom_echo_zero_based": self.pom_echo_zero_based,
-            "loco_address_threshold": self.loco_address_threshold,
-            "service_direct_cv": self.service_direct_cv,
-            "service_ext_cv": self.service_ext_cv,
-            "z21_cv_opcodes": self.z21_cv_opcodes,
-            "function_groups_4_5": self.function_groups_4_5,
-            "single_function_cmd": self.single_function_cmd,
-            "notes": list(self.notes),
-        }
+        because that name is the dict key one level up in the file.
+
+        Derived from `PERSISTED_FIELDS`, never a hand-written list of keys.
+        The list this replaced omitted `pom_read_provenance`: the loader
+        parsed it, `LEARNABLE_FIELDS` declared it persistable and the CLI
+        envelope published it, and the writer was the only place its name had
+        to be typed a second time - so the writer was the only place it could
+        be, and was, forgotten. `pom_read=false` is the one `false` in this
+        codebase that may follow something other than a `61 82`, and that
+        field is the entire reason the exception is allowed: it says whether
+        the station refused or whether nothing came back. A save and a load
+        used to erase the difference.
+        """
+        return {name: _json_value(getattr(self, name)) for name in PERSISTED_FIELDS}
 
     @property
     def probed(self) -> bool:
         return self.probed_at is not None
+
+
+#: Every field of an entry on disk, read off the dataclass so a field added to
+#: `Capabilities` is persisted without a second edit anywhere. `link_identity`
+#: is excluded because it is the dict key one level up in the file.
+PERSISTED_FIELDS: Final[tuple[str, ...]] = tuple(
+    f.name for f in fields(Capabilities) if f.name != "link_identity"
+)
+
+
+def _json_value(value: object) -> object:
+    """`notes` is the only non-scalar field, and JSON has no tuple."""
+    return list(value) if isinstance(value, tuple) else value

@@ -17,7 +17,7 @@ import typer
 
 from railctl.cli._errors import OutputContext, _internal_report, report_for, usage_report
 from railctl.cli._meta import GLOBAL_OPTIONS, root_epilog, typer_option
-from railctl.cli.commands import basics, power, schema, throttle
+from railctl.cli.commands import basics, doctor, monitor, power, schema, throttle
 from railctl.cli.config import VERBOSE_ENV, Config, config_path, load_config
 from railctl.cli.deps import Settings, build_settings, configure_logging, context_for
 from railctl.cli.render import render_error
@@ -154,10 +154,13 @@ def global_options(
 # Registration order IS the order `railctl --help` lists commands in, and
 # `tests/cli/test_schema.py` compares that order against `_meta.COMMANDS`. Two
 # tables of contents for one tool is a bug that once shipped, so these calls
-# follow the tuple: status, version, power, stop, drive, function, schema.
+# follow the tuple: doctor, status, version, power, stop, drive, function, monitor,
+# schema.
+doctor.register(app)
 basics.register(app)
 power.register(app)
 throttle.register(app)
+monitor.register(app)
 schema.register(app)
 
 
