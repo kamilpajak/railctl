@@ -113,10 +113,21 @@ def test_1_doctor_on_a_dead_track_measures_what_it_can_and_leaves_the_rest_unkno
     problem, not a railctl one.
     """
     _gate(
-        "STAGE 1 of 4 - safe, nothing is energised.\n"
-        "Check: track power OFF, locomotive 3 on the rolling road, nothing else\n"
-        "driving the layout. The decoder should also be readable on the programming\n"
-        "track."
+        "STAGE 1 of 4 - no --power-on, but the track WILL flicker.\n"
+        "\n"
+        "Check before you press Enter:\n"
+        "  - track power OFF at the station\n"
+        "  - locomotive 3 on the PROGRAMMING track. D5-D8 read CVs in service mode and\n"
+        "    need it there; on the rolling road they come back null and this stage fails\n"
+        "    on the bench, not on railctl. An earlier version of this line asked for both\n"
+        "    places at once - it was written for a bench with a decoder on each.\n"
+        "  - nothing else driving the layout\n"
+        "\n"
+        "This stage sends no power-on of its own, but it is NOT true that nothing is\n"
+        "energised: `exit_service_mode` ends every service-mode session with `21 81`,\n"
+        "which energises, before restoring the state it found. Expect the track to\n"
+        "flicker several times. That is safe only because loco 3 has no stored speed -\n"
+        "so if it twitches, the zero is not where we think it is. Say so."
     )
     result = _run("doctor", "--address", ACCEPTANCE_ADDRESS, "--format", "json")
     assert result.exit_code == 0, result.stderr
@@ -253,8 +264,15 @@ def test_3_monitor_decodes_a_broadcast_and_ends_its_stream_with_a_summary():
     """
     _gate(
         "STAGE 3 of 4 - reads only, sends nothing.\n"
-        "After you press Enter, press the station's own STOP button to produce a\n"
-        "broadcast. That also cuts track power, which is the direction we want."
+        "After you press Enter, press the station's own red STOP button once.\n"
+        "\n"
+        "The buttons MOVE the state, they do not set it (measured 2026-08-10): green\n"
+        "always jumps to green-steady, and red degrades one step - green steady ->\n"
+        "green flashing -> red. Stage 2 leaves the panel FLASHING, so one red press\n"
+        "from here cuts the power and broadcasts `61 00`. From green steady the same\n"
+        "press would produce an emergency stop with the voltage still on, and this\n"
+        "stage would still pass on a different broadcast - so read the LED, do not\n"
+        "assume which one you produced."
     )
     result = _run("monitor", "--limit", "1", "--format", "ndjson")
     assert result.exit_code == 0, result.stderr
