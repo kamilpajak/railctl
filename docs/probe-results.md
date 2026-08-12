@@ -854,5 +854,26 @@ Fix: snapshot the flag **before** the attempt; test stubs now stamp `_last_sessi
 flip the flag like the real exit does. Mutation-proved: reverting the snapshot turns 4 tests red.
 
 Left open by the bracketing (all measured gaps followed a *read's* close): whether 3.0 s after a
-FAILED write's close also suffices — the retry path exercises exactly that. The next acceptance
-run answers it.
+FAILED write's close also suffices — the retry path exercises exactly that. Answered by the
+acceptance run below: yes. Four commands in that run hit `61 13` on their first session, retried
+3.0 s after the failed attempt's own close, and every one succeeded on the second attempt.
+
+## M8 acceptance run — PASSED 2026-08-12
+
+Four stages, run as one invocation of `tests/hardware/test_m8_acceptance.py` against the
+MS450P22 (loco 3) on the programming track, isolated config dir, 2 min 18 s total:
+
+| stage | observable | result |
+| --- | --- | --- |
+| 1 | doctor, no `--power-on` | D5/D6/D7 ok, D3/D4/D10 honest `unknown` (track power off), capabilities saved |
+| 2 | batch read CV1,3,8,29 | all ok: CV1=3, CV3=26, CV8=145, CV29=14 |
+| 3 | verified write, restored | CV3: 26 → 20 → 26, every step `verified: true` by independent read-back |
+| 4 | CV1025 refusal | exit 15 `cv_out_of_range`, `1..1024` named, `railctl doctor` suggested, no telegram |
+
+The retry-once fix was visible working, not idle: stage 3's four back-to-back commands (write,
+read-back, restore, final read) each opened their first session moments after the previous
+invocation's close, each got `61 13`, and each healed on the one retry — reported honestly as a
+`service.session_retried` warning in the envelope, never silently. Stage 2's batch and stage 3's
+pre-read carried no warning: their previous session had closed while the operator sat at a gate,
+so the first attempt simply succeeded. Cost of the unknown-history retry: ~3 s per back-to-back
+invocation, paid only when the gap is actually hit.
