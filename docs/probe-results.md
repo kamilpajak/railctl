@@ -880,9 +880,13 @@ invocation, paid only when the gap is actually hit.
 
 ## Station firmware updated (KLUG) — re-probed 2026-08-12
 
-The YD7010's firmware was updated after the M8 acceptance run. The pre-update
-`capabilities.json` was set aside as `capabilities.pre-klug.json` before re-probing, so nothing
-measured on the old firmware could masquerade as a measurement of the new one.
+The YD7010's firmware was updated after the M8 acceptance run, **with the station disconnected
+from mains for the update and reconnected afterwards** — so the post-update probes start from a
+cold boot, with every piece of station-side state cleared (refresh-buffer entries, and the
+emergency-stop flag the morning run's D2 had shown as `True`; the post-update `False` is the
+power cycle, not a button press). The pre-update `capabilities.json` was set aside as
+`capabilities.pre-klug.json` before re-probing, so nothing measured on the old firmware could
+masquerade as a measurement of the new one.
 
 Two doctor runs on the new firmware, same day:
 
