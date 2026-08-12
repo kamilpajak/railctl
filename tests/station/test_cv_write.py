@@ -30,6 +30,7 @@ from railctl.xbus.codec import encode
 from railctl.xbus.commands import (
     cmd_pom_read_byte,
     cmd_pom_write_byte,
+    cmd_service_direct_read,
     cmd_service_direct_write,
     cmd_service_ext_write,
     cmd_service_result_request,
@@ -470,7 +471,7 @@ def test_pom_write_to_cv29_that_flips_bit_5_is_treated_as_blind(bench, monkeypat
     )
     bench.expect(cmd_pom_write_byte(ADDRESS, 29, new_value, threshold=THRESHOLD), reply=ACK)
     result = programmer.pom_write(29, new_value, address=ADDRESS, verify=True)
-    assert result.verified is False
+    assert result.verified is None, "no read-back ran, so nothing measured a mismatch"
     name, payload = bench.events[-1]
     assert name == "cv.write_unverified"
     assert set(payload) == {"cv", "value", "reason"}
@@ -528,25 +529,26 @@ def test_pom_write_raises_cv_verify_error_after_second_mismatch(bench, monkeypat
     assert caught.value.cv == 5
 
 
-def test_pom_write_verified_is_false_while_a_read_stays_none(bench):
-    """CV1 is in BLIND_WRITE_CVS: no verify read at all, so `verified` is `False`
-    even though nothing ever read `None` back. Goes red if `pom_write` stops
-    treating CV1 as blind - the scripted reply list has no second exchange for a
-    verify read, so `bench` raises `AssertionError: the script is exhausted`
-    instead of the assertion below even firing.
+def test_pom_write_to_a_blind_cv_reports_verified_none_not_false(bench):
+    """CV1 is in BLIND_WRITE_CVS: no verify read at all, so `verified` is `None` -
+    nothing measured the decoder, and `False` would claim a mismatch nobody
+    measured. Goes red if `pom_write` stops treating CV1 as blind - the
+    scripted reply list has no second exchange for a verify read, so `bench`
+    raises `AssertionError: the script is exhausted` instead of the assertion
+    below even firing.
     """
     programmer = bench.station.programmer
     bench.station.learn(pom_read=True)
     bench.expect(cmd_pom_write_byte(ADDRESS, 1, 10, threshold=THRESHOLD), reply=ACK)
     write_result = programmer.pom_write(1, 10, address=ADDRESS, verify=True)
-    assert write_result.verified is False
+    assert write_result.verified is None
 
 
 def test_pom_write_with_verify_false_is_blind(bench):
     programmer = bench.station.programmer
     bench.expect(cmd_pom_write_byte(ADDRESS, 5, 10, threshold=THRESHOLD), reply=ACK)
     result = programmer.pom_write(5, 10, address=ADDRESS, verify=False)
-    assert result.verified is False
+    assert result.verified is None
     assert bench.events[-1][0] == "cv.write_unverified"
 
 
@@ -714,7 +716,7 @@ def test_service_write_with_verify_false_is_blind(bench_factory, monkeypatch):
     monkeypatch.setattr(programmer, "await_result", lambda *a, **k: Ready())
     monkeypatch.setattr(programmer, "exit_service_mode", lambda **_: None)
     result = programmer.service_write(8, 145, verify=False)
-    assert result.verified is False
+    assert result.verified is None, "no read-back ran, so nothing measured a mismatch"
     name, payload = bench.events[-1]
     assert name == "cv.write_unverified"
     assert set(payload) == {"cv", "value", "reason"}
@@ -799,19 +801,15 @@ def test_service_write_raises_station_busy_error_when_the_wait_loop_reports_busy
         programmer.service_write(8, 145, verify=True)
 
 
-def test_service_write_treats_a_matching_cv_value_echo_as_confirmed_but_not_verified(
+def test_service_write_follows_a_matching_cv_value_echo_with_an_independent_read_back(
     bench_factory, monkeypatch
 ):
-    """The review finding this pins: the exhaustive ladder used to reject the
-    one reply this hardware actually sends after a service-mode write - a
-    `63 14` direct-CV result (a `CvValue`) carrying the written value, not
-    `61 11` `Ready` (docs/probe-results.md, "Service-mode WRITE works":
-    `write 24 12 00 02 24 -> 63 14 03 24`). A matching echo now completes the
-    write instead of raising `DecoderNotRespondingError`, but it is the
-    station's own result store, not an independent read-back
-    (docs/probe-results.md: "it does not by itself prove the decoder
-    accepted and retained it"), so `verified` stays `False` even though
-    `verify=True` was requested.
+    """The review finding this pins (C2): the `--verify` promise is an
+    independent read-back, and a matching echo alone never performed one -
+    the echo shows what the STATION produced, not what the decoder retained
+    (docs/probe-results.md, "Service-mode WRITE works"). An echo-confirmed
+    write with `verify=True` now runs its own `cv_read` afterwards and only
+    an agreeing read-back earns `verified=True`.
     """
     from railctl.xbus.replies import CvValue
 
@@ -825,13 +823,49 @@ def test_service_write_treats_a_matching_cv_value_echo_as_confirmed_but_not_veri
         lambda *a, **k: CvValue(raw_cv=8, value=145, ident=0x14, z21_form=True),
     )
     monkeypatch.setattr(programmer, "exit_service_mode", lambda **_: None)
+    read_calls: list[tuple[int, ProgMode]] = []
+
+    def fake_cv_read(cv, *, address=None, mode=ProgMode.AUTO, page=None):
+        read_calls.append((cv, mode))
+        return make_cv_result(cv=cv, value=145, mode=mode)
+
+    monkeypatch.setattr(programmer, "cv_read", fake_cv_read)
     result = programmer.service_write(8, 145, verify=True)
-    assert result.verified is False
+    assert read_calls == [(8, ProgMode.SERVICE)]
+    assert result.verified is True
     assert result.value == 145
-    name, payload = bench.events[-1]
-    assert name == "cv.write_unverified"
-    assert set(payload) == {"cv", "value", "reason"}
-    assert "echo" in payload["reason"]
+
+
+def test_service_write_raises_cv_verify_error_when_the_read_back_disagrees_with_the_echo(
+    bench_factory, monkeypatch
+):
+    """The mismatch half of C2: the station's echo matched, the decoder did
+    not retain the value, and the error names both values rather than
+    reporting a `verified: false` nobody could act on."""
+    from railctl.xbus.replies import CvValue
+
+    bench = bench_factory(capabilities=make_capabilities(z21_cv_opcodes=True))
+    programmer = bench.station.programmer
+    bench.expect(cmd_station_status(), reply=STATUS_POWERED)
+    bench.expect(cmd_z21_cv_write(8, 145), reply=ACK)
+    monkeypatch.setattr(
+        programmer,
+        "await_result",
+        lambda *a, **k: CvValue(raw_cv=8, value=145, ident=0x14, z21_form=True),
+    )
+    monkeypatch.setattr(programmer, "exit_service_mode", lambda **_: None)
+    monkeypatch.setattr(
+        programmer,
+        "cv_read",
+        lambda cv, *, address=None, mode=ProgMode.AUTO, page=None: make_cv_result(
+            cv=cv, value=99, mode=mode
+        ),
+    )
+    with pytest.raises(CvVerifyError) as caught:
+        programmer.service_write(8, 145, verify=True)
+    assert caught.value.cv == 8
+    assert "145" in str(caught.value) and "99" in str(caught.value)
+    assert caught.value.details == {"wrote": 145, "read_back": 99}
 
 
 def test_service_write_raises_cv_verify_error_when_the_echoed_cv_value_does_not_match(
@@ -893,7 +927,7 @@ def test_service_write_raises_decoder_not_responding_when_paged_cv_value_does_no
         programmer.service_write(9, 200, verify=True)
 
 
-def test_service_write_treats_a_matching_paged_cv_value_echo_as_confirmed_but_not_verified(
+def test_service_write_follows_a_matching_paged_cv_value_echo_with_an_independent_read_back(
     bench_factory, monkeypatch
 ):
     from railctl.xbus.replies import PagedCvValue
@@ -906,8 +940,15 @@ def test_service_write_treats_a_matching_paged_cv_value_echo_as_confirmed_but_no
         programmer, "await_result", lambda *a, **k: PagedCvValue(raw_register=9, value=200)
     )
     monkeypatch.setattr(programmer, "exit_service_mode", lambda **_: None)
+    monkeypatch.setattr(
+        programmer,
+        "cv_read",
+        lambda cv, *, address=None, mode=ProgMode.AUTO, page=None: make_cv_result(
+            cv=cv, value=200, mode=mode
+        ),
+    )
     result = programmer.service_write(9, 200, verify=True)
-    assert result.verified is False
+    assert result.verified is True
     assert result.value == 200
 
 
@@ -952,19 +993,29 @@ def test_service_write_raises_decoder_not_responding_on_an_unrecognised_outcome(
         programmer.service_write(8, 145, verify=True)
 
 
-def test_service_write_confirms_a_real_63_14_reply_from_the_unstubbed_wait_loop(bench_factory):
-    """The review finding this pins: no test drove `service_write` through
-    the real, unstubbed `await_result`, so nothing caught that the exhaustive
-    ladder rejected the one reply this hardware actually sends after a
-    service-mode write. This scripts the exact bytes measured on the bench
-    (docs/probe-results.md, "Service-mode WRITE works": `write 24 12 00 02 24
-    -> 63 14 03 24`, CV3 to 36) and lets the wait loop poll for real -
-    nothing here is stubbed except the wire replies.
+def test_service_write_confirms_a_real_63_14_reply_and_verifies_it_with_a_real_read_back(
+    bench_factory,
+):
+    """The review findings this pins, both through the real, unstubbed
+    machinery: the wait loop accepts the one reply this hardware actually
+    sends after a service-mode write (docs/probe-results.md, "Service-mode
+    WRITE works": `write 24 12 00 02 24 -> 63 14 03 24`, CV3 to 36), and -
+    because that echo shows what the station produced, not what the decoder
+    retained - `verify=True` then opens a second service-mode session and
+    reads CV3 back independently before claiming `verified=True`. Nothing
+    here is stubbed except the wire replies.
     """
     bench = bench_factory(capabilities=make_capabilities(service_direct_cv=True))
     programmer = bench.station.programmer
+    # the write's own session
     bench.expect(cmd_station_status(), reply=STATUS_POWERED)
     bench.expect(cmd_service_direct_write(3, 36), reply=ACK)
+    bench.expect(cmd_service_result_request(), reply=encode(0x63, 0x14, 3, 36))
+    bench.expect(cmd_track_power_on(), reply=ACK)
+    bench.expect(STATUS_REQUEST, reply=STATUS_POWER_ON)
+    # the independent read-back: its own session, opened after the gap
+    bench.expect(STATUS_REQUEST, reply=STATUS_POWER_ON)
+    bench.expect(cmd_service_direct_read(3), reply=ACK)
     bench.expect(cmd_service_result_request(), reply=encode(0x63, 0x14, 3, 36))
     bench.expect(cmd_track_power_on(), reply=ACK)
     bench.expect(STATUS_REQUEST, reply=STATUS_POWER_ON)
@@ -973,10 +1024,8 @@ def test_service_write_confirms_a_real_63_14_reply_from_the_unstubbed_wait_loop(
 
     assert result.value == 36
     assert result.encoding is CvEncoding.SERVICE_DIRECT
-    assert result.verified is False
-    name, payload = bench.events[-1]
-    assert name == "cv.write_unverified"
-    assert payload["cv"] == 3
+    assert result.verified is True
+    assert bench.event_names().count("cv.write_unverified") == 0
 
 
 # -- cv_write: mode dispatch ------------------------------------------------------

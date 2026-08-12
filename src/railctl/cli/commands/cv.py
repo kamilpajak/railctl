@@ -357,8 +357,10 @@ def build_cv_write(
     written: CvResult, *, track: str, address: int | None, name: str, verify: bool
 ) -> CommandResult:
     """The one write, with `verified` carried honestly: `true` only when an
-    independent read-back (or a decoder-level Ready) confirmed it, and the
-    reason it is not `true` said out loud."""
+    independent read-back (or a decoder-level Ready) confirmed it, `null` when
+    nothing measured the decoder - never `false`, which would claim a mismatch
+    nobody measured (a real mismatch raises `CvVerifyError`, exit 14) - and
+    the reason it is not `true` said out loud."""
     result = CommandResult(schema=CV_WRITE_SCHEMA, command="cv write")
     label = _label(written.cv, name)
     result.result = {
@@ -378,22 +380,22 @@ def build_cv_write(
         return result
     if track == TRACK_MAIN:
         result.warn(
-            "cv_write_unverified",
+            "cv.write_unverified",
             f"the write went out on the main track and cannot be checked there; put the "
             f"locomotive on the programming track and run `railctl cv read {written.cv}` "
             f"to verify it",
             cv=written.cv,
         )
-    elif not verify:
+        return result
+    if not verify:
         result.say("not read back (--no-verify)")
-    else:
-        result.warn(
-            "cv_write_unverified",
-            f"the station's own result echo matched {written.value}, but no independent "
-            f"read-back confirmed it; the echo shows what the station produced, not what "
-            f"the decoder retained",
-            cv=written.cv,
-        )
+    result.warn(
+        "cv.write_unverified",
+        f"the station's own result echo matched {written.value}, but no independent "
+        f"read-back confirmed it; the echo shows what the station produced, not what "
+        f"the decoder retained",
+        cv=written.cv,
+    )
     return result
 
 

@@ -1499,13 +1499,16 @@ class CvProgrammer:
                 "cv.write_unverified",
                 {"cv": cv, "value": value, "reason": self._blind_reason(cv, verify)},
             )
+            # `None`, not `False`: no read-back ran, so nothing measured a
+            # mismatch. `False` would claim one - a real mismatch raises
+            # `CvVerifyError` below instead of ever returning.
             return CvResult(
                 cv=cv,
                 value=value,
                 mode=ProgMode.POM,
                 encoding=encoding,
                 operation="write",
-                verified=False,
+                verified=None,
                 elapsed=self._station.now() - started,
             )
         read = self.cv_read(cv, address=address, mode=ProgMode.POM, page=page)
@@ -1550,23 +1553,28 @@ class CvProgrammer:
     def service_write(
         self, cv: int, value: int, *, verify: bool, page: CvPage | None = None
     ) -> CvResult:
-        """`verified=True` here can come only from a decoder-level `Ready`
-        (`61 11`) acknowledgement, present for every CV including
-        CV1/8/17/18, so `BLIND_WRITE_CVS` - which exists to skip an unreliable
-        POM re-read after a write that could change the answering address -
-        has nothing to skip here. A matching `CvValue`/`PagedCvValue` echo is
-        a different, weaker signal: it shows what the station's own result
-        store holds, not that the decoder retained the value
-        (docs/probe-results.md), so it never earns `verified=True` even when
-        `verify=True` was requested - `_write_and_confirm`'s
-        `echo_confirmed_only` return is what tells the two confirmation
-        channels apart.
+        """`verified=True` comes from one of two channels: a decoder-level
+        `Ready` (`61 11`) acknowledgement, or - when the station confirmed the
+        write only through its own result echo - an independent `cv_read`
+        performed here afterwards, whose value must match what was written.
+        A matching `CvValue`/`PagedCvValue` echo alone is the weaker signal:
+        it shows what the station's own result store holds, not that the
+        decoder retained the value (docs/probe-results.md, "Service-mode
+        WRITE works"), so `_write_and_confirm`'s `echo_confirmed_only` return
+        is what decides whether the read-back has to run. A read-back that
+        disagrees raises `CvVerifyError` naming both values; `verify=False`
+        skips the read-back and reports `verified=None` - not measured, never
+        a mismatch nobody measured.
 
-        `page` is accepted, not used: unlike `pom_write`, this method never
-        calls `cv_read` to verify, so there is no internal read whose own
-        `ensure_page` needs it. Kept only so `cv_write` can forward `page` to
-        either write method uniformly - `cv_write`'s own `ensure_page` call
-        already selected it before either method is reached.
+        `BLIND_WRITE_CVS` - which exists to skip an unreliable POM re-read
+        after a write that could change the answering address - has nothing to
+        skip here: service mode is addressed by track, so the read-back asks
+        the same decoder whatever was written.
+
+        `page` is accepted, not forwarded to the read-back: `cv_write`'s own
+        `ensure_page` call already selected it before this method is reached,
+        and `service_read` cannot re-select a page - handing it one only
+        emits `page.not_selected` for a page that IS selected.
         """
         started = self._station.now()
         try:
@@ -1581,19 +1589,10 @@ class CvProgrammer:
             # track is not necessarily the one on the main track (spec line
             # 782) - there is no address to narrow to, so the whole cache goes.
             self._station.invalidate_caches()
-        verified = verify and not echo_confirmed_only
-        if not verified:
-            if verify:
-                reason = (
-                    f"CV{cv} service-mode write was confirmed only by the "
-                    f"station's own result echo (63 14/63 10), not an "
-                    f"independent read-back"
-                )
-            else:
-                reason = self._blind_reason(cv, verify)
+        if not verify:
             self._station.emit(
                 "cv.write_unverified",
-                {"cv": cv, "value": value, "reason": reason},
+                {"cv": cv, "value": value, "reason": self._blind_reason(cv, verify)},
             )
             return CvResult(
                 cv=cv,
@@ -1601,9 +1600,18 @@ class CvProgrammer:
                 mode=ProgMode.SERVICE,
                 encoding=encoding,
                 operation="write",
-                verified=False,
+                verified=None,
                 elapsed=self._station.now() - started,
             )
+        if echo_confirmed_only:
+            read = self.cv_read(cv, address=None, mode=ProgMode.SERVICE)
+            if read.value != value:
+                raise CvVerifyError(
+                    f"CV{cv} write verification failed: wrote {value}, the independent "
+                    f"read-back returned {read.value}",
+                    cv=cv,
+                    details={"wrote": value, "read_back": read.value},
+                )
         return CvResult(
             cv=cv,
             value=value,

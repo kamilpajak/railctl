@@ -69,7 +69,12 @@ class CvResult:
     mode: ProgMode
     encoding: CvEncoding
     operation: Literal["read", "write"]
-    verified: bool | None  # write: read back and confirmed, or not attempted; read: always None
+    #: write: `True` = an independent read-back (or a decoder-level Ready)
+    #: confirmed it; `None` = not measured (`--no-verify`, POM's blind CVs, a
+    #: main-track write nothing can check). Never `False`: a read-back that
+    #: disagrees raises `CvVerifyError` instead of returning, so `False` would
+    #: claim a mismatch nobody measured. read: always `None`.
+    verified: bool | None
     elapsed: float
 
 

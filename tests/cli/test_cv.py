@@ -231,7 +231,7 @@ def _read_outcome(
     return CvReadOutcome(spec=CvSpec(cv=cv), result=result, error=error)
 
 
-def _write_result(cv: int, value: int, *, verified: bool, mode=ProgMode.SERVICE) -> CvResult:
+def _write_result(cv: int, value: int, *, verified: bool | None, mode=ProgMode.SERVICE) -> CvResult:
     return CvResult(
         cv=cv,
         value=value,
@@ -391,44 +391,49 @@ def test_build_cv_write_verified_says_so_and_warns_nothing():
     assert "CV3 accel_rate = 20 written (service mode, verified: yes)" in built.lines
 
 
-def test_build_cv_write_on_main_says_when_it_can_be_checked():
+def test_build_cv_write_on_main_reports_verified_null_and_says_when_it_can_be_checked():
     built = build_cv_write(
-        _write_result(3, 20, verified=False, mode=ProgMode.POM),
+        _write_result(3, 20, verified=None, mode=ProgMode.POM),
         track="main",
         address=3,
         name="accel_rate",
         verify=False,
     )
-    assert built.result["verified"] is False
+    # `null`, never `false`: nothing measured the decoder, and `false` would
+    # claim a mismatch nobody measured.
+    assert built.result["verified"] is None
     assert built.result["track"] == "main"
+    assert "verified: unknown" in built.lines[0]
     warning = built.warnings[0]
-    assert warning.name == "cv_write_unverified"
+    assert warning.name == "cv.write_unverified"
     assert "programming track" in warning.message
     assert "railctl cv read 3" in warning.message
 
 
-def test_build_cv_write_no_verify_is_said_out_loud_not_warned():
+def test_build_cv_write_no_verify_is_said_out_loud_and_carries_the_echo_only_warning():
     built = build_cv_write(
-        _write_result(3, 20, verified=False),
+        _write_result(3, 20, verified=None),
         track="prog",
         address=None,
         name="accel_rate",
         verify=False,
     )
-    assert built.warnings == []
     assert "not read back (--no-verify)" in built.lines
+    warning = built.warnings[0]
+    assert warning.name == "cv.write_unverified"
+    assert "echo" in warning.message
 
 
 def test_build_cv_write_echo_only_confirmation_is_named_for_what_it_is():
     built = build_cv_write(
-        _write_result(3, 20, verified=False),
+        _write_result(3, 20, verified=None),
         track="prog",
         address=None,
         name="accel_rate",
         verify=True,
     )
     warning = built.warnings[0]
-    assert warning.name == "cv_write_unverified"
+    assert warning.name == "cv.write_unverified"
     assert "echo" in warning.message
 
 
@@ -500,7 +505,11 @@ class FakeCvStation:
         )
         if self.write_error is not None:
             raise self.write_error
-        verified = verify if self.write_verified is None else self.write_verified
+        # What the fixed station reports: True after an independent read-back
+        # (or Ready), None when nothing measured the decoder. `write_verified`
+        # overrides for tests that need a specific value.
+        default_verified = True if verify else None
+        verified = default_verified if self.write_verified is None else self.write_verified
         return CvResult(
             cv=cv,
             value=value,
@@ -753,11 +762,13 @@ def test_cv_write_no_verify_is_passed_through_and_reported(monkeypatch):
     assert result.exit_code == 0, result.stderr
     assert fake.write_calls[0]["verify"] is False
     payload = json.loads(result.stdout)
-    assert payload["result"]["verified"] is False
+    # `null`, never `false`: the read-back was skipped, so nothing measured
+    # the decoder, and `false` would claim a mismatch nobody measured.
+    assert payload["result"]["verified"] is None
 
 
 def test_cv_write_on_main_needs_an_address_and_never_verifies(monkeypatch):
-    fake = _install(monkeypatch, FakeCvStation(capabilities=POM_CAPS, write_verified=False))
+    fake = _install(monkeypatch, FakeCvStation(capabilities=POM_CAPS))
     refused = runner.invoke(app, ["cv", "write", "3", "20", "--track", "main", "--format", "json"])
     assert refused.exit_code == 2
     assert _stderr_envelope(refused)["suggestions"] == [
@@ -773,8 +784,10 @@ def test_cv_write_on_main_needs_an_address_and_never_verifies(monkeypatch):
     ]
     payload = json.loads(result.stdout)
     assert payload["result"]["track"] == "main"
-    assert payload["result"]["verified"] is False
-    assert payload["warnings"][0]["name"] == "cv_write_unverified"
+    # `null`, never `false`: a main-track write cannot be checked, so nothing
+    # measured the decoder.
+    assert payload["result"]["verified"] is None
+    assert payload["warnings"][0]["name"] == "cv.write_unverified"
 
 
 def test_cv_write_explicit_verify_with_main_is_refused_not_downgraded(monkeypatch):
