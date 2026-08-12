@@ -71,7 +71,7 @@ group = "motor"
 [[cv]]
 num = 10
 slug = "reg_rolloff_step"
-desc = "Speed step where regulation influence drops"
+desc = "MS family: number of Motorola subsequent addresses, 0-3 (MS manual p.29). MX family: speed step where regulation influence drops"
 group = "motor"
 
 [[cv]]
