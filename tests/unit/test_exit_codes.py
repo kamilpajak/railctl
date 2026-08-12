@@ -13,6 +13,7 @@ from railctl.errors import (
     UNMAPPED_EXIT_CODE,
     AbortedError,
     AmbiguousPort,
+    CatalogError,
     ConfirmationRequiredError,
     CvOutOfRangeError,
     CvVerifyError,
@@ -94,6 +95,7 @@ def test_every_documented_exit_code_row(exc: RailctlError, code: int):
         (LinkProtocolError("x"), 4),
         (StationError("x"), 9),
         (AbortedError("x"), 9),
+        (CatalogError("x"), 9),
     ],
 )
 def test_subclasses_without_their_own_row_inherit_the_parent_code(exc: RailctlError, code: int):

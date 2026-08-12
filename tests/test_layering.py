@@ -70,6 +70,22 @@ RULE_3_PATTERN = re.compile(r"^\s*class\s+\w*(?:Error|Exception|Timeout)\s*\(", 
 
 RULE_4_PATTERNS = (re.compile(r"/dev/"), re.compile(r"usbmodem"))
 
+# Rule 5, from the catalog/backup section of the design document: catalog/ and
+# backup/ sit above the station facade and talk only to `Station` and to plain
+# integers. They may not import the wire layers, and they may not name framing
+# bytes, device paths, or the 0x21 request opcode. `_python_files` collects
+# `*.py` only, so the prose descriptions in catalog/zimo.toml are never scanned
+# - a future description mentioning "0x21" must not trip a code guard.
+RULE_5_PATTERNS = (
+    re.compile(r"railctl\.(?:transport|envelope|xbus)"),
+    re.compile(r"\.\.(?:transport|envelope|xbus)"),
+    re.compile(r"\bimport\s+(?:transport|envelope|xbus)\b"),
+    re.compile(r"ff fe", re.IGNORECASE),
+    re.compile(r"ff fd", re.IGNORECASE),
+    re.compile(r"/dev/"),
+    re.compile(r"0x21", re.IGNORECASE),
+)
+
 
 def _python_files(*relative: str) -> list[Path]:
     found: list[Path] = []
@@ -125,6 +141,14 @@ def test_rule_4_connection_targets_are_opaque_outside_transport():
     assert _offenders(files, RULE_4_PATTERNS) == []
 
 
+def test_rule_5_catalog_and_backup_touch_no_wire_layer():
+    """catalog/ and backup/ never import transport, envelope or xbus, and never
+    name framing bytes, device paths or the 0x21 opcode."""
+    files = _python_files("catalog", "backup")
+    assert files, "the guard scanned no files; catalog/ exists and must be scanned"
+    assert _offenders(files, RULE_5_PATTERNS) == []
+
+
 def test_the_rule_1_and_2_targets_are_scanned_once_they_exist():
     """Rules 1 and 2 pass on an empty file list. This is what stops that being silent.
 
@@ -138,7 +162,7 @@ def test_the_rule_1_and_2_targets_are_scanned_once_they_exist():
     to _python_files(...) in the two rule tests, in the same commit, and plant a
     canary in the new directory to watch the guard fail once.
     """
-    for rel in ("station", "cli", "xbus/commands.py"):
+    for rel in ("station", "cli", "xbus/commands.py", "catalog", "backup"):
         target = PACKAGE / rel
         assert not target.exists() or _python_files(rel), (
             f"{rel} exists but the scanner found no files in it"
@@ -160,6 +184,27 @@ def test_the_scanner_reports_a_planted_violation(tmp_path: Path):
     # ttyUSB0 and cu.usbmodem are hits; isatty() is not. The CLI output contract
     # requires isatty(), so rule 1 must never fire on it.
     assert len(_offenders([planted], RULE_1_PATTERNS)) == 2
+
+
+def test_the_scanner_reports_a_planted_wire_import_for_rule_5(tmp_path: Path):
+    planted = tmp_path / "descend.py"
+    planted.write_text(
+        "from railctl.xbus import cv\n"
+        "from ..envelope import liusb\n"
+        "from railctl import transport\n"
+        "REQUEST_OPCODE = 0x21\n"
+        'PORT = "/dev/ttyUSB0"\n'
+        "STATION = Station\n",
+        encoding="utf-8",
+    )
+    assert len(_offenders([planted], RULE_5_PATTERNS)) == 5
+    # Talking to the Station facade is the one dependency the rule allows.
+    innocent = tmp_path / "innocent.py"
+    innocent.write_text(
+        "from railctl.station import Station\nfrom railctl.errors import CatalogError\n",
+        encoding="utf-8",
+    )
+    assert _offenders([innocent], RULE_5_PATTERNS) == []
 
 
 def test_the_scanner_reports_a_planted_exception_class(tmp_path: Path):

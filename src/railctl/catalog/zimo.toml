@@ -1,0 +1,409 @@
+# Curated ZIMO MS/MX CV catalog. Transcribed from the C3 table of the approved
+# design spec (docs/superpowers/specs/2026-08-03-railctl-design.md); the spec
+# table is the only source of these facts. A wrong description here is a
+# documentation bug - correct it against the sheet that came with the decoder.
+#
+# Defaults when a key is absent: min = 0, max = 255, address = false,
+# restorable = true, needs_speed_table = false.
+
+family = "zimo-ms-mx"
+schema = 1
+
+[[cv]]
+num = 1
+slug = "primary_address"
+desc = "Short DCC address, used when CV29 bit 5 = 0"
+group = "address"
+min = 1
+max = 127
+address = true
+
+[[cv]]
+num = 2
+slug = "v_start"
+desc = "Starting voltage / lowest motor step"
+group = "motor"
+
+[[cv]]
+num = 3
+slug = "accel_rate"
+desc = "Acceleration rate; higher = slower pickup"
+group = "motor"
+
+[[cv]]
+num = 4
+slug = "decel_rate"
+desc = "Deceleration rate; higher = longer coast"
+group = "motor"
+
+[[cv]]
+num = 5
+slug = "v_max"
+desc = "Maximum voltage at top speed step"
+group = "motor"
+
+[[cv]]
+num = 6
+slug = "v_mid"
+desc = "Mid-point voltage of the 3-point curve"
+group = "motor"
+
+[[cv]]
+num = 7
+slug = "decoder_version"
+desc = "Firmware version, read-only, never restored"
+group = "identity"
+restorable = false
+
+[[cv]]
+num = 8
+slug = "manufacturer_id"
+desc = "145 = ZIMO. Writing 8 factory-resets. Never restored"
+group = "identity"
+restorable = false
+
+[[cv]]
+num = 9
+slug = "motor_pwm_period"
+desc = "Motor drive period / EMF sampling; 0 = default"
+group = "motor"
+
+[[cv]]
+num = 10
+slug = "reg_rolloff_step"
+desc = "MS family: number of Motorola subsequent addresses, 0-3 (MS manual p.29). MX family: speed step where regulation influence drops"
+group = "motor"
+
+[[cv]]
+num = 17
+slug = "ext_address_high"
+desc = "Long address, high byte"
+group = "address"
+min = 192
+max = 231
+address = true
+
+[[cv]]
+num = 18
+slug = "ext_address_low"
+desc = "Long address, low byte"
+group = "address"
+address = true
+
+[[cv]]
+num = 19
+slug = "consist_address"
+desc = "Consist address; bit 7 = reversed in consist"
+group = "consist"
+
+[[cv]]
+num = 21
+slug = "consist_fn_f1_f8"
+desc = "Which of F1..F8 follow the consist address"
+group = "consist"
+
+[[cv]]
+num = 22
+slug = "consist_fn_f0"
+desc = "Which F0 directions follow the consist address"
+group = "consist"
+
+[[cv]]
+num = 27
+slug = "dc_brake_config"
+desc = "Braking on DC / asymmetric DCC (ABC)"
+group = "config"
+
+[[cv]]
+num = 28
+slug = "railcom_config"
+desc = "RailCom channels; POM readback needs value 3"
+group = "config"
+
+[[cv]]
+num = 29
+slug = "config_flags"
+desc = "bit0 dir, bit1 28/128, bit2 analog, bit3 RailCom, bit4 speed table, bit5 long address"
+group = "config"
+address = true
+
+[[cv]]
+num = 31
+slug = "index_page_high"
+desc = "Indexed page selector, high. Never written"
+group = "indexing"
+restorable = false
+
+[[cv]]
+num = 32
+slug = "index_page_low"
+desc = "Indexed page selector, low. Never written"
+group = "indexing"
+restorable = false
+
+[[cv]]
+num = 33
+slug = "fn_map_f0_fwd"
+desc = "Output mapping for F0 forward"
+group = "function_map"
+
+[[cv]]
+num = 34
+slug = "fn_map_f0_rev"
+desc = "Output mapping for F0 reverse"
+group = "function_map"
+
+[[range]]
+first = 35
+last = 46
+index_start = 1
+slug_template = "fn_map_f{i:02d}"
+desc_template = "Output mapping for F{i}"
+group = "function_map"
+
+[[cv]]
+num = 56
+slug = "reg_pi"
+desc = "Regulation: tens digit = P, ones digit = I"
+group = "regulation"
+min = 0
+max = 99
+
+[[cv]]
+num = 57
+slug = "reg_reference"
+desc = "Regulation reference voltage, 0.1 V units; 0 = auto"
+group = "regulation"
+
+[[cv]]
+num = 58
+slug = "reg_influence"
+desc = "Regulation strength, 0 = off"
+group = "regulation"
+
+[[cv]]
+num = 60
+slug = "output_dim_pwm"
+desc = "Overall brightness reduction for function outputs"
+group = "lights"
+
+[[cv]]
+num = 61
+slug = "fn_map_mode"
+desc = "ZIMO extended function-mapping selector"
+group = "function_map"
+
+[[cv]]
+num = 65
+slug = "kick_start"
+desc = "Extra starting kick pulse"
+group = "motor"
+
+[[range]]
+first = 67
+last = 94
+index_start = 1
+slug_template = "speed_table_{i:02d}"
+desc_template = "28-point table"
+group = "speed_table"
+needs_speed_table = true
+
+[[cv]]
+num = 105
+slug = "user_id_1"
+desc = "Free user identification byte 1"
+group = "identity"
+
+[[cv]]
+num = 106
+slug = "user_id_2"
+desc = "Free user identification byte 2"
+group = "identity"
+
+[[cv]]
+num = 121
+slug = "accel_curve_exp"
+desc = "Exponential shaping of the acceleration curve"
+group = "motor"
+
+[[cv]]
+num = 122
+slug = "decel_curve_exp"
+desc = "Exponential shaping of the deceleration curve"
+group = "motor"
+
+[[cv]]
+num = 123
+slug = "adaptive_accel_decel"
+desc = "Adaptive acceleration / braking"
+group = "motor"
+
+[[cv]]
+num = 125
+slug = "effect_headlight_fwd"
+desc = "Light effect, forward headlight output"
+group = "lights"
+
+[[cv]]
+num = 126
+slug = "effect_headlight_rev"
+desc = "Light effect, reverse headlight output"
+group = "lights"
+
+[[range]]
+first = 127
+last = 132
+index_start = 1
+slug_template = "effect_fa{i}"
+desc_template = "Effect for output FA{i}: lighting effects, smoke generator or uncoupler by effect code (MS manual 3.21)"
+group = "lights"
+
+[[cv]]
+num = 144
+slug = "confirm_jingle"
+desc = "MS family: bit 4 = 1 plays a confirmation jingle when a CV is programmed. MX family: programming/update lock, non-zero blocks writes and is never itself locked"
+group = "config"
+
+[[cv]]
+num = 147
+slug = "reg_i_min"
+desc = "Experimental regulation: minimum I contribution"
+group = "regulation"
+
+[[cv]]
+num = 148
+slug = "reg_d"
+desc = "Experimental regulation: D value"
+group = "regulation"
+
+[[cv]]
+num = 149
+slug = "reg_p_fixed"
+desc = "Experimental regulation: fixed P contribution"
+group = "regulation"
+
+[[cv]]
+num = 190
+slug = "fade_in_time"
+desc = "Light fade-in time"
+group = "lights"
+
+[[cv]]
+num = 191
+slug = "fade_out_time"
+desc = "Light fade-out time"
+group = "lights"
+
+# The spec table lists CV 250 twice; the ADDENDUM keeps one entry with the
+# richer description (bench-confirmed: CV250 = 6 on the MS450).
+[[cv]]
+num = 250
+slug = "decoder_type"
+desc = "Decoder family/type id. 6 = MS450, 7 = MS990, 8 = MS590, 12 = MS491, 14 = MS540. Read-only, never restored"
+group = "identity"
+restorable = false
+
+[[cv]]
+num = 251
+slug = "serial_byte_1"
+desc = "Decoder serial bytes, read-only, never restored"
+group = "identity"
+restorable = false
+
+[[cv]]
+num = 252
+slug = "serial_byte_2"
+desc = "Decoder serial bytes, read-only, never restored"
+group = "identity"
+restorable = false
+
+[[cv]]
+num = 253
+slug = "serial_byte_3"
+desc = "Decoder serial bytes, read-only, never restored"
+group = "identity"
+restorable = false
+
+[[cv]]
+num = 265
+slug = "sound_project_select"
+desc = "Sound project / load code selection"
+group = "sound"
+
+[[cv]]
+num = 266
+slug = "volume_master"
+desc = "Master sound volume"
+group = "sound"
+
+[[cv]]
+num = 273
+slug = "volume_accel"
+desc = "Volume while accelerating"
+group = "sound"
+
+[[cv]]
+num = 274
+slug = "accel_threshold"
+desc = "Acceleration rate above which `volume_accel` applies"
+group = "sound"
+
+[[cv]]
+num = 275
+slug = "volume_constant"
+desc = "Volume at constant speed"
+group = "sound"
+
+[[cv]]
+num = 276
+slug = "volume_decel"
+desc = "Volume while decelerating"
+group = "sound"
+
+[[cv]]
+num = 277
+slug = "decel_threshold"
+desc = "Deceleration rate above which `volume_decel` applies"
+group = "sound"
+
+[[cv]]
+num = 287
+slug = "brake_squeal_threshold"
+desc = "Deceleration rate above which brake squeal starts"
+group = "sound"
+
+[[cv]]
+num = 288
+slug = "brake_squeal_min_speed"
+desc = "Lowest speed step at which brake squeal plays"
+group = "sound"
+
+[[cv]]
+num = 313
+slug = "mute_function_key"
+desc = "Function key that mutes the sound"
+group = "sound"
+
+[[cv]]
+num = 314
+slug = "mute_fade_time"
+desc = "Mute fade in / out time"
+group = "sound"
+
+[[cv]]
+num = 395
+slug = "volume_limit"
+desc = "Upper bound honoured by the volume up/down keys"
+group = "sound"
+
+[[cv]]
+num = 396
+slug = "volume_down_key"
+desc = "Function key for volume down"
+group = "sound"
+
+[[cv]]
+num = 397
+slug = "volume_up_key"
+desc = "Function key for volume up"
+group = "sound"
