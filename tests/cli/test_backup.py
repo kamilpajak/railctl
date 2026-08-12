@@ -875,8 +875,7 @@ def test_backup_bound_detail_names_the_measured_no(monkeypatch):
     result = runner.invoke(app, ["backup", "--address", "3", "--out", "-", "--format", "json"])
     assert result.exit_code == 0, result.stderr
     assert (
-        _skip_detail_for_397(result)
-        == "cv 397 > MAX_CV_DIRECT 255; extended opcodes unavailable"
+        _skip_detail_for_397(result) == "cv 397 > MAX_CV_DIRECT 255; extended opcodes unavailable"
     )
 
 
