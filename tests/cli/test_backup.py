@@ -825,6 +825,38 @@ def test_backup_ndjson_incomplete_run_still_ends_in_a_summary_with_exit_9(monkey
     assert out.exists()
 
 
+def test_backup_ndjson_no_response_line_carries_attempts_and_the_file_row_does_not(
+    monkeypatch, tmp_path
+):
+    # The design's no_response example line carries "attempts": 3, read off
+    # the error's own details; a silence that recorded no count emits no key,
+    # and the file row never carries one either way.
+    out = tmp_path / "attempts.json"
+    _install(
+        monkeypatch,
+        FakeBackupStation(
+            read_errors={
+                253: DecoderNotRespondingError(
+                    "no answer after 3 attempts", cv=253, details={"attempts": 3}
+                ),
+                250: DecoderNotRespondingError("no answer", cv=250),
+            }
+        ),
+    )
+    result = runner.invoke(
+        app, ["backup", "--address", "3", "--out", str(out), "--format", "ndjson"]
+    )
+    assert result.exit_code == 9, result.stderr
+    lines = _ndjson_lines(result.stdout)
+    counted = next(line for line in lines if line["type"] == "cv" and line["cv"] == 253)
+    assert counted["status"] == "no_response"
+    assert counted["attempts"] == 3
+    uncounted = next(line for line in lines if line["type"] == "cv" and line["cv"] == 250)
+    assert "attempts" not in uncounted
+    row = next(r for r in json.loads(out.read_text(encoding="utf-8"))["cvs"] if r["cv"] == 253)
+    assert "attempts" not in row
+
+
 def test_backup_ndjson_ctrl_c_streams_the_summary_after_the_partial_file(monkeypatch, tmp_path):
     out = tmp_path / "streamed-partial.json"
     _install(monkeypatch, FakeBackupStation(interrupt_after=8))

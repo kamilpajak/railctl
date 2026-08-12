@@ -219,6 +219,21 @@ def test_a_decoder_field_that_failed_to_read_is_omitted_not_nulled():
     assert list(decoder) == ["manufacturer_id", "decoder_type"]
 
 
+def test_attempts_never_reaches_the_file_row():
+    # `attempts` is stream-side metadata (the ndjson `cv` line carries it);
+    # the file writer emits its explicit keys only, so the row stays the
+    # design example's shape whether or not the record holds a count.
+    record = CvRecord(
+        cv=253,
+        name="serial_byte_3",
+        status=ReadStatus.NO_RESPONSE,
+        detail="no answer after 3 attempts (pom)",
+        attempts=3,
+    )
+    row = json.loads(write_backup(make_document(cvs=(record,))))["cvs"][0]
+    assert "attempts" not in row
+
+
 def test_the_writer_accepts_the_readers_boundary_cv_numbers_and_values():
     # Both ends ON the boundary, mirroring the reader's acceptance test:
     # CV 1 with value 0, CV 1024 with value 255.

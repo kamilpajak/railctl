@@ -51,6 +51,11 @@ class CvRecord:
     `detail` carries the station's own text for a non-`ok` row (or the
     writer-side reason for a deliberate skip); it is never invented for an
     `ok` row by the mapping, though nothing forbids one.
+
+    `attempts` is stream-side metadata: how many reads the station tried
+    before giving up, when the error recorded it. The ndjson `cv` line
+    emits it; the file writer emits its explicit keys only, so it never
+    reaches a file row.
     """
 
     cv: int
@@ -59,6 +64,7 @@ class CvRecord:
     source: str = SOURCE_CATALOG
     value: int | None = None
     detail: str | None = None
+    attempts: int | None = None
 
     def __post_init__(self) -> None:
         if self.status is ReadStatus.OK and self.value is None:

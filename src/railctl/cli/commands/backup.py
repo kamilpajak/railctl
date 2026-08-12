@@ -735,6 +735,8 @@ def _run_ndjson(
             fields["value"] = record.value
         if record.detail is not None:
             fields["detail"] = record.detail
+        if record.attempts is not None:
+            fields["attempts"] = record.attempts
         if result is not None:
             fields["elapsed_ms"] = round(result.elapsed * 1000)
         stream.event("cv", **fields)

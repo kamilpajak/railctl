@@ -137,6 +137,7 @@ def test_record_for_an_ok_outcome_carries_the_value_and_the_specs_name():
     assert record.status is ReadStatus.OK
     assert record.value == VALUE
     assert record.detail is None
+    assert record.attempts is None
     assert record.source == SOURCE_CATALOG
 
 
@@ -146,6 +147,18 @@ def test_record_for_a_silent_outcome_has_no_value_and_keeps_the_stations_text():
     assert record.status is ReadStatus.NO_RESPONSE
     assert record.value is None
     assert record.detail == str(error)
+
+
+def test_record_for_carries_the_attempts_the_error_recorded():
+    # `station/programming.py` puts `details={"attempts": ...}` on its raise
+    # sites; the record carries it for the ndjson `cv` line, never the file.
+    error = DecoderNotRespondingError("no answer after 3 attempts (pom)", details={"attempts": 3})
+    assert record_for(_failed_outcome(error)).attempts == 3
+
+
+def test_record_for_an_error_without_the_attempts_detail_leaves_it_none():
+    error = DecoderNoAckError("no acknowledgement from the decoder")
+    assert record_for(_failed_outcome(error)).attempts is None
 
 
 def test_record_for_accepts_an_explicit_source():

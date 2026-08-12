@@ -80,6 +80,9 @@ def record_for(outcome: CvReadOutcome, *, source: str = SOURCE_CATALOG) -> CvRec
     so a row and its status cannot come from two different places."""
     status, detail = status_for(outcome)
     value = outcome.result.value if outcome.result is not None else None
+    # The attempt count the raise sites in `station/programming.py` record;
+    # stream-side metadata only - the file writer never emits it.
+    attempts = outcome.error.details.get("attempts") if outcome.error is not None else None
     return CvRecord(
         cv=outcome.spec.cv,
         name=outcome.spec.name,
@@ -87,4 +90,5 @@ def record_for(outcome: CvReadOutcome, *, source: str = SOURCE_CATALOG) -> CvRec
         source=source,
         value=value,
         detail=detail,
+        attempts=attempts,
     )
