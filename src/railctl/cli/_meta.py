@@ -93,6 +93,11 @@ class Option:
     required: bool = False
     env: str | None = None
     repeatable: bool = False
+    #: True builds the Click pair `--flag/--no-flag` from one row, so the
+    #: negative spelling can never drift from the positive one. Published in
+    #: the manifest: an agent reading `"negatable": true` knows `--no-<flag>`
+    #: exists without discovering it from prose.
+    negatable: bool = False
 
 
 @dataclass(frozen=True, slots=True)
@@ -434,6 +439,121 @@ _MONITOR = CommandMeta(
     options=(MONITOR_LIMIT,),
 )
 
+# -- cv read / cv write - the first two-word command paths --------------------
+
+#: `auto` resolves off capabilities.json (`station.resolve_mode`): POM unless
+#: it is a measured no, then a proven service-mode encoding.
+CV_MODES: Final[tuple[str, ...]] = ("auto", "pom", "service")
+#: The user-facing flag names the TRACK the locomotive stands on, not the
+#: protocol (design: "programming track" is a thing you can point at; "POM"
+#: is not). `prog` runs service mode, `main` runs POM.
+CV_TRACKS: Final[tuple[str, ...]] = ("prog", "main")
+
+CV_SPEC_ARG = Argument(
+    name="cvspec",
+    help=(
+        "one or more of: a CV number (29), a range (3-8), a comma list (1,3,29), or a "
+        "catalog slug (accel_rate); tokens concatenate, duplicates collapse, "
+        "first-appearance order is kept"
+    ),
+    type="string",
+)
+CV_READ_MODE_OPT = Option(
+    name="--mode",
+    help=f"{_one_of(CV_MODES)}; auto resolves off what `railctl doctor` measured",
+    type="enum",
+    enum=CV_MODES,
+    default="auto",
+)
+CV_PAGE_OPT = Option(
+    name="--page",
+    help=(
+        "declare the ZIMO index page for CV257-512 as CV31:CV32 values, for example "
+        "145:0, instead of aborting with index_page_required"
+    ),
+    type="string",
+    default=None,
+)
+CV_WRITE_CV_ARG = Argument(
+    name="cv",
+    help="exactly one CV number or catalog slug",
+    type="string",
+)
+CV_WRITE_VALUE_ARG = Argument(
+    name="value",
+    help="the value to write, 0-255; the catalog's min/max are enforcing on write",
+    type="integer",
+)
+#: `default=True` is what a caller gets when nothing is typed on the
+#: programming track, and the manifest publishes that. `late_default` hands
+#: Click `None` so the command can tell "not typed" from "typed --verify":
+#: an EXPLICIT `--verify` with `--track main` is a usage error (nothing can
+#: confirm a POM write), while the untyped default on `main` is simply off -
+#: a silent downgrade of a typed flag is the thing the design forbids.
+CV_WRITE_VERIFY_OPT = Option(
+    name="--verify",
+    help=(
+        "read the CV back after writing (default on; --no-verify skips it; on "
+        "--track main nothing can verify, so typing --verify there is refused)"
+    ),
+    type="boolean",
+    default=True,
+    late_default=True,
+    negatable=True,
+)
+CV_WRITE_TRACK_OPT = Option(
+    name="--track",
+    help=(
+        f"the track the locomotive stands on: {_one_of(CV_TRACKS)}. prog is the "
+        f"programming track (service mode); main writes to a running locomotive (POM) "
+        f"and needs --address"
+    ),
+    type="enum",
+    enum=CV_TRACKS,
+    default="prog",
+)
+
+#: What a CV read can leave the process with, beyond a station command's own
+#: set: the programming-error family 10-13 and 15-19 (`errors.EXIT_CODES` -
+#: never 14, a read verifies nothing), 20 from the POM pre-flight and the POM
+#: track-power check, and the partial 8 when some CVs of a batch answered and
+#: others did not. Like `STATION_EXIT_CODES` this is a "can produce" set:
+#: reachability drives in tests/cli/test_cv.py cover 15 and 17 among others.
+CV_READ_EXIT_CODES: Final[tuple[int, ...]] = tuple(
+    sorted({*STATION_EXIT_CODES, PARTIAL_EXIT_CODE, 10, 11, 12, 13, 15, 16, 17, 18, 19, 20})
+)
+#: A write adds 14 (`CvVerifyError`: the read-back disagreed) and drops the
+#: partial 8 - one CV either was written or the command failed saying why.
+CV_WRITE_EXIT_CODES: Final[tuple[int, ...]] = tuple(
+    sorted({*STATION_EXIT_CODES, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20})
+)
+
+_CV_READ = CommandMeta(
+    path="cv read",
+    help="Read CVs from the decoder",
+    schema="railctl/cv-read/v1",
+    # Reads no persistent state changes: an index-page selection (CV31/CV32)
+    # can go out for CV257-512, but the command's job is to leave the decoder
+    # as it found it.
+    mutates=False,
+    exit_codes=CV_READ_EXIT_CODES,
+    arguments=(CV_SPEC_ARG,),
+    options=(CV_READ_MODE_OPT, CV_PAGE_OPT),
+)
+_CV_WRITE = CommandMeta(
+    path="cv write",
+    help="Write one CV on the decoder, read back by default",
+    schema="railctl/cv-write/v1",
+    mutates=True,
+    exit_codes=CV_WRITE_EXIT_CODES,
+    arguments=(CV_WRITE_CV_ARG, CV_WRITE_VALUE_ARG),
+    options=(CV_WRITE_VERIFY_OPT, CV_WRITE_TRACK_OPT),
+    # The confirmation set {1, 8, 17, 18, 29, 31, 32, 144} lives in
+    # commands/cv.py, derived from the station layer's own constants.
+    confirms=True,
+)
+
+
 #: Command-scoped, and deliberately NOT the global `--address` /
 #: RAILCTL_ADDRESS / config default that `drive` and `function` read through
 #: `settings.address`. A user with `address = 3` configured who hits the panic
@@ -477,10 +597,30 @@ COMMANDS: Final[tuple[CommandMeta, ...]] = (
     _DRIVE,
     _FUNCTION,
     _MONITOR,
+    _CV_READ,
+    _CV_WRITE,
     _SCHEMA,
 )
 
 _BY_PATH: Final[dict[str, CommandMeta]] = {c.path: c for c in COMMANDS}
+
+
+def _first_words() -> tuple[str, ...]:
+    words: list[str] = []
+    for meta in COMMANDS:
+        word = meta.path.split(" ")[0]
+        if word not in words:
+            words.append(word)
+    return tuple(words)
+
+
+#: The first word of every path, in tree order, deduplicated - what the root
+#: help page lists. Needed since the tree grew its first two-word paths:
+#: Typer assembles plain commands first and `add_typer` groups after them,
+#: whatever order the `register()` calls ran in, so without an explicit order
+#: the `cv` group would list after `schema` while this table says it comes
+#: before. `main._TreeOrderGroup` sorts by this tuple.
+TREE_ORDER: Final[tuple[str, ...]] = _first_words()
 
 
 def command_meta(path: str) -> CommandMeta:
@@ -525,7 +665,10 @@ def typer_option(option: Option) -> Any:
     `--json`/`--format` conflict even though no `--format` was typed, because
     the environment value arrived in the slot a typed flag occupies.
     """
-    names: list[str] = [option.name]
+    spelled = (
+        f"{option.name}/--no-{option.name.removeprefix('--')}" if option.negatable else option.name
+    )
+    names: list[str] = [spelled]
     if option.short is not None:
         names.append(option.short)
     return typer.Option(
@@ -768,6 +911,28 @@ def help_epilog(meta: CommandMeta) -> str:
     )
 
 
+def group_epilog(prefix: str) -> str:
+    """The same fixed headings for a command GROUP's help page (`railctl cv --help`).
+
+    The design requires OUTPUT / EXIT CODES / EXAMPLES at every level, and a
+    group sits between the root and its leaves. Everything here is read off
+    the member rows: the schemas are listed per leaf (a group emits no
+    envelope of its own), the exit codes are the union of what the members
+    publish, and there is one example per member, in tree order.
+    """
+    members = [meta for meta in COMMANDS if meta.path.startswith(f"{prefix} ")]
+    codes = sorted({code for meta in members for code in meta.exit_codes})
+    schema_line = "; ".join(f"{meta.schema} ({meta.path})" for meta in members)
+    return "\n".join(
+        [
+            *_output_lines(schema_line),
+            *_exit_code_lines(codes),
+            "EXAMPLES",
+            *(f"  {_example(meta)}" for meta in members),
+        ]
+    )
+
+
 def root_epilog() -> str:
     """The same three headings for `railctl --help`, which had none of them.
 
@@ -801,6 +966,7 @@ def _option_dict(option: Option) -> dict[str, object]:
         "required": option.required,
         "env": option.env,
         "repeatable": option.repeatable,
+        "negatable": option.negatable,
     }
 
 

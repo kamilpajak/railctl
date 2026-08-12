@@ -35,8 +35,10 @@ from railctl.errors import (
     CONDITION_EMERGENCY_OFF,
     CONDITION_EMERGENCY_STOP,
     CONDITION_TRACK_DEAD,
+    REASON_VALUE_OUT_OF_RANGE,
     AbortedError,
     ConfirmationRequiredError,
+    CvOutOfRangeError,
     DecoderNotRespondingError,
     FunctionGroupUnreadableError,
     PomReadUnsupportedError,
@@ -94,10 +96,11 @@ TRACK_POWER_RECOVERY: Final[dict[str, tuple[tuple[str, ...], ...]]] = {
 def default_suggestions(
     exc: BaseException, *, command: str, cv: int | None = None
 ) -> list[list[str]]:
-    """The four suggestions this project has actually needed (docs/probe-results.md R1: a POM
+    """The five suggestions this project has actually needed (docs/probe-results.md R1: a POM
     read the station never answers; a confirmation nothing can ask for on a non-interactive
-    stdin; a function group whose current state could not be read; and a track this tool
-    refuses to drive because the layout is in an emergency state). Everything else defaults to
+    stdin; a function group whose current state could not be read; a track this tool
+    refuses to drive because the layout is in an emergency state; and a CV outside what the
+    resolved mode reaches, where a re-probe is the answer). Everything else defaults to
     no suggestion rather than a guess that reads as authoritative advice it is not.
 
     `FunctionGroupUnreadableError` is the one whose argv this function cannot build. It is
@@ -116,6 +119,18 @@ def default_suggestions(
         # `klass.__new__(klass)`, which runs no `__init__` at all, so the attribute may be
         # absent. `report_for` reaches for `cv` with the same default for the same reason.
         return _argv_arrays([getattr(exc, "retry_argv", None)])
+    if isinstance(exc, CvOutOfRangeError):
+        # The design's rule for a CV the resolved mode cannot reach: exit 15 with
+        # `railctl doctor`, because the bound is a fact about what this station has
+        # proven and a re-probe is the one thing that could move it. A VALUE outside
+        # the catalog's min/max shares the class and the exit code but not the
+        # remedy - nothing the doctor measures changes 300 not fitting in 0..255 -
+        # so that reason gets no suggestion rather than a runnable command that
+        # cannot help. `details` is read with a default because `_meta._class_error_row`
+        # probes every class with `klass.__new__(klass)`, which runs no `__init__`.
+        if (getattr(exc, "details", None) or {}).get("reason") == REASON_VALUE_OUT_OF_RANGE:
+            return []
+        return [["railctl", "doctor"]]
     if isinstance(exc, (PomReadUnsupportedError, DecoderNotRespondingError)):
         # Both are what "a POM read failed" looks like on this hardware, and the design's own
         # rule - a failed POM read always suggests `railctl doctor` first - is written about

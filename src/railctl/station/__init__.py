@@ -20,6 +20,7 @@ from railctl.station.capabilities import (
 )
 from railctl.station.doctor import exit_code_for_report, run_probe, verdict_lines
 from railctl.station.facade import Station
+from railctl.station.programming import resolve_mode
 from railctl.station.timing import TIMING, Timing
 from railctl.station.types import (
     ADDRESS_CVS,
@@ -89,6 +90,7 @@ __all__ = [
     "decoder_family",
     "exit_code_for_report",
     "layout_json",
+    "resolve_mode",
     "run_probe",
     "treats_cv144_as_lock",
     "verdict_lines",

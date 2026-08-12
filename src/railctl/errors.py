@@ -312,6 +312,18 @@ class CvOutOfRangeError(ProgrammingError):
     code: ClassVar[str] = "cv_out_of_range"
 
 
+#: `CvOutOfRangeError.details["reason"]` when the refused number is the VALUE
+#: being written, not the CV. Both refusals share the class and exit code 15 -
+#: the catalog's min/max are enforcing on write - but not the remedy: a CV the
+#: mode cannot reach suggests `railctl doctor` (a re-probe is what could move
+#: the bound), while nothing the doctor measures changes 300 not fitting in
+#: 0..255. `cli/_errors.default_suggestions` reads this to keep the doctor
+#: suggestion off the value refusal. Declared here, beside the class, for the
+#: same reason the `CONDITION_*` strings are: the writer (`cli/commands/cv.py`)
+#: and the reader (`cli/_errors.py`) must not each spell it themselves.
+REASON_VALUE_OUT_OF_RANGE: Final[str] = "value_out_of_range"
+
+
 class ServiceEncodingUnknownError(ProgrammingError):
     """No service-mode encoding has been established on this station yet.
 
