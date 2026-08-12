@@ -606,8 +606,9 @@ def test_backup_a_selector_failure_aborts_with_its_own_code(monkeypatch):
 
 def test_backup_an_unreadable_cv_is_a_no_response_hole_and_exit_9(monkeypatch, tmp_path):
     """The M9 acceptance: the row says `no_response` with NO value key, the
-    summary says `complete: false`, the process exits 9 - and the file is
-    still written, because the file is the product."""
+    summary says `complete: false`, the process exits 9 - and the document is
+    still DELIVERED, on disk and in the envelope, because the file is the
+    product and the exit code is its honest label."""
     out = tmp_path / "holes.json"
     _install(
         monkeypatch,
@@ -621,13 +622,20 @@ def test_backup_an_unreadable_cv_is_a_no_response_hole_and_exit_9(monkeypatch, t
     result = runner.invoke(app, ["backup", "--address", "3", "--out", str(out), "--format", "json"])
     assert result.exit_code == 9, result.stderr
     assert _published(9)
-    envelope = _stderr_envelope(result)
-    assert envelope["code"] == "backup_incomplete"
-    assert "CV250" in envelope["message"] and "CV253" in envelope["message"]
-    assert envelope["details"]["path"] == str(out)
-    assert envelope["details"]["no_response"] == [250, 253]
-    assert envelope["details"]["error"] == []
+    payload = json.loads(result.stdout)
+    assert payload["ok"] is False
+    assert payload["exit_code"] == 9
+    warning = next(w for w in payload["warnings"] if w["name"] == "backup.incomplete")
+    assert "CV250" in warning["message"] and "CV253" in warning["message"]
+    assert warning["details"]["path"] == str(out)
+    assert warning["details"]["no_response"] == [250, 253]
+    assert warning["details"]["error"] == []
+    assert warning["details"]["skipped"] == sorted(OVER_BOUND)
+    # The envelope result IS the written document, plus where it went.
+    body = payload["result"]
+    assert body["path"] == str(out)
     on_disk = json.loads(out.read_text(encoding="utf-8"))
+    assert {key: value for key, value in body.items() if key != "path"} == on_disk
     row = next(r for r in on_disk["cvs"] if r["cv"] == 253)
     assert row["status"] == "no_response"
     assert "value" not in row
@@ -648,10 +656,62 @@ def test_backup_a_station_error_row_also_makes_the_file_incomplete(monkeypatch, 
     )
     result = runner.invoke(app, ["backup", "--address", "3", "--out", str(out), "--format", "json"])
     assert result.exit_code == 9, result.stderr
-    envelope = _stderr_envelope(result)
-    assert envelope["details"]["error"] == [65]
+    payload = json.loads(result.stdout)
+    warning = next(w for w in payload["warnings"] if w["name"] == "backup.incomplete")
+    assert warning["details"]["error"] == [65]
     row = next(r for r in json.loads(out.read_text())["cvs"] if r["cv"] == 65)
     assert row["status"] == "error"
+
+
+def test_backup_incomplete_to_stdout_still_delivers_the_document(monkeypatch):
+    # `--out -` used to lose the measured data entirely on an incomplete run:
+    # the raise threw the outcome away and only an error envelope survived.
+    _install(
+        monkeypatch,
+        FakeBackupStation(read_errors={253: DecoderNotRespondingError("no answer", cv=253)}),
+    )
+    result = runner.invoke(app, ["backup", "--address", "3", "--out", "-", "--format", "json"])
+    assert result.exit_code == 9, result.stderr
+    payload = json.loads(result.stdout)
+    assert payload["ok"] is False
+    body = payload["result"]
+    assert body["schema"] == BACKUP_SCHEMA
+    assert body["path"] is None
+    assert body["summary"]["complete"] is False
+    warning = next(w for w in payload["warnings"] if w["name"] == "backup.incomplete")
+    assert warning["details"]["path"] is None
+
+
+def test_backup_incomplete_human_still_prints_every_row(monkeypatch, tmp_path):
+    out = tmp_path / "human9.json"
+    _install(
+        monkeypatch,
+        FakeBackupStation(
+            read_errors={253: DecoderNotRespondingError("no answer after 3 attempts", cv=253)}
+        ),
+    )
+    result = runner.invoke(app, ["backup", "--address", "3", "--out", str(out)])
+    assert result.exit_code == 9, result.stderr
+    assert f"CV8 manufacturer_id = {DEFAULT_VALUE}" in result.stdout
+    assert "CV253 serial_byte_3: no_response (no answer after 3 attempts)" in result.stdout
+    assert "complete: no" in result.stdout
+    assert f"written to {out}" in result.stdout
+    assert "backup.incomplete" in result.stdout
+
+
+def test_backup_station_events_still_reach_an_incomplete_envelope(monkeypatch):
+    _install(
+        monkeypatch,
+        FakeBackupStation(
+            read_errors={253: DecoderNotRespondingError("no answer", cv=253)},
+            emit_events=[("cv.stale_result", {"cv": 8, "echoed": 7})],
+        ),
+    )
+    result = runner.invoke(app, ["backup", "--address", "3", "--out", "-", "--format", "json"])
+    assert result.exit_code == 9, result.stderr
+    names = [w["name"] for w in json.loads(result.stdout)["warnings"]]
+    assert "cv.stale_result" in names
+    assert "backup.incomplete" in names
 
 
 @pytest.mark.parametrize(

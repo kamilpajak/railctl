@@ -18,8 +18,11 @@ Three properties are load-bearing here rather than emergent:
   attempt costs 6.7 s per CV (docs/probe-results.md R1), and 77 of those is
   not a backup, it is a nine-minute timeout;
 * **the file is the product, the exit code is its label.** A hole
-  (`no_response`/`error`) still writes the file and exits 9 with
-  `backup_incomplete` naming the holes; Ctrl-C writes the partial file with
+  (`no_response`/`error`) still delivers the document - the file (or the
+  stdout document with `--out -`) plus the buffered envelope carrying it -
+  and exits 9, the holes named in a `backup.incomplete` warning (buffered)
+  or the `backup_incomplete` stderr envelope (ndjson, where the document
+  already streamed); Ctrl-C writes the partial file with
   `"interrupted": true` and exits 9 as `aborted`; a `skipped` row is a
   recorded decision and never changes the exit code.
 
@@ -129,6 +132,16 @@ SERIAL_CVS: Final[tuple[int, ...]] = (251, 252, 253)
 #: What an interrupted ndjson run exits with - read off the class, exactly as
 #: `commands/monitor.py` does, so this file and `errors.py` cannot disagree.
 _ABORTED_EXIT_CODE: Final[int] = exit_code_for(AbortedError.__new__(AbortedError))
+
+#: What a delivered-but-incomplete buffered run exits with - read off
+#: `BackupIncompleteError` the same way, because the buffered path marks its
+#: outcome with this code instead of raising the class (see `_work`).
+_INCOMPLETE_EXIT_CODE: Final[int] = exit_code_for(
+    BackupIncompleteError.__new__(BackupIncompleteError)
+)
+
+#: The buffered envelope's warning name for a delivered-but-incomplete run.
+_INCOMPLETE_WARNING: Final[str] = "backup.incomplete"
 
 # Built once, at import time - the same B008 note as every command module.
 _TARGET = global_option("--target")
@@ -589,27 +602,47 @@ def build_backup(document: BackupDocument, *, path: Path | None, text: str) -> C
     return result
 
 
-def require_complete(document: BackupDocument, path: Path | None) -> None:
-    """Exit 9 when the file has holes - raised AFTER the file is written,
-    because the file is the product and the exit code is its honest label."""
+def incomplete_report(
+    document: BackupDocument, path: Path | None
+) -> tuple[str, dict[str, object]] | None:
+    """The one composition of "this file has holes" - message and details -
+    with two consumers: `_work` marks its outcome with them (the document is
+    delivered; exit 9 is its label), and `require_complete` raises them as
+    `BackupIncompleteError` for the ndjson path. `None` for a complete
+    document."""
     summary = document.summary
     if summary["complete"]:
-        return
+        return None
     non_ok = sorted(
         (r for r in document.cvs if r.status in (ReadStatus.NO_RESPONSE, ReadStatus.ERROR)),
         key=lambda r: r.cv,
     )
     listed = ", ".join(f"CV{r.cv} ({r.status.value})" for r in non_ok)
-    raise BackupIncompleteError(
+    message = (
         f"backup incomplete: {len(non_ok)} of {summary['requested']} CVs produced no "
-        f"value - {listed}",
-        details={
-            "path": None if path is None else str(path),
-            "no_response": [r.cv for r in non_ok if r.status is ReadStatus.NO_RESPONSE],
-            "error": [r.cv for r in non_ok if r.status is ReadStatus.ERROR],
-            "skipped": sorted(r.cv for r in document.cvs if r.status is ReadStatus.SKIPPED),
-        },
+        f"value - {listed}"
     )
+    details: dict[str, object] = {
+        "path": None if path is None else str(path),
+        "no_response": [r.cv for r in non_ok if r.status is ReadStatus.NO_RESPONSE],
+        "error": [r.cv for r in non_ok if r.status is ReadStatus.ERROR],
+        "skipped": sorted(r.cv for r in document.cvs if r.status is ReadStatus.SKIPPED),
+    }
+    return message, details
+
+
+def require_complete(document: BackupDocument, path: Path | None) -> None:
+    """Exit 9 when the file has holes - the NDJSON path's consumer of
+    `incomplete_report`, raised AFTER the file is written and the rows
+    streamed: there the document already reached its consumer, and the
+    stderr envelope is the design's exit-9 report. The buffered path never
+    raises this - it delivers the document and marks the outcome instead
+    (see `_work`)."""
+    report = incomplete_report(document, path)
+    if report is None:
+        return
+    message, details = report
+    raise BackupIncompleteError(message, details=details)
 
 
 def _mismatch_details(collection: _Collection) -> dict[str, object]:
@@ -651,7 +684,15 @@ def _work(
         events.attach_to(outcome)
         outcome.link = link_info(station, settings)
         outcome.station = station_info(station)
-        require_complete(backup_run.document, plan.path)
+        # An incomplete document is still the product: deliver it and mark
+        # the outcome, never discard it for an error envelope. Exit 9 is the
+        # label on the file, and the holes ride as a warning beside it.
+        incomplete = incomplete_report(backup_run.document, plan.path)
+        if incomplete is not None:
+            message, details = incomplete
+            outcome.ok = False
+            outcome.exit_code = _INCOMPLETE_EXIT_CODE
+            outcome.warn(_INCOMPLETE_WARNING, message, **details)
     except BaseException:
         close_quietly(station)
         raise
