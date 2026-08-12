@@ -295,7 +295,7 @@ def test_build_cv_read_catalog_range_is_advisory_on_read():
     assert row["note"] == "outside the catalog's 1..127"
     assert built.ok is True
     warning = built.warnings[0]
-    assert warning.name == "cv_value_outside_catalog_range"
+    assert warning.name == "cv.value_outside_catalog_range"
     assert "advisory on read" in warning.message
 
 
@@ -314,7 +314,7 @@ def test_build_cv_read_silence_is_no_response_with_no_value_key():
     assert built.ok is False
     assert built.exit_code == PARTIAL_EXIT_CODE
     assert built.result == {**built.result, "ok": 1, "failed": 1}
-    assert any(w.name == "cv_no_response" and w.message == SILENCE_GUIDANCE for w in built.warnings)
+    assert any(w.name == "cv.no_response" and w.message == SILENCE_GUIDANCE for w in built.warnings)
 
 
 def test_build_cv_read_pom_silence_gets_no_programming_track_guidance():
@@ -327,7 +327,7 @@ def test_build_cv_read_pom_silence_gets_no_programming_track_guidance():
     )
     assert built.result["track"] == "main"
     assert built.result["address"] == 3
-    assert not any(w.name == "cv_no_response" for w in built.warnings)
+    assert not any(w.name == "cv.no_response" for w in built.warnings)
 
 
 def test_build_cv_read_a_mode_that_cannot_reach_a_cv_is_a_skip_with_a_reason():

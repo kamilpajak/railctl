@@ -306,7 +306,7 @@ def build_cv_read(
                 # `ok` and the disagreement is a note, never a failure.
                 row["note"] = f"outside the catalog's {entry.min}..{entry.max}"
                 result.warn(
-                    "cv_value_outside_catalog_range",
+                    "cv.value_outside_catalog_range",
                     f"CV{cv} reads {value}, outside the catalog's {entry.min}..{entry.max} "
                     f"for {name}; the value stands - the catalog is advisory on read",
                     cv=cv,
@@ -347,7 +347,7 @@ def build_cv_read(
         "cvs": rows,
     }
     if silent and mode is ProgMode.SERVICE:
-        result.warn("cv_no_response", SILENCE_GUIDANCE, cvs=list(silent))
+        result.warn("cv.no_response", SILENCE_GUIDANCE, cvs=list(silent))
     if failed:
         result.ok = False
         result.exit_code = PARTIAL_EXIT_CODE
