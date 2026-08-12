@@ -345,7 +345,7 @@ group = "sound"
 [[cv]]
 num = 274
 slug = "accel_threshold"
-desc = "Acceleration rate above which volume_accel applies"
+desc = "Acceleration rate above which `volume_accel` applies"
 group = "sound"
 
 [[cv]]
@@ -363,7 +363,7 @@ group = "sound"
 [[cv]]
 num = 277
 slug = "decel_threshold"
-desc = "Deceleration rate above which volume_decel applies"
+desc = "Deceleration rate above which `volume_decel` applies"
 group = "sound"
 
 [[cv]]

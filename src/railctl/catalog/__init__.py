@@ -82,6 +82,20 @@ def load_catalog(path: Path | None = None) -> dict[int, CatalogEntry]:
         raise CatalogError(f"the catalog does not parse as TOML: {exc}") from exc
     _check_header(document)
 
+    for key in ("cv", "range"):
+        blocks = document.get(key, [])
+        # The contract above says CatalogError on ANYTHING questionable, and a hand-edited
+        # file is the expected way this module gets broken - the spec chose TOML precisely so
+        # the user can correct descriptions by hand. `cv = 3` instead of a [[cv]] block used
+        # to escape as a bare TypeError from the iteration below, which the CLI's safety net
+        # then reported as `internal` - a data-file mistake dressed up as a railctl bug, and
+        # a script branching on `error.code == "catalog"` never saw it.
+        if not isinstance(blocks, list) or not all(isinstance(b, dict) for b in blocks):
+            raise CatalogError(
+                f"[[{key}]] must be an array of tables, got {type(blocks).__name__}; "
+                f"write [[{key}]] block headers, not a bare `{key} =` assignment"
+            )
+
     entries: dict[int, CatalogEntry] = {}
     for block in document.get("range", []):
         for entry in _expand_range(block):

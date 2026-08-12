@@ -338,3 +338,19 @@ def test_the_wheel_ships_the_catalog(tmp_path: Path):
         archive.extractall(tmp_path / "unpacked")
     extracted = tmp_path / "unpacked" / "railctl" / "catalog" / "zimo.toml"
     assert load_catalog(extracted) == CATALOG
+
+
+@pytest.mark.parametrize(
+    "body", ["cv = 3", "range = 3", "cv = [3]"], ids=["int", "range-int", "int-array"]
+)
+def test_a_malformed_container_is_a_catalog_error_not_a_type_error(tmp_path: Path, body: str):
+    """`cv = 3` where `[[cv]]` was meant used to escape as a bare `TypeError`.
+
+    The loader's contract is `CatalogError` on ANYTHING questionable, and a hand-edited
+    file is the expected way the module breaks - the spec chose TOML precisely so the
+    user can correct it by hand. Escaped, the CLI's safety net reported the mistake as
+    `internal`: a data-file defect dressed up as a railctl bug, invisible to a script
+    branching on `error.code == "catalog"`.
+    """
+    with pytest.raises(CatalogError, match="array of tables"):
+        load_catalog(_write(tmp_path, body))
