@@ -465,9 +465,7 @@ def register(app: typer.Typer) -> None:
                     retry_argv=[*argv_hint, "--page", str(page)],
                 )
             events = StationEventLog()
-            station = open_station(
-                settings, capabilities_path=capabilities_path(), on_event=events
-            )
+            station = open_station(settings, capabilities_path=capabilities_path(), on_event=events)
             try:
                 resolved = resolve_mode(ProgMode(mode), station.capabilities, operation="read")
                 if resolved is ProgMode.POM:
@@ -624,9 +622,7 @@ def register(app: typer.Typer) -> None:
             wanted = MODE_FOR_TRACK[track]
             effective_verify = (track == TRACK_PROG) if verify is None else verify
             events = StationEventLog()
-            station = open_station(
-                settings, capabilities_path=capabilities_path(), on_event=events
-            )
+            station = open_station(settings, capabilities_path=capabilities_path(), on_event=events)
             try:
                 resolved_address: int | None = None
                 if wanted is ProgMode.POM:

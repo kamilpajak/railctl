@@ -1321,7 +1321,9 @@ def test_cv_read_many_restore_puts_the_found_cursor_pair_back_on_the_wire(bench)
 
     assert [o.error for o in outcomes] == [None]
     assert outcomes[0].result is not None and outcomes[0].result.value == 7
-    after_read = bench.sent[bench.sent.index(cmd_pom_read_byte(ADDRESS, 265, threshold=THRESHOLD)) :]
+    after_read = bench.sent[
+        bench.sent.index(cmd_pom_read_byte(ADDRESS, 265, threshold=THRESHOLD)) :
+    ]
     assert cmd_pom_write_byte(ADDRESS, 31, 5, threshold=THRESHOLD) in after_read
     assert cmd_pom_write_byte(ADDRESS, 32, 1, threshold=THRESHOLD) in after_read
 

@@ -61,9 +61,7 @@ def parse_cv_spec(
     seen: set[int] = set()
     for token in tokens:
         for piece in token.split(","):
-            for cv in _piece_cvs(
-                piece.strip(), catalog, tokens=tokens, argv_prefix=argv_prefix
-            ):
+            for cv in _piece_cvs(piece.strip(), catalog, tokens=tokens, argv_prefix=argv_prefix):
                 if cv not in seen:
                     seen.add(cv)
                     ordered.append(cv)

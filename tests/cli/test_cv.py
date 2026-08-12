@@ -1092,9 +1092,7 @@ def test_cv_write_accepts_both_value_edges(monkeypatch, value: int):
     # On the boundary: 0 and 255 are bytes and must go out. CV11 is uncurated,
     # so no catalog range narrows the byte.
     fake = _install(monkeypatch, FakeCvStation())
-    result = runner.invoke(
-        app, ["cv", "write", str(UNCURATED_CV), str(value), "--format", "json"]
-    )
+    result = runner.invoke(app, ["cv", "write", str(UNCURATED_CV), str(value), "--format", "json"])
     assert result.exit_code == 0, result.stderr
     assert fake.write_calls[0]["value"] == value
 
