@@ -563,11 +563,17 @@ def register(app: typer.Typer) -> None:
                     },
                 )
             if number in CONFIRM_CVS:
+                # The retry argv repeats what was actually typed (the raw CV
+                # token, so a slug stays a slug) - `confirm` appends `--yes`.
+                retry = [*prefix, cv, str(value)]
+                if track == TRACK_MAIN:
+                    retry += ["--track", TRACK_MAIN]
                 confirm(
                     _confirm_question(number, value),
                     settings=settings,
                     stdin=sys.stdin,
                     stderr=output.stderr,
+                    retry_argv=retry,
                 )
             wanted = MODE_FOR_TRACK[track]
             effective_verify = (track == TRACK_PROG) if verify is None else verify

@@ -61,7 +61,9 @@ def parse_cv_spec(
     seen: set[int] = set()
     for token in tokens:
         for piece in token.split(","):
-            for cv in _piece_cvs(piece.strip(), catalog, argv_prefix=argv_prefix):
+            for cv in _piece_cvs(
+                piece.strip(), catalog, tokens=tokens, argv_prefix=argv_prefix
+            ):
                 if cv not in seen:
                     seen.add(cv)
                     ordered.append(cv)
@@ -88,8 +90,30 @@ def _checked(cv: int) -> int:
     return cv
 
 
+def _argv_with(
+    tokens: Sequence[str], piece: str, replacement: str, argv_prefix: Sequence[str]
+) -> list[str]:
+    """The caller's FULL argv with the one failing piece corrected.
+
+    A suggestion that carried only `[*argv_prefix, replacement]` dropped every
+    other token the caller typed - `cv read 3-8 accel_rte` was answered with
+    `railctl cv read accel_rate`, a runnable command that no longer reads
+    CV3-8. The suggestion contract is "the runnable next command", which means
+    the whole invocation, corrected in place.
+    """
+    corrected = [
+        ",".join(replacement if part.strip() == piece else part for part in token.split(","))
+        for token in tokens
+    ]
+    return [*argv_prefix, *corrected]
+
+
 def _piece_cvs(
-    piece: str, catalog: Mapping[int, CatalogEntry], *, argv_prefix: Sequence[str]
+    piece: str,
+    catalog: Mapping[int, CatalogEntry],
+    *,
+    tokens: Sequence[str],
+    argv_prefix: Sequence[str],
 ) -> list[int]:
     """One comma-separated piece: a number, a `first-last` range, or a slug."""
     if not piece:
@@ -104,7 +128,7 @@ def _piece_cvs(
         if first > last:
             raise UsageProblem(
                 f"CV range {piece!r} runs backwards: {first} > {last}",
-                suggestions=[[*argv_prefix, f"{last}-{first}"]],
+                suggestions=[_argv_with(tokens, piece, f"{last}-{first}", argv_prefix)],
                 details={"reason": "backwards_range", "first": first, "last": last},
             )
         return [_checked(cv) for cv in range(first, last + 1)]
@@ -118,6 +142,6 @@ def _piece_cvs(
     raise UsageProblem(
         f"{piece!r} is not a CV number, a range or a catalog slug; closest catalog "
         f"names: {', '.join(near)}",
-        suggestions=[[*argv_prefix, name] for name in near],
+        suggestions=[_argv_with(tokens, piece, name, argv_prefix) for name in near],
         details={"reason": "unknown_slug", "token": piece, "closest": near},
     )

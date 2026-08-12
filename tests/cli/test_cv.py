@@ -104,6 +104,21 @@ def test_parse_cv_spec_unknown_slug_names_the_three_closest_and_suggests_them():
     assert problem.details["reason"] == "unknown_slug"
 
 
+def test_parse_cv_spec_unknown_slug_suggestions_keep_the_other_tokens():
+    # The suggestion is the FULL invocation with the bad piece corrected in
+    # place - dropping the other tokens produced a runnable command that no
+    # longer did what the caller asked.
+    with pytest.raises(UsageProblem) as caught:
+        parse_cv_spec(["3-8", "1,accel_rte"], CATALOG, argv_prefix=PREFIX)
+    assert caught.value.suggestions[0] == [*PREFIX, "3-8", "1,accel_rate"]
+
+
+def test_parse_cv_spec_backwards_range_suggestions_keep_the_other_tokens():
+    with pytest.raises(UsageProblem) as caught:
+        parse_cv_spec(["29", "8-3"], CATALOG, argv_prefix=PREFIX)
+    assert caught.value.suggestions == [[*PREFIX, "29", "3-8"]]
+
+
 def test_parse_cv_spec_refuses_a_backwards_range_with_the_corrected_suggestion():
     with pytest.raises(UsageProblem) as caught:
         parse_cv_spec(["8-3"], CATALOG, argv_prefix=PREFIX)
@@ -874,8 +889,36 @@ def test_cv_write_a_confirmed_cv_refuses_without_yes_when_not_interactive(monkey
     assert result.exit_code == 2
     envelope = _stderr_envelope(result)
     assert envelope["code"] == "confirmation_required"
-    assert envelope["suggestions"] == [["railctl", "cv", "write", "--yes"]]
+    # The full runnable argv - CV and value included - never the bare
+    # ["railctl", "cv", "write", "--yes"], which exits 2 when run.
+    assert envelope["suggestions"] == [["railctl", "cv", "write", "29", "6", "--yes"]]
     assert fake.write_calls == []
+
+
+def test_cv_write_a_blocked_confirmation_on_main_suggests_the_main_track_argv(monkeypatch):
+    _install(monkeypatch, FakeCvStation(capabilities=POM_CAPS))
+    result = runner.invoke(
+        app,
+        [
+            "cv",
+            "write",
+            "29",
+            "6",
+            "--track",
+            "main",
+            "--address",
+            "3",
+            "--non-interactive",
+            "--format",
+            "json",
+        ],
+    )
+    assert result.exit_code == 2
+    envelope = _stderr_envelope(result)
+    assert envelope["code"] == "confirmation_required"
+    assert envelope["suggestions"] == [
+        ["railctl", "cv", "write", "29", "6", "--track", "main", "--yes"]
+    ]
 
 
 def test_cv_write_yes_answers_the_confirmation(monkeypatch):

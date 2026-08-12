@@ -374,9 +374,28 @@ class AbortedError(RailctlError):
 
 
 class ConfirmationRequiredError(RailctlError):
-    """A confirmation was needed and could not be asked for."""
+    """A confirmation was needed and could not be asked for.
+
+    `retry_argv` is the raiser's own full, runnable retry command with `--yes`
+    already appended - the same mechanism `FunctionGroupUnreadableError` uses
+    for the same reason: `cli/_errors.default_suggestions` is keyed by
+    exception type and cannot reconstruct the CV and value the operator typed
+    from the type alone, so without this it suggested
+    `["railctl", "cv", "write", "--yes"]` - an argv that exits 2.
+    """
 
     code: ClassVar[str] = "confirmation_required"
+
+    def __init__(
+        self,
+        message: str,
+        *,
+        hint: str | None = None,
+        details: dict[str, object] | None = None,
+        retry_argv: list[str] | None = None,
+    ) -> None:
+        super().__init__(message, hint=hint, details=details)
+        self.retry_argv = retry_argv
 
 
 EXIT_CODES: Final[dict[type[RailctlError], int]] = {

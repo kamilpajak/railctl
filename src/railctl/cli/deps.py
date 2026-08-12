@@ -591,24 +591,34 @@ def require_address(settings: Settings, *, argv_hint: list[str]) -> int:
     )
 
 
-def confirm(question: str, *, settings: Settings, stdin: TextIO, stderr: TextIO) -> None:
+def confirm(
+    question: str,
+    *,
+    settings: Settings,
+    stdin: TextIO,
+    stderr: TextIO,
+    retry_argv: Sequence[str] | None = None,
+) -> None:
     """Ask `question`, unless `--yes` already answered it.
 
     When `stdin` is not interactive this never blocks: it raises immediately,
     mentioning `--yes` in the message itself, and never reads a byte from
     `stdin`. Blocking here is how a `restore` launched from a cron job with no
     terminal at all would hang forever waiting for an answer that can never
-    come. The exception carries no `suggestions` of its own -
-    `ConfirmationRequiredError` only takes `hint`/`details` (Task 8) - the
-    runnable `["railctl", <command>, "--yes"]` array a script sees in the JSON
-    envelope is assembled later, by `_errors.py`'s `default_suggestions`, from
-    the exception's type alone.
+    come.
+
+    `retry_argv` is the caller's own full invocation - CV, value, flags, the
+    lot - and this appends `--yes` to it, so the suggestion the JSON envelope
+    publishes is a command that RUNS. Without it `default_suggestions` falls
+    back to `["railctl", <command>, "--yes"]` assembled from the command path
+    alone, which for `cv write` was an argv that exits 2.
     """
     if settings.assume_yes:
         return
     if not settings.interactive:
         raise errors.ConfirmationRequiredError(
-            f"{question} (refusing to guess: stdin is not interactive; rerun with --yes)"
+            f"{question} (refusing to guess: stdin is not interactive; rerun with --yes)",
+            retry_argv=[*retry_argv, "--yes"] if retry_argv is not None else None,
         )
     print(f"{question} [y/N] ", end="", file=stderr, flush=True)
     answer = stdin.readline().strip().lower()

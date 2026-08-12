@@ -143,7 +143,12 @@ def default_suggestions(
             suggestions.append(["railctl", "cv", "read", str(cv), "--mode", "service"])
         return suggestions
     if isinstance(exc, ConfirmationRequiredError):
-        return [["railctl", *command.split(), "--yes"]]
+        # The raiser's own full argv with `--yes` appended, when it supplied
+        # one (`deps.confirm`'s `retry_argv`); the bare command-path fallback
+        # stays for a raiser that did not, but it is a last resort - an argv
+        # with no arguments in it exits 2 rather than running.
+        override = _argv_arrays([getattr(exc, "retry_argv", None)])
+        return override or [["railctl", *command.split(), "--yes"]]
     if isinstance(exc, TrackPowerError):
         # `details` is read with a default because `_meta._class_error_row`
         # probes every exception class with `klass.__new__(klass)`, which runs
