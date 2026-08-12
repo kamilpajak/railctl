@@ -877,3 +877,25 @@ invocation's close, each got `61 13`, and each healed on the one retry — repor
 pre-read carried no warning: their previous session had closed while the operator sat at a gate,
 so the first attempt simply succeeded. Cost of the unknown-history retry: ~3 s per back-to-back
 invocation, paid only when the gap is actually hit.
+
+## Station firmware updated (KLUG) — re-probed 2026-08-12
+
+The YD7010's firmware was updated after the M8 acceptance run. The pre-update
+`capabilities.json` was set aside as `capabilities.pre-klug.json` before re-probing, so nothing
+measured on the old firmware could masquerade as a measurement of the new one.
+
+Two doctor runs on the new firmware, same day:
+
+| run | bench | result |
+| --- | --- | --- |
+| no `--power-on`, loco on the prog track | service-mode checks | D5/D6/D7/D9 all ok; identity CVs byte-identical to the morning run (CV7=5, CV8=145, CV250=6, CV1=3, CV29=14) — the station flash left the decoder alone |
+| `--power-on`, loco on the rollers (main) | D3/D4 | D3 fully green (energised, held, loco 3 idled, hold re-asserted, direction preserved); D4 total silence after 3 attempts — neither `61 13` nor `61 82` |
+
+So the firmware update changes nothing this tool measures: XpressNet 4.0, station id 0x12,
+every service-mode and Z21 encoding as before, and **R1 stands — POM read is still silence on
+the new firmware**. `pom_read=false` with provenance `silence`, `pom_result_channel: none`.
+The missing piece remains a RailCom detector on the layout, not the station's firmware.
+
+The second run also exercised the capability merge as designed: its service checks came back
+`unknown` (`61 13` — nothing was standing on the prog track), and the merge preserved the first
+run's measured `true` values instead of letting `unknown` overwrite them.
