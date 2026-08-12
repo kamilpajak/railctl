@@ -86,6 +86,12 @@ EXT_CAPS = Capabilities(
     service_direct_cv=True,
     service_ext_cv=True,
 )
+NO_EXT_CAPS = Capabilities(
+    link_identity="serial:7010A0001194:3",
+    pom_read=False,
+    service_direct_cv=True,
+    service_ext_cv=False,
+)
 
 #: The selectors and CV29 answer 0 (default page, no speed table) unless a
 #: test overrides them; every other CV answers this one byte.
@@ -292,8 +298,11 @@ def test_backup_human_lists_every_row_and_the_written_path(monkeypatch, tmp_path
     )
     assert result.exit_code == 0, result.stderr
     assert f"CV8 manufacturer_id = {DEFAULT_VALUE}" in result.stdout
+    # SERVICE_CAPS never probed service_ext_cv, so the skip reason claims no
+    # absence - only that nothing was measured.
     assert (
-        "CV397 volume_up_key: skipped (cv 397 > MAX_CV_DIRECT 255; extended opcodes unavailable)"
+        "CV397 volume_up_key: skipped (cv 397 > MAX_CV_DIRECT 255; extended opcodes "
+        "not probed (run railctl doctor))"
     ) in result.stdout
     assert f"{len(CURATED) - len(OVER_BOUND)} of {len(CURATED)} CVs read" in result.stdout
     assert "complete: yes" in result.stdout
@@ -851,6 +860,47 @@ def test_backup_ext_service_opcodes_reach_past_the_direct_bound(monkeypatch, tmp
     assert body["summary"]["ok"] == len(CURATED)
     row = next(r for r in body["cvs"] if r["cv"] == 397)
     assert row["status"] == "ok"
+
+
+def _skip_detail_for_397(result) -> str:
+    row = next(r for r in json.loads(result.stdout)["result"]["cvs"] if r["cv"] == 397)
+    assert row["status"] == "skipped"
+    return row["detail"]
+
+
+def test_backup_bound_detail_names_the_measured_no(monkeypatch):
+    # Service mode with service_ext_cv a MEASURED false: the one case
+    # entitled to record the opcodes as unavailable.
+    _install(monkeypatch, FakeBackupStation(capabilities=NO_EXT_CAPS))
+    result = runner.invoke(app, ["backup", "--address", "3", "--out", "-", "--format", "json"])
+    assert result.exit_code == 0, result.stderr
+    assert (
+        _skip_detail_for_397(result)
+        == "cv 397 > MAX_CV_DIRECT 255; extended opcodes unavailable"
+    )
+
+
+def test_backup_bound_detail_says_not_probed_when_nothing_measured(monkeypatch):
+    # service_ext_cv is None: nobody measured an absence, so none is claimed.
+    _install(monkeypatch, FakeBackupStation(capabilities=SERVICE_CAPS))
+    result = runner.invoke(app, ["backup", "--address", "3", "--out", "-", "--format", "json"])
+    assert result.exit_code == 0, result.stderr
+    assert (
+        _skip_detail_for_397(result)
+        == "cv 397 > MAX_CV_DIRECT 255; extended opcodes not probed (run railctl doctor)"
+    )
+
+
+def test_backup_bound_detail_names_the_page_write_a_pom_backup_never_does(monkeypatch):
+    # A POM run: the bound is about the CV31/CV32 page write a backup
+    # refuses, not about extended opcodes at all.
+    _install(monkeypatch, FakeBackupStation(capabilities=POM_YES_CAPS))
+    result = runner.invoke(app, ["backup", "--address", "3", "--out", "-", "--format", "json"])
+    assert result.exit_code == 0, result.stderr
+    assert _skip_detail_for_397(result) == (
+        "cv 397 > MAX_CV_DIRECT 255; indexed CVs need a CV31/CV32 page write, "
+        "which a backup never performs"
+    )
 
 
 def test_backup_write_failure_is_backup_file_exit_9(monkeypatch, tmp_path):

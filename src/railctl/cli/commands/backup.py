@@ -208,9 +208,20 @@ def reachable_bound(mode: ProgMode, capabilities: Capabilities) -> int:
     return MAX_CV_DIRECT
 
 
-def _bound_detail(cv: int) -> str:
-    # The design's own wording for a never-attempted CV beyond the bound.
-    return f"cv {cv} > MAX_CV_DIRECT {MAX_CV_DIRECT}; extended opcodes unavailable"
+def _bound_detail(cv: int, mode: ProgMode, capabilities: Capabilities) -> str:
+    """The recorded reason a curated CV past the bound was never attempted -
+    three honest variants, because "extended opcodes unavailable" is an
+    absent-capability claim only a measured `false` may make (the repo's
+    founding rule): an unprobed pair gets "not probed", and a POM run's
+    bound is about the page write a backup refuses, not the opcodes.
+    Service mode with `service_ext_cv is True` never arrives here - the
+    bound is `MAX_CV_EXT` and nothing is skipped."""
+    base = f"cv {cv} > MAX_CV_DIRECT {MAX_CV_DIRECT}; "
+    if mode is ProgMode.POM:
+        return base + "indexed CVs need a CV31/CV32 page write, which a backup never performs"
+    if capabilities.service_ext_cv is False:
+        return base + "extended opcodes unavailable"
+    return base + "extended opcodes not probed (run railctl doctor)"
 
 
 class _Plan:
@@ -406,7 +417,7 @@ class _Collection:
                         cv=cv,
                         name=self.name_for(cv),
                         status=ReadStatus.SKIPPED,
-                        detail=_bound_detail(cv),
+                        detail=_bound_detail(cv, self.mode, self._station.capabilities),
                     ),
                     None,
                 )
