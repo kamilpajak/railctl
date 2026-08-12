@@ -375,7 +375,7 @@ def test_every_command_ships_the_three_fixed_help_sections(path: str):
     case per registered command, so it goes red on any single path missing it - not
     only on `doctor` and `monitor`'s own.
     """
-    result = CliRunner().invoke(real_app, [path, "--help"])
+    result = CliRunner().invoke(real_app, [*path.split(), "--help"])
     assert result.exit_code == 0
     for heading in ("OUTPUT", "EXIT CODES", "EXAMPLES"):
         assert heading in result.stdout

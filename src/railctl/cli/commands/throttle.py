@@ -138,7 +138,7 @@ _STATE_ARG = typer_argument(FUNCTION_STATE_ARG)
 _FORCE_GROUP = typer_option(FUNCTION_FORCE_GROUP_OPT)
 
 
-def preflight(station: Station, *, speed: int | None) -> StationStatus:
+def preflight(station: Station, *, speed: int | None, action: str | None = None) -> StationStatus:
     """Guard for anything that could start or continue motion: `drive SPEED>0`,
     `function`, and (from a later task) every POM `cv` command.
 
@@ -162,7 +162,9 @@ def preflight(station: Station, *, speed: int | None) -> StationStatus:
     track off and then restores power is what would settle it.
     """
     status = station.status()
-    target = f"speed {speed}" if speed is not None else "this command"
+    # `action` names the operation for non-throttle callers - "refusing to send this
+    # command" told a CV operator a drive was refused, which it was not.
+    target = action or (f"speed {speed}" if speed is not None else "this command")
     if status.emergency_off or status.emergency_stop:
         # Two states, told apart, because the code can tell them apart and
         # they are not the same thing on the layout: emergency OFF means the
