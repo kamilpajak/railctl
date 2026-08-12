@@ -482,7 +482,31 @@ def register(app: typer.Typer) -> None:
                     )
                     for cv in cvs
                 ]
-                outcomes = station.cv_read_many(specs, address=resolved_address, mode=resolved)
+                # CV31/CV32 are read as singleton `cv_read` calls: the station
+                # batch refuses them wholesale (page selection interleaving -
+                # that guard stands), but the published grammar accepts
+                # 1..1024, so the split lives here. The batch may come back in
+                # the station's efficient wire order; the envelope's contract
+                # is "first-appearance order is kept", so rows are reassembled
+                # in request order.
+                by_cv: dict[int, CvReadOutcome] = {}
+                for spec in specs:
+                    if spec.cv not in PAGE_SELECTOR_CVS:
+                        continue
+                    try:
+                        singleton = station.cv_read(
+                            spec.cv, address=resolved_address, mode=resolved
+                        )
+                        by_cv[spec.cv] = CvReadOutcome(spec=spec, result=singleton, error=None)
+                    except RailctlError as exc:
+                        by_cv[spec.cv] = CvReadOutcome(spec=spec, result=None, error=exc)
+                batched = [spec for spec in specs if spec.cv not in PAGE_SELECTOR_CVS]
+                if batched:
+                    for batch_outcome in station.cv_read_many(
+                        batched, address=resolved_address, mode=resolved
+                    ):
+                        by_cv[batch_outcome.spec.cv] = batch_outcome
+                outcomes = [by_cv[cv] for cv in cvs]
                 if outcomes[0].error is not None and _all_failed(outcomes):
                     # Nothing answered: the caller gets the real error with
                     # its own code and exit, not a partial result with no

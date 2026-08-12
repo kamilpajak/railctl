@@ -482,6 +482,7 @@ class FakeCvStation:
         self.write_verified = write_verified
         self.write_error = write_error
         self.read_calls: list[dict[str, object]] = []
+        self.singleton_calls: list[dict[str, object]] = []
         self.write_calls: list[dict[str, object]] = []
         self.status_calls = 0
 
@@ -492,9 +493,27 @@ class FakeCvStation:
     def version(self) -> StationVersion:
         return StationVersion(raw=0x40, station_id=0x12)
 
+    def cv_read(self, cv, *, address=None, mode=ProgMode.SERVICE, page=None):
+        self.singleton_calls.append({"cv": cv, "address": address, "mode": mode})
+        error = self.read_errors.get(cv)
+        if error is not None:
+            raise error
+        return CvResult(
+            cv=cv,
+            value=self.read_values.get(cv, 145),
+            mode=mode,
+            encoding=CvEncoding.SERVICE_DIRECT,
+            operation="read",
+            verified=None,
+            elapsed=0.01,
+        )
+
     def cv_read_many(self, specs, *, address=None, mode=ProgMode.SERVICE, on_progress=None):
         self.read_calls.append({"specs": list(specs), "address": address, "mode": mode})
         outcomes = []
+        # Station wire order, like the real batch: sorted by (page, cv). The
+        # CLI owns putting rows back into request order.
+        specs = sorted(specs, key=lambda spec: (spec.page or (0, 0), spec.cv))
         for spec in specs:
             error = self.read_errors.get(spec.cv)
             if error is not None:
@@ -731,6 +750,57 @@ def test_cv_read_with_a_page_and_no_indexed_cv_needs_no_confirmation(monkeypatch
     )
     assert result.exit_code == 0, result.stderr
     assert fake.read_calls[0]["specs"][0].page is None
+
+
+def test_cv_read_rows_come_back_in_request_order_not_station_order(monkeypatch):
+    # The spec sentence is "first-appearance order is kept". The station batch
+    # returns wire order - sorted by (page, cv) - and the fake mimics that, so
+    # this goes red if the CLI stops reordering the rows.
+    _install(monkeypatch, FakeCvStation(read_values={29: 14, 3: 20, 8: 145}))
+    result = runner.invoke(app, ["cv", "read", "29,3,8", "--format", "json"])
+    assert result.exit_code == 0, result.stderr
+    rows = json.loads(result.stdout)["result"]["cvs"]
+    assert [row["cv"] for row in rows] == [29, 3, 8]
+
+
+def test_cv_read_31_alone_is_served_as_a_singleton_read(monkeypatch):
+    # The station batch refuses CV31/CV32 (page-selection interleaving); the
+    # published grammar accepts 1..1024, so the CLI reads them as singletons.
+    fake = _install(monkeypatch, FakeCvStation(read_values={31: 145}))
+    result = runner.invoke(app, ["cv", "read", "31", "--format", "json"])
+    assert result.exit_code == 0, result.stderr
+    assert [call["cv"] for call in fake.singleton_calls] == [31]
+    assert fake.read_calls == []  # no empty batch went out
+    rows = json.loads(result.stdout)["result"]["cvs"]
+    assert rows == [{"cv": 31, "name": "index_page_high", "status": "ok", "value": 145}]
+
+
+def test_cv_read_a_range_containing_the_selectors_splits_and_merges_in_request_order(monkeypatch):
+    fake = _install(
+        monkeypatch,
+        FakeCvStation(read_values={29: 14, 30: 1, 31: 145, 32: 0, 33: 2}),
+    )
+    result = runner.invoke(app, ["cv", "read", "29-33", "--format", "json"])
+    assert result.exit_code == 0, result.stderr
+    assert [call["cv"] for call in fake.singleton_calls] == [31, 32]
+    assert [spec.cv for spec in fake.read_calls[0]["specs"]] == [29, 30, 33]
+    payload = json.loads(result.stdout)
+    assert [row["cv"] for row in payload["result"]["cvs"]] == [29, 30, 31, 32, 33]
+    assert payload["result"]["ok"] == 5
+
+
+def test_cv_read_a_failing_selector_read_is_a_row_not_an_abort(monkeypatch):
+    _install(
+        monkeypatch,
+        FakeCvStation(
+            read_values={29: 14},
+            read_errors={31: DecoderNotRespondingError("silence", cv=31)},
+        ),
+    )
+    result = runner.invoke(app, ["cv", "read", "31,29", "--format", "json"])
+    assert result.exit_code == PARTIAL_EXIT_CODE, result.stderr
+    rows = json.loads(result.stdout)["result"]["cvs"]
+    assert [(row["cv"], row["status"]) for row in rows] == [(31, "no_response"), (29, "ok")]
 
 
 def test_cv_read_an_indexed_cv_without_a_page_exits_17(monkeypatch):
