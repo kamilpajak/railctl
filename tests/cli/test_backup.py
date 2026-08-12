@@ -1026,13 +1026,14 @@ def test_backup_ndjson_ctrl_c_streams_the_summary_after_the_partial_file(monkeyp
     assert _stderr_envelope(result)["code"] == "aborted"
 
 
-def test_backup_ndjson_mode_refusal_still_owes_the_stream_its_summary(monkeypatch):
+def test_backup_ndjson_mode_refusal_still_owes_the_stream_its_summary(monkeypatch, tmp_path):
     # The station opened, so the stream exists and must be closed off - with
     # zero counts, because nothing was measured.
     _install(monkeypatch, FakeBackupStation(capabilities=SERVICE_CAPS))
+    out = tmp_path / "refused.json"
     result = runner.invoke(
         app,
-        ["backup", "--address", "3", "--out", "-", "--mode", "pom", "--format", "ndjson"],
+        ["backup", "--address", "3", "--out", str(out), "--mode", "pom", "--format", "ndjson"],
     )
     assert result.exit_code == 16, result.stderr
     lines = _ndjson_lines(result.stdout)
@@ -1044,16 +1045,66 @@ def test_backup_ndjson_mode_refusal_still_owes_the_stream_its_summary(monkeypatc
     assert _stderr_envelope(result)["code"] == "pom_read_unsupported"
 
 
-def test_backup_ndjson_page_refusal_summarises_what_little_was_asked(monkeypatch):
+def test_backup_ndjson_page_refusal_summarises_what_little_was_asked(monkeypatch, tmp_path):
     # The abort comes before CV29, so no start line was ever owed - but the
     # summary still is, and it reports the counts as they stood.
     _install(monkeypatch, FakeBackupStation(read_values={31: 145}))
-    result = runner.invoke(app, ["backup", "--address", "3", "--out", "-", "--format", "ndjson"])
+    out = tmp_path / "page.json"
+    result = runner.invoke(
+        app, ["backup", "--address", "3", "--out", str(out), "--format", "ndjson"]
+    )
     assert result.exit_code == 17, result.stderr
     lines = _ndjson_lines(result.stdout)
     assert [line["type"] for line in lines] == ["summary"]
     assert lines[0]["exit_code"] == 17
     assert _stderr_envelope(result)["code"] == "index_page_required"
+
+
+def test_backup_ndjson_with_a_stdout_target_is_refused_before_anything_opens(monkeypatch):
+    # The stream owns stdout, so `--out -` would deliver the document
+    # NOWHERE. Refused before the station opens: no stream, no port cost,
+    # and both remedies arrive as runnable argvs - drop `--out -` (keep the
+    # stream, write the file), or keep stdout and switch to `--format json`.
+    _boom_open(monkeypatch)
+    result = runner.invoke(
+        app, ["backup", "--address", "3", "--out", "-", "--format", "ndjson", "--yes"]
+    )
+    assert result.exit_code == 2, result.stderr
+    assert result.stdout == ""
+    envelope = _stderr_envelope(result)
+    assert envelope["code"] == "usage"
+    assert envelope["suggestions"] == [
+        ["railctl", "backup", "--address", "3", "--format", "ndjson", "--yes"],
+        ["railctl", "backup", "--address", "3", "--out", "-", "--yes", "--format", "json"],
+    ]
+
+
+def test_backup_ndjson_stdout_refusal_with_env_format_appends_format_json(monkeypatch):
+    # ndjson picked by RAILCTL_FORMAT, not typed: nothing to strip from the
+    # typed globals, and `--format json` (which outranks the variable) is
+    # simply appended to the second remedy.
+    _boom_open(monkeypatch)
+    monkeypatch.setenv("RAILCTL_FORMAT", "ndjson")
+    result = runner.invoke(app, ["backup", "--address", "3", "--out", "-"])
+    assert result.exit_code == 2, result.stderr
+    assert result.stdout == ""
+    assert _stderr_envelope(result)["suggestions"] == [
+        ["railctl", "backup", "--address", "3"],
+        ["railctl", "backup", "--address", "3", "--out", "-", "--format", "json"],
+    ]
+
+
+def test_backup_ndjson_stdout_refusal_comes_before_the_missing_address(monkeypatch):
+    # The combination is refused before the address is even resolved, so the
+    # suggestions simply omit `--address` rather than inventing one.
+    _boom_open(monkeypatch)
+    result = runner.invoke(app, ["backup", "--out", "-", "--format", "ndjson"])
+    assert result.exit_code == 2, result.stderr
+    assert result.stdout == ""
+    assert _stderr_envelope(result)["suggestions"] == [
+        ["railctl", "backup", "--format", "ndjson"],
+        ["railctl", "backup", "--out", "-", "--format", "json"],
+    ]
 
 
 def test_backup_ndjson_usage_refusal_produces_no_stream_at_all(monkeypatch):
@@ -1064,12 +1115,15 @@ def test_backup_ndjson_usage_refusal_produces_no_stream_at_all(monkeypatch):
     assert _stderr_envelope(result)["code"] == "usage"
 
 
-def test_backup_ndjson_interrupt_before_the_station_opened_exits_9_quietly(monkeypatch):
+def test_backup_ndjson_interrupt_before_the_station_opened_exits_9_quietly(monkeypatch, tmp_path):
     def interrupted_open(*_a, **_k):
         raise KeyboardInterrupt
 
     monkeypatch.setattr(Station, "open", staticmethod(interrupted_open))
-    result = runner.invoke(app, ["backup", "--address", "3", "--out", "-", "--format", "ndjson"])
+    out = tmp_path / "never.json"
+    result = runner.invoke(
+        app, ["backup", "--address", "3", "--out", str(out), "--format", "ndjson"]
+    )
     assert result.exit_code == 9
     assert result.stdout == ""
     assert result.stderr == ""
@@ -1092,7 +1146,7 @@ def test_backup_ndjson_station_events_and_the_page_mismatch_ride_as_event_lines(
             "--address",
             "3",
             "--out",
-            "-",
+            str(tmp_path / "events.json"),
             "--page",
             "145:0",
             "--format",

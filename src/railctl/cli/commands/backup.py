@@ -46,6 +46,7 @@ import typer
 from railctl.backup import (
     BACKUP_SCHEMA,
     NOT_ATTEMPTED_DETAIL,
+    STDOUT_TARGET,
     BackupDocument,
     CvRecord,
     ReadStatus,
@@ -234,7 +235,7 @@ class _Plan:
 
 
 def _typed_argv(
-    address: int,
+    address: int | None,
     *,
     out: str | None,
     note: str | None,
@@ -244,8 +245,12 @@ def _typed_argv(
 ) -> list[str]:
     """The invocation as typed, rebuilt as an argv array a suggestion can
     extend: `--address` and backup's own options first, then the global
-    flags the operator actually typed, in registration order."""
-    argv = ["railctl", "backup", "--address", str(address)]
+    flags the operator actually typed, in registration order. `None` for an
+    address not yet resolved (a refusal ahead of `require_address`) simply
+    omits the flag rather than inventing a value."""
+    argv = ["railctl", "backup"]
+    if address is not None:
+        argv += ["--address", str(address)]
     if out is not None:
         argv += ["--out", out]
     if note is not None:
@@ -759,6 +764,63 @@ def _summary_counts(run: _BackupRun | None) -> dict[str, object]:
     }
 
 
+def _json_format_globals(typed_globals: list[str]) -> list[str]:
+    """`typed_globals` with any typed `--format <value>` replaced by a
+    trailing `--format json` - the suggestion must not carry the stream
+    format and its replacement side by side, and the explicit flag also
+    outranks a RAILCTL_FORMAT that picked ndjson without being typed."""
+    swapped: list[str] = []
+    skip_value = False
+    for word in typed_globals:
+        if skip_value:
+            skip_value = False
+            continue
+        if word == "--format":
+            skip_value = True
+            continue
+        swapped.append(word)
+    return [*swapped, "--format", "json"]
+
+
+def _refuse_stdout_stream(
+    settings: Settings,
+    *,
+    note: str | None,
+    mode_word: str,
+    page_token: str | None,
+    typed_globals: list[str],
+) -> NoReturn:
+    """`--format ndjson` + `--out -`: the stream owns stdout, so the document
+    would be produced NOWHERE. Refused at the top of the ndjson path, before
+    `plan_backup` and before any port opens - like every usage refusal it
+    costs no stream at all - with both remedies as runnable argvs: keep the
+    stream and write the file, or keep stdout and buffer as json."""
+    address = settings.address
+    keep_stream = _typed_argv(
+        address,
+        out=None,
+        note=note,
+        mode_word=mode_word,
+        page_token=page_token,
+        typed_globals=typed_globals,
+    )
+    keep_stdout = _typed_argv(
+        address,
+        out=STDOUT_TARGET,
+        note=note,
+        mode_word=mode_word,
+        page_token=page_token,
+        typed_globals=_json_format_globals(typed_globals),
+    )
+    raise UsageProblem(
+        "--format ndjson streams events to stdout and --out - writes the document there "
+        "too; the stream and the document cannot share stdout, so the document would be "
+        "delivered nowhere - write the file to a path, or buffer with --format json",
+        suggestions=[keep_stream, keep_stdout],
+        details={"reason": "ndjson_stdout_conflict"},
+    )
+
+
 def _run_ndjson(
     settings: Settings,
     output: OutputContext,
@@ -810,6 +872,14 @@ def _run_ndjson(
     backup_run: _BackupRun | None = None
     exit_code = 0
     try:
+        if out == STDOUT_TARGET:
+            _refuse_stdout_stream(
+                settings,
+                note=note,
+                mode_word=mode,
+                page_token=page,
+                typed_globals=typed_globals,
+            )
         plan = plan_backup(
             settings,
             mode_word=mode,
