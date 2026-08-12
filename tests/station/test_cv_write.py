@@ -36,6 +36,7 @@ from railctl.xbus.commands import (
     cmd_service_result_request,
     cmd_station_status,
     cmd_track_power_on,
+    cmd_z21_cv_read,
     cmd_z21_cv_write,
 )
 from railctl.xbus.dialect import CvEncoding
@@ -1608,3 +1609,31 @@ def test_a_known_history_instance_never_retries(bench_factory, monkeypatch):
     with pytest.raises(DecoderNoAckError):
         programmer.service_write(8, 145, verify=True)
     assert len(calls) == 1
+
+
+def test_a_write_after_a_reads_closed_session_waits_out_the_gap(bench_factory, monkeypatch):
+    """The measured asymmetry, closed. The write path skipped `_await_session_gap` behind a
+    comment that said "nothing does that today ... measure before adding a delay here". M8's
+    `cv write` after `cv read` did exactly that and failed `61 13`; the measurement the
+    comment asked for exists (docs/probe-results.md, "The session gap crosses invocations"),
+    and a write now pays the same gap a read does. The fake clock is the instrument.
+    """
+    from railctl.xbus.replies import CvValue, Ready
+
+    bench = bench_factory(capabilities=make_capabilities(z21_cv_opcodes=True))
+    programmer = bench.station.programmer
+    replies = iter([CvValue(raw_cv=8, value=145, ident=0x14, z21_form=True), Ready()])
+    monkeypatch.setattr(programmer, "await_result", lambda *a, **k: next(replies))
+    bench.expect(cmd_station_status(), reply=STATUS_POWERED)
+    bench.expect(cmd_z21_cv_read(8), reply=ACK)
+    bench.expect(cmd_track_power_on(), reply=ACK)
+    bench.expect(cmd_station_status(), reply=STATUS_POWERED)
+    bench.expect(cmd_station_status(), reply=STATUS_POWERED)
+    bench.expect(cmd_z21_cv_write(8, 145), reply=ACK)
+    bench.expect(cmd_track_power_on(), reply=ACK)
+    bench.expect(cmd_station_status(), reply=STATUS_POWERED)
+
+    bench.station.programmer.service_read(8)
+    closed_at = bench.clock.monotonic()
+    bench.station.programmer.service_write(8, 145, verify=False)
+    assert bench.clock.monotonic() - closed_at >= TIMING.service_session_gap
