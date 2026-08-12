@@ -291,6 +291,12 @@ def test_a_wrongly_typed_value_is_a_load_error(tmp_path: Path):
     body = '[[cv]]\nnum = 1\nslug = "primary_address"\ndesc = "d"\ngroup = "address"\nmax = true\n'
     with pytest.raises(CatalogError, match="max"):
         load_catalog(_write(tmp_path, body))
+    body = '[[cv]]\nnum = 1\nslug = 1\ndesc = "d"\ngroup = "address"\n'
+    with pytest.raises(CatalogError, match="slug"):
+        load_catalog(_write(tmp_path, body))
+    body = '[[cv]]\nnum = 1\nslug = "primary_address"\ndesc = "d"\ngroup = "address"\naddress = 1\n'
+    with pytest.raises(CatalogError, match="address"):
+        load_catalog(_write(tmp_path, body))
 
 
 def test_a_wrong_family_or_schema_is_a_load_error(tmp_path: Path):
