@@ -1068,22 +1068,47 @@ class CvProgrammer:
                     f"payload"
                 )
         ordered = sorted(specs, key=lambda spec: (spec.page or (0, 0), spec.cv))
+        # Leave-as-found: a batch that will select a page writes CV31/CV32,
+        # and a read's job is to leave the decoder as it found it. The pair is
+        # read BEFORE the first selection - CV31/CV32 are plain 1-255 CVs,
+        # readable as singletons through `cv_read` (the payload guard above is
+        # about batching them BETWEEN selections, not about reading them) -
+        # and re-selected in the `finally`, so an assertion or error inside
+        # the batch cannot leave the cursor pointing at this batch's page. A
+        # failure reading the pair propagates: selecting a page whose original
+        # cannot be restored is exactly the mutation-dressed-as-a-read this
+        # exists to prevent.
+        found_page: CvPage | None = None
+        if any(spec.page is not None for spec in ordered):
+            found_page = (
+                self.cv_read(31, address=address, mode=mode).value,
+                self.cv_read(32, address=address, mode=mode).value,
+            )
         total = len(ordered)
         outcomes: list[CvReadOutcome] = []
         current_page: CvPage | None = None
-        for index, spec in enumerate(ordered):
-            try:
-                if spec.page != current_page:
-                    if spec.page is not None:
-                        self.select_page(spec.page, address=address, mode=mode, force=True)
-                    current_page = spec.page
-                result = self.cv_read(spec.cv, address=address, mode=mode, page=spec.page)
-                outcome = CvReadOutcome(spec=spec, result=result, error=None)
-            except RailctlError as exc:
-                outcome = CvReadOutcome(spec=spec, result=None, error=exc)
-            outcomes.append(outcome)
-            if on_progress is not None:
-                on_progress((index, total, outcome))
+        try:
+            for index, spec in enumerate(ordered):
+                try:
+                    if spec.page != current_page:
+                        if spec.page is not None:
+                            self.select_page(spec.page, address=address, mode=mode, force=True)
+                        current_page = spec.page
+                    result = self.cv_read(spec.cv, address=address, mode=mode, page=spec.page)
+                    outcome = CvReadOutcome(spec=spec, result=result, error=None)
+                except RailctlError as exc:
+                    outcome = CvReadOutcome(spec=spec, result=None, error=exc)
+                outcomes.append(outcome)
+                if on_progress is not None:
+                    on_progress((index, total, outcome))
+        finally:
+            if found_page is not None:
+                # Through `select_page`, not raw writes: the restore deserves
+                # the same verification and cache bookkeeping as any other
+                # selection. A restore that fails raises out of this finally -
+                # loudly - because the decoder is then NOT as it was found,
+                # and reporting the batch as if it were would be the lie.
+                self.select_page(found_page, address=address, mode=mode, force=True)
         return outcomes
 
     def _learn_result_channel(

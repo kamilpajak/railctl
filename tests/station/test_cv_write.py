@@ -1200,6 +1200,10 @@ def test_cv_read_many_selects_each_page_once_and_reads_in_sorted_order(bench, mo
     outcomes = programmer.cv_read_many(specs, address=ADDRESS, mode=ProgMode.POM)
     assert [o.spec.cv for o in outcomes] == [8, 265, 266, 267, 268, 269]
     assert calls == [
+        # leave-as-found: the cursor pair is read before the first selection
+        # and re-selected at the end (the stub answers value == cv)
+        ("read", 31),
+        ("read", 32),
         ("read", 8),
         ("select", (10, 2), True),
         ("read", 265),
@@ -1207,7 +1211,119 @@ def test_cv_read_many_selects_each_page_once_and_reads_in_sorted_order(bench, mo
         ("read", 267),
         ("read", 268),
         ("read", 269),
+        ("select", (31, 32), True),
     ]
+
+
+def test_cv_read_many_reads_the_cursor_pair_before_selecting_and_restores_it_after(
+    bench, monkeypatch
+):
+    """C1's leave-as-found half: a batch that selects a page must read
+    CV31/CV32 BEFORE the first selection and re-select exactly that pair in a
+    `finally` - a read's job is to leave the decoder as it found it."""
+    programmer = bench.station.programmer
+    calls: list[tuple[object, ...]] = []
+    values = {31: 5, 32: 1}
+
+    def fake_cv_read(cv, *, address, mode, page=None):
+        calls.append(("read", cv))
+        if cv == 265:
+            raise DecoderNotRespondingError("no ack", cv=cv)
+        return make_cv_result(cv=cv, value=values.get(cv, cv), mode=mode)
+
+    monkeypatch.setattr(programmer, "cv_read", fake_cv_read)
+    monkeypatch.setattr(
+        programmer,
+        "select_page",
+        lambda page, *, address, mode, force: calls.append(("select", page, force)),
+    )
+    specs = [CvSpec(cv=266, page=(10, 2)), CvSpec(cv=265, page=(10, 2))]
+    outcomes = programmer.cv_read_many(specs, address=ADDRESS, mode=ProgMode.POM)
+    # The restore runs even though CV265 failed - the failing read is captured
+    # as its outcome, and the finally re-selects the pair that was found.
+    assert [o.error is None for o in outcomes] == [False, True]
+    assert calls == [
+        ("read", 31),
+        ("read", 32),
+        ("select", (10, 2), True),
+        ("read", 265),
+        ("read", 266),
+        ("select", (5, 1), True),
+    ]
+
+
+def test_cv_read_many_without_pages_never_touches_the_cursor_pair(bench, monkeypatch):
+    programmer = bench.station.programmer
+    calls: list[tuple[object, ...]] = []
+    monkeypatch.setattr(
+        programmer,
+        "cv_read",
+        lambda cv, *, address, mode, page=None: (
+            calls.append(("read", cv)),
+            make_cv_result(cv=cv, value=cv, mode=mode),
+        )[1],
+    )
+    monkeypatch.setattr(
+        programmer,
+        "select_page",
+        lambda page, *, address, mode, force: calls.append(("select", page, force)),
+    )
+    programmer.cv_read_many([CvSpec(cv=8)], address=ADDRESS, mode=ProgMode.POM)
+    assert calls == [("read", 8)]
+
+
+def test_cv_read_many_restore_puts_the_found_cursor_pair_back_on_the_wire(bench):
+    """The same guarantee at the telegram level: the LAST CV31/CV32 writes of
+    a paged batch carry the values the batch found, not the page it used.
+    Nothing here is stubbed except the wire replies."""
+    programmer = bench.station.programmer
+    bench.station.learn(pom_read=True, pom_echo_zero_based=True)
+    # pre-read of the pair as found: CV31 = 5, CV32 = 1
+    bench.expect(STATUS_REQUEST, reply=STATUS_POWER_ON)
+    bench.expect(
+        cmd_pom_read_byte(ADDRESS, 31, threshold=THRESHOLD), reply=encode(0x63, 0x14, 30, 5)
+    )
+    bench.expect(STATUS_REQUEST, reply=STATUS_POWER_ON)
+    bench.expect(
+        cmd_pom_read_byte(ADDRESS, 32, threshold=THRESHOLD), reply=encode(0x63, 0x14, 31, 1)
+    )
+    # select the batch's page (10, 2), verified by read-back
+    bench.expect(cmd_pom_write_byte(ADDRESS, 31, 10, threshold=THRESHOLD), reply=ACK)
+    bench.expect(cmd_pom_write_byte(ADDRESS, 32, 2, threshold=THRESHOLD), reply=ACK)
+    bench.expect(STATUS_REQUEST, reply=STATUS_POWER_ON)
+    bench.expect(
+        cmd_pom_read_byte(ADDRESS, 31, threshold=THRESHOLD), reply=encode(0x63, 0x14, 30, 10)
+    )
+    bench.expect(STATUS_REQUEST, reply=STATUS_POWER_ON)
+    bench.expect(
+        cmd_pom_read_byte(ADDRESS, 32, threshold=THRESHOLD), reply=encode(0x63, 0x14, 31, 2)
+    )
+    # the one indexed read
+    bench.expect(STATUS_REQUEST, reply=STATUS_POWER_ON)
+    bench.expect(
+        cmd_pom_read_byte(ADDRESS, 265, threshold=THRESHOLD), reply=encode(0x63, 0x15, 8, 7)
+    )
+    # the restore: the found pair goes back, verified by read-back
+    bench.expect(cmd_pom_write_byte(ADDRESS, 31, 5, threshold=THRESHOLD), reply=ACK)
+    bench.expect(cmd_pom_write_byte(ADDRESS, 32, 1, threshold=THRESHOLD), reply=ACK)
+    bench.expect(STATUS_REQUEST, reply=STATUS_POWER_ON)
+    bench.expect(
+        cmd_pom_read_byte(ADDRESS, 31, threshold=THRESHOLD), reply=encode(0x63, 0x14, 30, 5)
+    )
+    bench.expect(STATUS_REQUEST, reply=STATUS_POWER_ON)
+    bench.expect(
+        cmd_pom_read_byte(ADDRESS, 32, threshold=THRESHOLD), reply=encode(0x63, 0x14, 31, 1)
+    )
+
+    outcomes = programmer.cv_read_many(
+        [CvSpec(cv=265, page=(10, 2))], address=ADDRESS, mode=ProgMode.POM
+    )
+
+    assert [o.error for o in outcomes] == [None]
+    assert outcomes[0].result is not None and outcomes[0].result.value == 7
+    after_read = bench.sent[bench.sent.index(cmd_pom_read_byte(ADDRESS, 265, threshold=THRESHOLD)) :]
+    assert cmd_pom_write_byte(ADDRESS, 31, 5, threshold=THRESHOLD) in after_read
+    assert cmd_pom_write_byte(ADDRESS, 32, 1, threshold=THRESHOLD) in after_read
 
 
 def test_cv_read_many_calls_on_progress_once_per_spec_and_captures_failures(bench, monkeypatch):
@@ -1354,11 +1470,14 @@ def test_cv_read_many_deselects_the_current_page_when_a_later_read_carries_none(
     outcomes = programmer.cv_read_many(specs, address=ADDRESS, mode=ProgMode.POM)
     assert [o.spec.cv for o in outcomes] == [5, 9, 300]
     assert calls == [
+        ("read", 31),
+        ("read", 32),
         ("select", (0, 0), True),
         ("read", 5),
         ("read", 9),
         ("select", (0, 0), True),
         ("read", 300),
+        ("select", (31, 32), True),
     ]
 
 

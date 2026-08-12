@@ -446,6 +446,23 @@ def register(app: typer.Typer) -> None:
             cvs = parse_cv_spec(cvspec, catalog, argv_prefix=prefix)
             check_choice("mode", mode, CV_READ_MODE_OPT.enum or ())
             declared_page = parse_page(page, argv_hint=argv_hint)
+            if declared_page is not None and any(cv in INDEXED_CV_RANGE for cv in cvs):
+                # The one path through a read that WRITES the decoder: the
+                # page selection writes CV31/CV32, which are in CONFIRM_CVS
+                # precisely because later indexed access lands where they
+                # point. Same gate as `cv write`, and BEFORE the station
+                # opens - a refusal must cost no port.
+                cv31, cv32 = declared_page
+                confirm(
+                    f"--page selects the ZIMO index page by WRITING CV31={cv31} and "
+                    f"CV32={cv32} - later indexed CV reads and writes land where they "
+                    f"point. The pair is read first and re-selected as found afterwards. "
+                    f"Write CV31/CV32",
+                    settings=settings,
+                    stdin=sys.stdin,
+                    stderr=output.stderr,
+                    retry_argv=[*argv_hint, "--page", str(page)],
+                )
             station = open_station(settings, capabilities_path=capabilities_path())
             try:
                 resolved = resolve_mode(ProgMode(mode), station.capabilities, operation="read")

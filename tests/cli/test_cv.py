@@ -206,8 +206,11 @@ def test_the_track_maps_agree_with_the_manifest_enum_and_each_other():
 def test_the_two_rows_publish_their_safety_metadata():
     read_meta = command_meta("cv read")
     write_meta = command_meta("cv write")
-    assert read_meta.mutates is False
-    assert read_meta.confirms is False
+    # `cv read` mutates and confirms: `--page` on an indexed CV writes the
+    # CV31/CV32 index selectors, and a manifest that said `mutates: false`
+    # published a read that writes (review finding C1).
+    assert read_meta.mutates is True
+    assert read_meta.confirms is True
     assert write_meta.mutates is True
     assert write_meta.confirms is True
 
@@ -680,11 +683,54 @@ def test_cv_read_a_bad_page_exits_2(monkeypatch):
 def test_cv_read_attaches_the_declared_page_to_indexed_cvs_only(monkeypatch):
     fake = _install(monkeypatch, FakeCvStation(read_values={8: 145, INDEXED_CV: 7}))
     result = runner.invoke(
-        app, ["cv", "read", f"8,{INDEXED_CV}", "--page", "145:0", "--format", "json"]
+        app, ["cv", "read", f"8,{INDEXED_CV}", "--page", "145:0", "--yes", "--format", "json"]
     )
     assert result.exit_code == 0, result.stderr
     specs = fake.read_calls[0]["specs"]
     assert [(spec.cv, spec.page) for spec in specs] == [(8, None), (INDEXED_CV, (145, 0))]
+
+
+def test_cv_read_with_a_page_on_an_indexed_cv_is_confirmed_before_the_station_opens(monkeypatch):
+    """C1's confirmation half, plus the refusal-order proof (C10's shape): the
+    gate runs the same `confirm()` `cv write` uses for CV31/CV32, and it runs
+    BEFORE any port is touched - a fake whose `open` raises proves the refusal
+    never reached it."""
+
+    def _boom(*_a, **_k):
+        raise AssertionError("the confirmation refusal must come before the station opens")
+
+    monkeypatch.setattr(Station, "open", staticmethod(_boom))
+    result = runner.invoke(
+        app,
+        [
+            "cv",
+            "read",
+            str(INDEXED_CV),
+            "--page",
+            "145:0",
+            "--non-interactive",
+            "--format",
+            "json",
+        ],
+    )
+    assert result.exit_code == 2, result.stderr
+    envelope = _stderr_envelope(result)
+    assert envelope["code"] == "confirmation_required"
+    assert "CV31" in envelope["message"] and "CV32" in envelope["message"]
+    assert envelope["suggestions"] == [
+        ["railctl", "cv", "read", str(INDEXED_CV), "--page", "145:0", "--yes"]
+    ]
+
+
+def test_cv_read_with_a_page_and_no_indexed_cv_needs_no_confirmation(monkeypatch):
+    # The page is attached to indexed CVs only, so nothing gets written and
+    # nothing needs confirming.
+    fake = _install(monkeypatch, FakeCvStation(read_values={8: 145}))
+    result = runner.invoke(
+        app, ["cv", "read", "8", "--page", "145:0", "--non-interactive", "--format", "json"]
+    )
+    assert result.exit_code == 0, result.stderr
+    assert fake.read_calls[0]["specs"][0].page is None
 
 
 def test_cv_read_an_indexed_cv_without_a_page_exits_17(monkeypatch):

@@ -514,13 +514,15 @@ CV_WRITE_TRACK_OPT = Option(
 )
 
 #: What a CV read can leave the process with, beyond a station command's own
-#: set: the programming-error family 10-13 and 15-19 (`errors.EXIT_CODES` -
-#: never 14, a read verifies nothing), 20 from the POM pre-flight and the POM
-#: track-power check, and the partial 8 when some CVs of a batch answered and
-#: others did not. Like `STATION_EXIT_CODES` this is a "can produce" set:
-#: reachability drives in tests/cli/test_cv.py cover 15 and 17 among others.
+#: set: the programming-error family 10-19 (`errors.EXIT_CODES` - 14 included,
+#: because a `--page` read verifies its CV31/CV32 selection and the restore of
+#: the pair it found, and either read-back can disagree), 20 from the POM
+#: pre-flight and the POM track-power check, and the partial 8 when some CVs
+#: of a batch answered and others did not. Like `STATION_EXIT_CODES` this is a
+#: "can produce" set: reachability drives in tests/cli/test_cv.py cover 15 and
+#: 17 among others.
 CV_READ_EXIT_CODES: Final[tuple[int, ...]] = tuple(
-    sorted({*STATION_EXIT_CODES, PARTIAL_EXIT_CODE, 10, 11, 12, 13, 15, 16, 17, 18, 19, 20})
+    sorted({*STATION_EXIT_CODES, PARTIAL_EXIT_CODE, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20})
 )
 #: A write adds 14 (`CvVerifyError`: the read-back disagreed) and drops the
 #: partial 8 - one CV either was written or the command failed saying why.
@@ -532,13 +534,18 @@ _CV_READ = CommandMeta(
     path="cv read",
     help="Read CVs from the decoder",
     schema="railctl/cv-read/v1",
-    # Reads no persistent state changes: an index-page selection (CV31/CV32)
-    # can go out for CV257-512, but the command's job is to leave the decoder
-    # as it found it.
-    mutates=False,
+    # One path through a read WRITES the decoder: `--page` on an indexed CV
+    # (CV257-512) writes the ZIMO index selectors CV31/CV32 to select the
+    # page. The command reads the pair first and re-selects what it found in a
+    # `finally`, but "writes two CVs and puts them back" is still a mutation,
+    # and an agent deciding whether this is safe to run unattended reads this
+    # field. That same path is confirmed, exactly like a `cv write` to
+    # CV31/CV32 (commands/cv.py's page gate).
+    mutates=True,
     exit_codes=CV_READ_EXIT_CODES,
     arguments=(CV_SPEC_ARG,),
     options=(CV_READ_MODE_OPT, CV_PAGE_OPT),
+    confirms=True,
 )
 _CV_WRITE = CommandMeta(
     path="cv write",
