@@ -126,14 +126,25 @@ def backup_path(address: int, set_name: str, out: str | None) -> Path | None:
 def write_backup(document: BackupDocument) -> str:
     """The exact serialized document, deterministic per the writer rules.
 
-    Raises `ValueError` on duplicate CV rows: the reader rejects them, and a
-    writer that can produce what its own reader refuses is two contracts
-    pretending to be one.
+    Raises `ValueError` on duplicate CV rows and on a cv or value outside
+    the reader's bounds: the reader rejects all of them, and a writer that
+    can produce what its own reader refuses is two contracts pretending to
+    be one.
     """
     numbers = [record.cv for record in document.cvs]
     duplicates = sorted({cv for cv in numbers if numbers.count(cv) > 1})
     if duplicates:
         raise ValueError(f"duplicate CV rows for {duplicates}; one row per CV")
+    for record in document.cvs:
+        if not CV_MIN <= record.cv <= CV_MAX:
+            raise ValueError(
+                f"CV {record.cv} is outside {CV_MIN}..{CV_MAX}; the reader rejects such a row"
+            )
+        if record.value is not None and not VALUE_MIN <= record.value <= VALUE_MAX:
+            raise ValueError(
+                f"CV {record.cv}: value {record.value} is outside {VALUE_MIN}..{VALUE_MAX}; "
+                f"the reader rejects such a row"
+            )
     top: dict[str, object] = {
         "schema": BACKUP_SCHEMA,
         "created_utc": document.created_utc,

@@ -219,6 +219,34 @@ def test_a_decoder_field_that_failed_to_read_is_omitted_not_nulled():
     assert list(decoder) == ["manufacturer_id", "decoder_type"]
 
 
+def test_the_writer_accepts_the_readers_boundary_cv_numbers_and_values():
+    # Both ends ON the boundary, mirroring the reader's acceptance test:
+    # CV 1 with value 0, CV 1024 with value 255.
+    records = (
+        CvRecord(cv=1, name="low", status=ReadStatus.OK, value=0),
+        CvRecord(cv=1024, name="high", status=ReadStatus.OK, value=255),
+    )
+    rows = json.loads(write_backup(make_document(cvs=records)))["cvs"]
+    assert [(row["cv"], row["value"]) for row in rows] == [(1, 0), (1024, 255)]
+
+
+@pytest.mark.parametrize("cv", [0, 1025])
+def test_the_writer_refuses_a_cv_off_the_readers_bounds(cv: int):
+    # One step past each end: the reader rejects these rows, and a writer
+    # that can produce what its own reader refuses is two contracts
+    # pretending to be one - the same reasoning as the duplicate check.
+    records = (CvRecord(cv=cv, name="off", status=ReadStatus.OK, value=1),)
+    with pytest.raises(ValueError, match=f"CV {cv}"):
+        write_backup(make_document(cvs=records))
+
+
+@pytest.mark.parametrize("value", [-1, 256])
+def test_the_writer_refuses_a_value_off_the_readers_bounds(value: int):
+    records = (CvRecord(cv=1, name="off", status=ReadStatus.OK, value=value),)
+    with pytest.raises(ValueError, match=f"value {value}"):
+        write_backup(make_document(cvs=records))
+
+
 def test_the_writer_refuses_duplicate_cv_rows():
     doubled = make_document(cvs=(*example_records(), example_records()[0]))
     with pytest.raises(ValueError, match=r"duplicate CV rows for \[1\]"):
