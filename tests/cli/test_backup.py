@@ -376,9 +376,9 @@ def test_backup_existing_file_is_refused_before_the_station_opens(monkeypatch, t
     assert envelope["code"] == "usage"
     assert envelope["details"]["reason"] == "backup_file_exists"
     # The suggestion is the typed invocation with --force appended - runnable
-    # as-is, never a sentence to parse.
+    # as-is, never a sentence to parse - typed global flags included.
     assert envelope["suggestions"] == [
-        ["railctl", "backup", "--address", "3", "--out", str(out), "--force"]
+        ["railctl", "backup", "--address", "3", "--out", str(out), "--format", "json", "--force"]
     ]
 
 
@@ -416,6 +416,88 @@ def test_backup_refusal_suggestion_keeps_every_typed_flag(monkeypatch, tmp_path)
             "service",
             "--page",
             "0:0",
+            "--format",
+            "json",
+            "--force",
+        ]
+    ]
+
+
+def test_backup_refusal_suggestion_keeps_typed_global_flags(monkeypatch, tmp_path):
+    # The suggestion is "the full argv as typed" - the typed globals ride
+    # along after backup's own options, in registration order; globals the
+    # operator never typed do not appear.
+    _boom_open(monkeypatch)
+    out = tmp_path / "exists.json"
+    out.write_text("{}", encoding="utf-8")
+    result = runner.invoke(
+        app,
+        [
+            "backup",
+            "--address",
+            "3",
+            "--out",
+            str(out),
+            "--format",
+            "json",
+            "--target",
+            "auto",
+            "--yes",
+        ],
+    )
+    assert result.exit_code == 2, result.stderr
+    assert _stderr_envelope(result)["suggestions"] == [
+        [
+            "railctl",
+            "backup",
+            "--address",
+            "3",
+            "--out",
+            str(out),
+            "--target",
+            "auto",
+            "--format",
+            "json",
+            "--yes",
+            "--force",
+        ]
+    ]
+
+
+def test_backup_refusal_suggestion_keeps_the_remaining_typed_globals(monkeypatch, tmp_path):
+    _boom_open(monkeypatch)
+    out = tmp_path / "exists.json"
+    out.write_text("{}", encoding="utf-8")
+    result = runner.invoke(
+        app,
+        [
+            "backup",
+            "--address",
+            "3",
+            "--out",
+            str(out),
+            "--json",
+            "-vv",
+            "--color",
+            "never",
+            "--non-interactive",
+        ],
+    )
+    assert result.exit_code == 2, result.stderr
+    assert _stderr_envelope(result)["suggestions"] == [
+        [
+            "railctl",
+            "backup",
+            "--address",
+            "3",
+            "--out",
+            str(out),
+            "--json",
+            "--verbose",
+            "--verbose",
+            "--color",
+            "never",
+            "--non-interactive",
             "--force",
         ]
     ]

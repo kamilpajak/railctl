@@ -234,9 +234,17 @@ class _Plan:
 
 
 def _typed_argv(
-    address: int, *, out: str | None, note: str | None, mode_word: str, page_token: str | None
+    address: int,
+    *,
+    out: str | None,
+    note: str | None,
+    mode_word: str,
+    page_token: str | None,
+    typed_globals: list[str],
 ) -> list[str]:
-    """The invocation as typed, rebuilt as an argv array a suggestion can extend."""
+    """The invocation as typed, rebuilt as an argv array a suggestion can
+    extend: `--address` and backup's own options first, then the global
+    flags the operator actually typed, in registration order."""
     argv = ["railctl", "backup", "--address", str(address)]
     if out is not None:
         argv += ["--out", out]
@@ -246,7 +254,7 @@ def _typed_argv(
         argv += ["--mode", mode_word]
     if page_token is not None:
         argv += ["--page", page_token]
-    return argv
+    return argv + typed_globals
 
 
 def plan_backup(
@@ -257,6 +265,7 @@ def plan_backup(
     out: str | None,
     note: str | None,
     force: bool,
+    typed_globals: list[str],
 ) -> _Plan:
     """Validate the invocation and resolve the target path, station untouched.
 
@@ -276,7 +285,12 @@ def plan_backup(
             suggestions=[
                 [
                     *_typed_argv(
-                        address, out=out, note=note, mode_word=mode_word, page_token=page_token
+                        address,
+                        out=out,
+                        note=note,
+                        mode_word=mode_word,
+                        page_token=page_token,
+                        typed_globals=typed_globals,
                     ),
                     "--force",
                 ]
@@ -667,8 +681,17 @@ def _work(
     out: str | None,
     note: str | None,
     force: bool,
+    typed_globals: list[str],
 ) -> CommandResult:
-    plan = plan_backup(settings, mode_word=mode, page_token=page, out=out, note=note, force=force)
+    plan = plan_backup(
+        settings,
+        mode_word=mode,
+        page_token=page,
+        out=out,
+        note=note,
+        force=force,
+        typed_globals=typed_globals,
+    )
     catalog = load_catalog()
     events = StationEventLog()
     station = open_station(settings, capabilities_path=capabilities_path(), on_event=events)
@@ -745,6 +768,7 @@ def _run_ndjson(
     out: str | None,
     note: str | None,
     force: bool,
+    typed_globals: list[str],
 ) -> NoReturn:
     """The streaming path, bypassing `run()` exactly as `monitor` does: once
     the station is open, EVERY ending - success, a hole, an error, Ctrl-C -
@@ -787,7 +811,13 @@ def _run_ndjson(
     exit_code = 0
     try:
         plan = plan_backup(
-            settings, mode_word=mode, page_token=page, out=out, note=note, force=force
+            settings,
+            mode_word=mode,
+            page_token=page,
+            out=out,
+            note=note,
+            force=force,
+            typed_globals=typed_globals,
         )
         catalog = load_catalog()
         backup_run = _BackupRun(plan, catalog, on_start=on_start, on_cv=on_cv)
@@ -863,10 +893,47 @@ def register(app: typer.Typer) -> None:
             yes=yes,
             non_interactive=non_interactive,
         )
+        # The global flags actually typed AFTER the verb, rebuilt in
+        # registration order. Each parameter is its "nothing typed" sentinel
+        # (None/False/0) when absent - exactly the values `merged_output`
+        # receives above - so a refusal's suggested argv keeps the full
+        # invocation and invents nothing the operator did not type.
+        typed_globals: list[str] = []
+        if target is not None:
+            typed_globals += ["--target", target]
+        if format_ is not None:
+            typed_globals += ["--format", format_]
+        if json_flag:
+            typed_globals.append("--json")
+        typed_globals += ["--verbose"] * verbose
+        if color is not None:
+            typed_globals += ["--color", color]
+        if yes:
+            typed_globals.append("--yes")
+        if non_interactive:
+            typed_globals.append("--non-interactive")
         if output.fmt == "ndjson":
-            _run_ndjson(settings, output, mode=mode, page=page, out=out, note=note, force=force)
+            _run_ndjson(
+                settings,
+                output,
+                mode=mode,
+                page=page,
+                out=out,
+                note=note,
+                force=force,
+                typed_globals=typed_globals,
+            )
         run(
             "backup",
             output,
-            lambda: _work(settings, output, mode=mode, page=page, out=out, note=note, force=force),
+            lambda: _work(
+                settings,
+                output,
+                mode=mode,
+                page=page,
+                out=out,
+                note=note,
+                force=force,
+                typed_globals=typed_globals,
+            ),
         )
