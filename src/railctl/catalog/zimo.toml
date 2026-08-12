@@ -255,7 +255,7 @@ first = 127
 last = 132
 index_start = 1
 slug_template = "effect_fa{i}"
-desc_template = "Light effect for output FA{i}"
+desc_template = "Effect for output FA{i}: lighting effects, smoke generator or uncoupler by effect code (MS manual 3.21)"
 group = "lights"
 
 [[cv]]
