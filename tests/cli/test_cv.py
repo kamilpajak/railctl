@@ -181,6 +181,23 @@ def test_parse_page_refuses_a_non_byte_value_naming_the_field(token: str, field:
     }
 
 
+def test_parse_page_accepts_both_byte_edges():
+    # On the boundary, not 45 past it: 255 is a byte and must parse.
+    assert parse_page("255:255", argv_hint=PREFIX) == (255, 255)
+    assert parse_page("0:0", argv_hint=PREFIX) == (0, 0)
+
+
+@pytest.mark.parametrize(("token", "field"), [("256:0", "CV31"), ("0:256", "CV32")])
+def test_parse_page_refuses_one_past_the_byte_edge(token: str, field: str):
+    with pytest.raises(UsageProblem) as caught:
+        parse_page(token, argv_hint=PREFIX)
+    assert caught.value.details == {
+        "reason": "page_value_not_a_byte",
+        "field": field,
+        "value": 256,
+    }
+
+
 # -- the confirmation set and the track/mode maps ------------------------------
 
 
@@ -1043,11 +1060,51 @@ def test_cv_write_catalog_range_is_enforcing_before_any_telegram(monkeypatch):
     assert envelope["suggestions"] == []
 
 
+@pytest.mark.parametrize("value", [1, 127])
+def test_cv_write_accepts_both_catalog_edges(monkeypatch, value: int):
+    # CV1's catalog range is 1..127: both edges are inside it and must go out.
+    # (--yes: CV1 is in the confirmation set.)
+    fake = _install(monkeypatch, FakeCvStation())
+    result = runner.invoke(app, ["cv", "write", "1", str(value), "--yes", "--format", "json"])
+    assert result.exit_code == 0, result.stderr
+    assert fake.write_calls[0]["value"] == value
+
+
+@pytest.mark.parametrize("value", [0, 128])
+def test_cv_write_one_past_either_catalog_edge_is_refused(monkeypatch, value: int):
+    # One past the edge, not 73 past it: 128 (and 0) must be the refusal.
+    fake = _install(monkeypatch, FakeCvStation())
+    result = runner.invoke(app, ["cv", "write", "1", str(value), "--yes", "--format", "json"])
+    assert result.exit_code == 15, result.stderr
+    assert "1..127" in _stderr_envelope(result)["message"]
+    assert fake.write_calls == []
+
+
 def test_cv_write_a_non_byte_value_is_a_usage_error(monkeypatch):
     _install(monkeypatch, FakeCvStation())
     result = runner.invoke(app, ["cv", "write", "11", "300", "--format", "json"])
     assert result.exit_code == 2
     assert _stderr_envelope(result)["details"]["reason"] == "value_not_a_byte"
+
+
+@pytest.mark.parametrize("value", [0, 255])
+def test_cv_write_accepts_both_value_edges(monkeypatch, value: int):
+    # On the boundary: 0 and 255 are bytes and must go out. CV11 is uncurated,
+    # so no catalog range narrows the byte.
+    fake = _install(monkeypatch, FakeCvStation())
+    result = runner.invoke(
+        app, ["cv", "write", str(UNCURATED_CV), str(value), "--format", "json"]
+    )
+    assert result.exit_code == 0, result.stderr
+    assert fake.write_calls[0]["value"] == value
+
+
+def test_cv_write_one_past_the_value_edge_is_refused(monkeypatch):
+    fake = _install(monkeypatch, FakeCvStation())
+    result = runner.invoke(app, ["cv", "write", str(UNCURATED_CV), "256", "--format", "json"])
+    assert result.exit_code == 2
+    assert _stderr_envelope(result)["details"]["reason"] == "value_not_a_byte"
+    assert fake.write_calls == []
 
 
 def test_cv_write_takes_exactly_one_cv(monkeypatch):
