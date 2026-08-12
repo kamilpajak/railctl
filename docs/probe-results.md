@@ -805,3 +805,25 @@ claimed by reading the status bit. Panel and byte agreed.
   speed.
 
 Both are corrected in the file.
+
+## The session gap crosses invocations — SETTLED 2026-08-12
+
+The M8 acceptance's stage 3 failed both its CV3 writes with `61 13`, while every read in the
+same run succeeded — and the identical write, run by hand minutes later, succeeded with the
+same `24 12` direct telegram the 2026-08-06 session had proven. Reproduced deterministically:
+
+| sequence | result |
+| --- | --- |
+| `cv read 3` then `cv write 3 26` back-to-back (~1 s apart) | write fails `61 13` |
+| the same `cv write 3 26` after minutes of idle | succeeds, `63 14` echo, verified |
+
+This is the inter-session gap measured 2026-08-07 (sessions opened within ~1.5-1.75 s of the
+previous close fail wholesale with `61 13`), crossing an invocation boundary. The guard,
+`_await_session_gap`, keeps its memory on the programmer instance - and every CLI invocation
+builds a fresh one, so "a session closed 800 ms ago" is forgotten exactly when it matters.
+`_last_session_end = None` means UNKNOWN, and the code read it as "no session ever".
+
+Also settled by the same failure: the `decoder_no_ack` hint blamed a 750 mA programming track
+and said `retryable: false`. Both wrong here - the cause was the tool's own timing, and the
+failure heals with a 3 s wait. CV3 was confirmed unchanged (26) after both failed writes:
+nothing reached the decoder.
