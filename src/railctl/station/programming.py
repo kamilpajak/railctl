@@ -11,7 +11,7 @@ from __future__ import annotations
 
 from collections.abc import Callable, Sequence
 from dataclasses import dataclass
-from typing import TYPE_CHECKING, Final, Literal
+from typing import TYPE_CHECKING, Final, Literal, TypeVar
 
 from railctl.errors import (
     CvOutOfRangeError,
@@ -124,6 +124,8 @@ class TimedOut:
 
 WaitOutcome = Reply | TimedOut
 ResultChannelSeen = Literal["broadcast", "poll"]
+
+_T = TypeVar("_T")
 
 SERVICE_ENCODING_ORDER: Final[tuple[tuple[str, CvEncoding], ...]] = (
     ("z21_cv_opcodes", CvEncoding.Z21_16BIT),
@@ -300,6 +302,63 @@ class CvProgrammer:
         # closed since the gap it owed was already paid. See
         # `_await_session_gap`.
         self._last_session_end: float | None = None
+        # Whether this INSTANCE has ever closed a service session. `None` in
+        # `_last_session_end` is two different facts wearing one value: "the
+        # gap was paid" and "this instance has no idea when the previous
+        # invocation's session closed". Every CLI invocation builds a fresh
+        # programmer, so the second fact is the normal one - and treating it
+        # as the first is how the M8 acceptance's write failed `61 13` one
+        # second after a read (docs/probe-results.md, "The session gap
+        # crosses invocations"). This flag tells the two apart; see
+        # `_retry_once_for_unknown_gap`.
+        self._session_history_unknown = True
+
+    def _retry_once_for_unknown_gap(self, attempt: Callable[[], _T]) -> _T:
+        """Run `attempt`; on a first-session `61 13` with unknown history, retry once.
+
+        A session opened within ~1.5-1.75 s of the previous one closing fails
+        wholesale with `61 13` (measured 2026-08-07), and a fresh programmer
+        instance cannot know when the previous INVOCATION's session closed -
+        `railctl cv read 3 && railctl cv write 3 26` failed exactly this way
+        on the bench (2026-08-12) while the same write after an idle minute
+        succeeded. The two causes of `61 13` are indistinguishable in the
+        moment, but they separate under one retry: the failed attempt's exit
+        stamps `_last_session_end`, so the second attempt's own
+        `_await_session_gap` waits out the full measured gap - after which a
+        second `61 13` is the real thing, a decoder that did not answer.
+
+        Retries only while `_session_history_unknown`: an instance that has
+        closed a session before owns its timing, and a `61 13` then is an
+        answer, not an artefact. The retry emits `service.session_retried` so
+        the envelope says the first attempt was discarded and why - a silent
+        retry would hide the very timing fact this exists to handle.
+
+        Idempotent by construction for both callers: re-reading a CV reads it
+        again, and re-writing the same value writes the same value.
+        """
+        # Snapshot BEFORE the attempt: a failed attempt's own `finally` exits the
+        # session and sets `_session_history_unknown = False`, so reading the flag
+        # at catch time always says "known" and the retry never fires. That is
+        # exactly how the first shipped version behaved on the bench (2026-08-12,
+        # second acceptance run): the hint claimed the retry had run while the
+        # helper had re-raised immediately - and the unit test missed it because
+        # its mocked `exit_service_mode` skipped the very state transition that
+        # breaks the check.
+        history_was_unknown = self._session_history_unknown
+        try:
+            return attempt()
+        except DecoderNoAckError:
+            if not history_was_unknown:
+                raise
+            self._station.emit(
+                "service.session_retried",
+                {
+                    "reason": "first session of this invocation answered 61 13; the "
+                    "previous invocation's session may have closed moments ago",
+                    "gap_s": self._station.timing.service_session_gap,
+                },
+            )
+            return attempt()
 
     def _await_session_gap(self) -> None:
         """Wait out `service_session_gap` if a session closed too recently.
@@ -383,14 +442,11 @@ class CvProgrammer:
     ) -> tuple[CvEncoding, bool]:
         """Puts one CV write on the wire and confirms the station accepted it.
 
-        Does NOT call `_await_session_gap`, unlike the read path. A write
-        that immediately followed a read's closed session could hit the same
-        "reopened too soon" failure the gap exists to prevent - but nothing
-        does that today (`service_write` confirms from its own echo and never
-        reads back), and the write path was never measured for it. The
-        asymmetry runs the safe way round: a READ pays the gap whatever
-        closed the previous session, a write included. Measure before adding
-        a delay here.
+        Pays `_await_session_gap` like the read path, since 2026-08-12. The
+        earlier asymmetry ("nothing does that today ... measure before adding
+        a delay here") ended when M8's `cv write` followed `cv read`'s closed
+        session and failed `61 13`, reproduced deterministically on the bench
+        (docs/probe-results.md, "The session gap crosses invocations").
 
         POM: the interface ack IS the confirmation - there is no other channel
         (module docstring: "neither the PC nor the interface can determine
@@ -421,6 +477,13 @@ class CvProgrammer:
             self._station.pause(self._station.timing.pom_write_settle)
             return CvEncoding.POM_ZERO_BASED, False
         telegram, encoding, page_index = self.service_write_telegram(cv, value)
+        # The comment that used to sit here said "nothing does that today" of a write
+        # following a read's closed session, and asked for a measurement before adding
+        # the delay. The measurement exists now: 2026-08-12 (docs/probe-results.md,
+        # "The session gap crosses invocations"), `cv read 3` then `cv write 3 26`
+        # back-to-back failed `61 13` while the identical write after an idle gap
+        # succeeded. A service WRITE pays the same gap a read does.
+        self._await_session_gap()
         before = self._status_before()
         echo_confirmed_only = False
         try:
@@ -456,9 +519,15 @@ class CvProgrammer:
             # still is not proof the decoder RETAINED the value, so it sets
             # `echo_confirmed_only` rather than being trusted the way `Ready`
             # is.
+            # The hint no longer says "use POM instead": on this bench POM READ is
+            # silence (R1), so that advice sent the operator to a mode that cannot
+            # verify. And it names the wheel contact FIRST, because the M8 acceptance
+            # proved a 61 13 can be the tool's own timing - now retried automatically
+            # before this error is ever raised (see _retry_once_for_unknown_gap).
             no_ack_hint = (
-                "decoder did not acknowledge; sound decoders often fail "
-                "on a 750 mA programming track - use POM instead"
+                "decoder did not acknowledge, and the session-gap retry already ran - "
+                "check the wheels are making contact with the programming track; sound "
+                "decoders can also fail on a 750 mA programming output"
             )
             if isinstance(outcome, NoAck):
                 raise DecoderNoAckError(
@@ -760,6 +829,9 @@ class CvProgrammer:
                 )
         finally:
             self._last_session_end = self._station.now()
+            # From here on this instance KNOWS its history: the clock above is
+            # authoritative and `_await_session_gap` owns the timing.
+            self._session_history_unknown = False
             self._station.invalidate_caches()
 
     def service_read(self, cv: int, *, page: CvPage | None = None) -> CvResult:
@@ -797,13 +869,17 @@ class CvProgrammer:
         so a caller relying on paging in service mode finds out immediately,
         instead of reading whatever page the decoder already had selected.
         """
-        before = self._station.status()
-        try:
-            return self._read_in_open_session(cv, page=page)
-        finally:
-            self.exit_service_mode(
-                restore_power=before.track_power, restore_hold=before.emergency_stop
-            )
+
+        def attempt() -> CvResult:
+            before = self._station.status()
+            try:
+                return self._read_in_open_session(cv, page=page)
+            finally:
+                self.exit_service_mode(
+                    restore_power=before.track_power, restore_hold=before.emergency_stop
+                )
+
+        return self._retry_once_for_unknown_gap(attempt)
 
     def service_read_many(self, cvs: Sequence[int]) -> list[CvReadOutcome]:
         """Read several CVs inside ONE service-mode session.
@@ -920,9 +996,11 @@ class CvProgrammer:
         outcome: object,
         start: float,
     ) -> CvResult:
+        # Same wording as the write path's hint, for the same measured reasons.
         no_ack_hint = (
-            "decoder did not acknowledge; sound decoders often fail on a 750 mA "
-            "programming track - use POM instead"
+            "decoder did not acknowledge, and the session-gap retry already ran - "
+            "check the wheels are making contact with the programming track; sound "
+            "decoders can also fail on a 750 mA programming output"
         )
         if isinstance(outcome, CvValue):
             if encoding is CvEncoding.SERVICE_EXT and page_index in UNEXERCISED_BANDS:
@@ -1068,22 +1146,47 @@ class CvProgrammer:
                     f"payload"
                 )
         ordered = sorted(specs, key=lambda spec: (spec.page or (0, 0), spec.cv))
+        # Leave-as-found: a batch that will select a page writes CV31/CV32,
+        # and a read's job is to leave the decoder as it found it. The pair is
+        # read BEFORE the first selection - CV31/CV32 are plain 1-255 CVs,
+        # readable as singletons through `cv_read` (the payload guard above is
+        # about batching them BETWEEN selections, not about reading them) -
+        # and re-selected in the `finally`, so an assertion or error inside
+        # the batch cannot leave the cursor pointing at this batch's page. A
+        # failure reading the pair propagates: selecting a page whose original
+        # cannot be restored is exactly the mutation-dressed-as-a-read this
+        # exists to prevent.
+        found_page: CvPage | None = None
+        if any(spec.page is not None for spec in ordered):
+            found_page = (
+                self.cv_read(31, address=address, mode=mode).value,
+                self.cv_read(32, address=address, mode=mode).value,
+            )
         total = len(ordered)
         outcomes: list[CvReadOutcome] = []
         current_page: CvPage | None = None
-        for index, spec in enumerate(ordered):
-            try:
-                if spec.page != current_page:
-                    if spec.page is not None:
-                        self.select_page(spec.page, address=address, mode=mode, force=True)
-                    current_page = spec.page
-                result = self.cv_read(spec.cv, address=address, mode=mode, page=spec.page)
-                outcome = CvReadOutcome(spec=spec, result=result, error=None)
-            except RailctlError as exc:
-                outcome = CvReadOutcome(spec=spec, result=None, error=exc)
-            outcomes.append(outcome)
-            if on_progress is not None:
-                on_progress((index, total, outcome))
+        try:
+            for index, spec in enumerate(ordered):
+                try:
+                    if spec.page != current_page:
+                        if spec.page is not None:
+                            self.select_page(spec.page, address=address, mode=mode, force=True)
+                        current_page = spec.page
+                    result = self.cv_read(spec.cv, address=address, mode=mode, page=spec.page)
+                    outcome = CvReadOutcome(spec=spec, result=result, error=None)
+                except RailctlError as exc:
+                    outcome = CvReadOutcome(spec=spec, result=None, error=exc)
+                outcomes.append(outcome)
+                if on_progress is not None:
+                    on_progress((index, total, outcome))
+        finally:
+            if found_page is not None:
+                # Through `select_page`, not raw writes: the restore deserves
+                # the same verification and cache bookkeeping as any other
+                # selection. A restore that fails raises out of this finally -
+                # loudly - because the decoder is then NOT as it was found,
+                # and reporting the batch as if it were would be the lie.
+                self.select_page(found_page, address=address, mode=mode, force=True)
         return outcomes
 
     def _learn_result_channel(
@@ -1499,13 +1602,16 @@ class CvProgrammer:
                 "cv.write_unverified",
                 {"cv": cv, "value": value, "reason": self._blind_reason(cv, verify)},
             )
+            # `None`, not `False`: no read-back ran, so nothing measured a
+            # mismatch. `False` would claim one - a real mismatch raises
+            # `CvVerifyError` below instead of ever returning.
             return CvResult(
                 cv=cv,
                 value=value,
                 mode=ProgMode.POM,
                 encoding=encoding,
                 operation="write",
-                verified=False,
+                verified=None,
                 elapsed=self._station.now() - started,
             )
         read = self.cv_read(cv, address=address, mode=ProgMode.POM, page=page)
@@ -1550,29 +1656,36 @@ class CvProgrammer:
     def service_write(
         self, cv: int, value: int, *, verify: bool, page: CvPage | None = None
     ) -> CvResult:
-        """`verified=True` here can come only from a decoder-level `Ready`
-        (`61 11`) acknowledgement, present for every CV including
-        CV1/8/17/18, so `BLIND_WRITE_CVS` - which exists to skip an unreliable
-        POM re-read after a write that could change the answering address -
-        has nothing to skip here. A matching `CvValue`/`PagedCvValue` echo is
-        a different, weaker signal: it shows what the station's own result
-        store holds, not that the decoder retained the value
-        (docs/probe-results.md), so it never earns `verified=True` even when
-        `verify=True` was requested - `_write_and_confirm`'s
-        `echo_confirmed_only` return is what tells the two confirmation
-        channels apart.
+        """`verified=True` comes from one of two channels: a decoder-level
+        `Ready` (`61 11`) acknowledgement, or - when the station confirmed the
+        write only through its own result echo - an independent `cv_read`
+        performed here afterwards, whose value must match what was written.
+        A matching `CvValue`/`PagedCvValue` echo alone is the weaker signal:
+        it shows what the station's own result store holds, not that the
+        decoder retained the value (docs/probe-results.md, "Service-mode
+        WRITE works"), so `_write_and_confirm`'s `echo_confirmed_only` return
+        is what decides whether the read-back has to run. A read-back that
+        disagrees raises `CvVerifyError` naming both values; `verify=False`
+        skips the read-back and reports `verified=None` - not measured, never
+        a mismatch nobody measured.
 
-        `page` is accepted, not used: unlike `pom_write`, this method never
-        calls `cv_read` to verify, so there is no internal read whose own
-        `ensure_page` needs it. Kept only so `cv_write` can forward `page` to
-        either write method uniformly - `cv_write`'s own `ensure_page` call
-        already selected it before either method is reached.
+        `BLIND_WRITE_CVS` - which exists to skip an unreliable POM re-read
+        after a write that could change the answering address - has nothing to
+        skip here: service mode is addressed by track, so the read-back asks
+        the same decoder whatever was written.
+
+        `page` is accepted, not forwarded to the read-back: `cv_write`'s own
+        `ensure_page` call already selected it before this method is reached,
+        and `service_read` cannot re-select a page - handing it one only
+        emits `page.not_selected` for a page that IS selected.
         """
         started = self._station.now()
+
+        def attempt() -> tuple[CvEncoding, bool]:
+            return self._write_and_confirm(cv, value, address=None, mode=ProgMode.SERVICE)
+
         try:
-            encoding, echo_confirmed_only = self._write_and_confirm(
-                cv, value, address=None, mode=ProgMode.SERVICE
-            )
+            encoding, echo_confirmed_only = self._retry_once_for_unknown_gap(attempt)
         except RailctlError:
             self._station.invalidate_caches()
             raise
@@ -1581,19 +1694,10 @@ class CvProgrammer:
             # track is not necessarily the one on the main track (spec line
             # 782) - there is no address to narrow to, so the whole cache goes.
             self._station.invalidate_caches()
-        verified = verify and not echo_confirmed_only
-        if not verified:
-            if verify:
-                reason = (
-                    f"CV{cv} service-mode write was confirmed only by the "
-                    f"station's own result echo (63 14/63 10), not an "
-                    f"independent read-back"
-                )
-            else:
-                reason = self._blind_reason(cv, verify)
+        if not verify:
             self._station.emit(
                 "cv.write_unverified",
-                {"cv": cv, "value": value, "reason": reason},
+                {"cv": cv, "value": value, "reason": self._blind_reason(cv, verify)},
             )
             return CvResult(
                 cv=cv,
@@ -1601,9 +1705,18 @@ class CvProgrammer:
                 mode=ProgMode.SERVICE,
                 encoding=encoding,
                 operation="write",
-                verified=False,
+                verified=None,
                 elapsed=self._station.now() - started,
             )
+        if echo_confirmed_only:
+            read = self.cv_read(cv, address=None, mode=ProgMode.SERVICE)
+            if read.value != value:
+                raise CvVerifyError(
+                    f"CV{cv} write verification failed: wrote {value}, the independent "
+                    f"read-back returned {read.value}",
+                    cv=cv,
+                    details={"wrote": value, "read_back": read.value},
+                )
         return CvResult(
             cv=cv,
             value=value,

@@ -312,6 +312,18 @@ class CvOutOfRangeError(ProgrammingError):
     code: ClassVar[str] = "cv_out_of_range"
 
 
+#: `CvOutOfRangeError.details["reason"]` when the refused number is the VALUE
+#: being written, not the CV. Both refusals share the class and exit code 15 -
+#: the catalog's min/max are enforcing on write - but not the remedy: a CV the
+#: mode cannot reach suggests `railctl doctor` (a re-probe is what could move
+#: the bound), while nothing the doctor measures changes 300 not fitting in
+#: 0..255. `cli/_errors.default_suggestions` reads this to keep the doctor
+#: suggestion off the value refusal. Declared here, beside the class, for the
+#: same reason the `CONDITION_*` strings are: the writer (`cli/commands/cv.py`)
+#: and the reader (`cli/_errors.py`) must not each spell it themselves.
+REASON_VALUE_OUT_OF_RANGE: Final[str] = "value_out_of_range"
+
+
 class ServiceEncodingUnknownError(ProgrammingError):
     """No service-mode encoding has been established on this station yet.
 
@@ -362,9 +374,28 @@ class AbortedError(RailctlError):
 
 
 class ConfirmationRequiredError(RailctlError):
-    """A confirmation was needed and could not be asked for."""
+    """A confirmation was needed and could not be asked for.
+
+    `retry_argv` is the raiser's own full, runnable retry command with `--yes`
+    already appended - the same mechanism `FunctionGroupUnreadableError` uses
+    for the same reason: `cli/_errors.default_suggestions` is keyed by
+    exception type and cannot reconstruct the CV and value the operator typed
+    from the type alone, so without this it suggested
+    `["railctl", "cv", "write", "--yes"]` - an argv that exits 2.
+    """
 
     code: ClassVar[str] = "confirmation_required"
+
+    def __init__(
+        self,
+        message: str,
+        *,
+        hint: str | None = None,
+        details: dict[str, object] | None = None,
+        retry_argv: list[str] | None = None,
+    ) -> None:
+        super().__init__(message, hint=hint, details=details)
+        self.retry_argv = retry_argv
 
 
 EXIT_CODES: Final[dict[type[RailctlError], int]] = {

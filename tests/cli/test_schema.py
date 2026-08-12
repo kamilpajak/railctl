@@ -217,6 +217,8 @@ def test_manifest_with_no_path_returns_the_tree_shape():
         "drive",
         "function",
         "monitor",
+        "cv read",
+        "cv write",
         "schema",
     ]
     assert {o["name"] for o in payload["global_options"]} == {o.name for o in GLOBAL_OPTIONS}
@@ -459,6 +461,8 @@ def test_build_schema_returns_the_tree_when_no_path_is_given():
         "drive",
         "function",
         "monitor",
+        "cv read",
+        "cv write",
         "schema",
     ]
 
@@ -502,8 +506,12 @@ from railctl.errors import (  # noqa: E402
 from railctl.station import (  # noqa: E402
     Capabilities,
     Check,
+    CvEncoding,
+    CvReadOutcome,
+    CvResult,
     DoctorReport,
     LayoutState,
+    ProgMode,
     Station,
 )
 from railctl.xbus.replies import LocoInfo, StationStatus, StationVersion  # noqa: E402
@@ -559,11 +567,44 @@ class _FakeStatusStation:
 
     identity = "serial:7010A0001194:3"
 
+    # Service proven and POM a measured no, so the cv commands' AUTO resolves
+    # to SERVICE and no invocation in this file needs an address for them.
+    capabilities = Capabilities(link_identity=identity, pom_read=False, service_direct_cv=True)
+
     def __init__(self, raw_status: int = 0x00) -> None:
         self.raw_status = raw_status
 
     def status(self) -> StationStatus:
         return StationStatus.from_raw(self.raw_status)
+
+    def cv_read_many(self, specs, *, address=None, mode=ProgMode.SERVICE, on_progress=None):
+        return [
+            CvReadOutcome(
+                spec=spec,
+                result=CvResult(
+                    cv=spec.cv,
+                    value=145,
+                    mode=ProgMode.SERVICE,
+                    encoding=CvEncoding.SERVICE_DIRECT,
+                    operation="read",
+                    verified=None,
+                    elapsed=0.01,
+                ),
+                error=None,
+            )
+            for spec in specs
+        ]
+
+    def cv_write(self, cv, value, *, address=None, mode=ProgMode.SERVICE, page=None, verify=True):
+        return CvResult(
+            cv=cv,
+            value=value,
+            mode=mode,
+            encoding=CvEncoding.SERVICE_DIRECT,
+            operation="write",
+            verified=bool(verify),
+            elapsed=0.01,
+        )
 
     def version(self) -> StationVersion:
         return StationVersion(raw=0x40, station_id=0x12)
@@ -635,11 +676,17 @@ _EXTRA_ARGV: dict[str, list[str]] = {
     "power": ["off"],
     "drive": ["30", "--address", "3"],
     "function": ["f2", "on", "--address", "3"],
+    # CV8 for the read (never in the confirmation set), CV3=20 for the write
+    # (the design's own worked-session example, also unconfirmed). The fakes
+    # below carry service-proven capabilities, so AUTO resolves to SERVICE and
+    # neither invocation needs an address.
+    "cv read": ["8"],
+    "cv write": ["3", "20"],
 }
 
 
 def _invocation(meta: CommandMeta) -> list[str]:
-    return [meta.path, *_EXTRA_ARGV.get(meta.path, [])]
+    return [*meta.path.split(), *_EXTRA_ARGV.get(meta.path, [])]
 
 
 def registered_paths(app: typer.Typer) -> set[str]:
@@ -728,13 +775,35 @@ def test_every_registered_command_has_a_metadata_row_and_vice_versa():
     assert registered_paths(app) == {c.path for c in COMMANDS}
 
 
+def _ordered_leaf_paths(group, prefix: str = "") -> list[str]:
+    """Every leaf path in the order the help page lists it, groups expanded in
+    place - `cv` contributes `cv read` then `cv write` where the group sits.
+
+    Walked through `list_commands`, not the `commands` dict: Typer assembles
+    `add_typer` groups after every plain command whatever order `register()`
+    ran in, and `main._TreeOrderGroup.list_commands` is the override that puts
+    the tree order back. The dict would test the defect away.
+    """
+    paths: list[str] = []
+    for name in group.list_commands(None):
+        cmd = group.commands[name]
+        path = f"{prefix} {name}".strip()
+        if hasattr(cmd, "commands"):
+            paths.extend(_ordered_leaf_paths(cmd, path))
+        else:
+            paths.append(path)
+    return paths
+
+
 def test_the_help_lists_the_commands_in_the_order_the_manifest_does():
     # `railctl --help` said version, status, schema while the manifest said status,
     # version, schema - two tables of contents for one tool, with a comment beside
     # COMMANDS claiming they matched. Typer lists commands in registration order, so
-    # this compares the Click tree itself, not the rendered page.
+    # this compares the Click tree itself, not the rendered page. Groups are
+    # expanded in place: the `cv` group's leaves must sit where the manifest
+    # puts them, between `monitor` and `schema`.
     click_app = typer.main.get_command(app)
-    assert list(click_app.commands) == [c.path for c in COMMANDS]
+    assert _ordered_leaf_paths(click_app) == [c.path for c in COMMANDS]
 
 
 def test_a_missing_registration_would_fail_the_drift_check():
@@ -804,6 +873,12 @@ def test_a_station_that_refuses_exits_with_a_code_the_command_publishes(meta, mo
     class Refusing:
         description = "fake"
         identity = "fake:refusing"
+        # A real attribute, so `__getattr__` never turns the capabilities the
+        # cv commands read into a refusal function; the refusal must come from
+        # the first station CALL, exactly as it does for every other command.
+        capabilities = Capabilities(
+            link_identity="fake:refusing", pom_read=False, service_direct_cv=True
+        )
 
         def __getattr__(self, name: str):
             def refuse(*_args, **_kwargs):
@@ -1058,6 +1133,8 @@ def test_schema_json_prints_one_envelope_with_the_registered_paths_in_tree_order
         "drive",
         "function",
         "monitor",
+        "cv read",
+        "cv write",
         "schema",
     ]
 
@@ -1280,7 +1357,7 @@ def test_address_after_the_subcommand_name_reaches_the_station(monkeypatch):
     # the copy this invocation is a usage error before `status` ever runs.
     seen: list[int | None] = []
 
-    def fake_open(target, *, default_address, capabilities_path, timing):
+    def fake_open(target, *, default_address, capabilities_path, timing, on_event=None):
         seen.append(default_address)
         return _FakeStatusStation()
 

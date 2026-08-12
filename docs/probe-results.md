@@ -805,3 +805,75 @@ claimed by reading the status bit. Panel and byte agreed.
   speed.
 
 Both are corrected in the file.
+
+## The session gap crosses invocations — SETTLED 2026-08-12
+
+The M8 acceptance's stage 3 failed both its CV3 writes with `61 13`, while every read in the
+same run succeeded — and the identical write, run by hand minutes later, succeeded with the
+same `24 12` direct telegram the 2026-08-06 session had proven. Reproduced deterministically:
+
+| sequence | result |
+| --- | --- |
+| `cv read 3` then `cv write 3 26` back-to-back (~1 s apart) | write fails `61 13` |
+| the same `cv write 3 26` after minutes of idle | succeeds, `63 14` echo, verified |
+
+This is the inter-session gap measured 2026-08-07 (sessions opened within ~1.5-1.75 s of the
+previous close fail wholesale with `61 13`), crossing an invocation boundary. The guard,
+`_await_session_gap`, keeps its memory on the programmer instance - and every CLI invocation
+builds a fresh one, so "a session closed 800 ms ago" is forgotten exactly when it matters.
+`_last_session_end = None` means UNKNOWN, and the code read it as "no session ever".
+
+Also settled by the same failure: the `decoder_no_ack` hint blamed a 750 mA programming track
+and said `retryable: false`. Both wrong here - the cause was the tool's own timing, and the
+failure heals with a 3 s wait. CV3 was confirmed unchanged (26) after both failed writes:
+nothing reached the decoder.
+
+## The retry that reported itself and never ran — SETTLED 2026-08-12
+
+The first fix for the cross-invocation gap (writes pay `_await_session_gap`, plus a retry-once
+when the instance's session history is unknown) failed its own acceptance rerun: stage 3 died
+`61 13` again, with the new hint claiming "the session-gap retry already ran". It had not run.
+
+Bracketing on the bench, same decoder, same `cv write 3 20`, each preceded by a `cv read 3`:
+
+| gap after the read's session close | result |
+| --- | --- |
+| ~3.2 s | write succeeds, verified |
+| ~5 s | write succeeds, verified |
+| ~10 s | write succeeds, verified |
+| minutes idle | write succeeds, verified |
+
+So the 3.0 s retry gap is sufficient — the retry itself never fired. The defect:
+`_retry_once_for_unknown_gap` read `_session_history_unknown` at **catch time**, but the failed
+attempt's own `finally` (`exit_service_mode`) had already stamped the session end and set the
+flag to `False`. By the time the exception arrived, history always looked "known" and the retry
+was skipped. The unit test passed because its `exit_service_mode` stub was a no-op that skipped
+exactly the state transition under test — the mock hid the bug.
+
+Fix: snapshot the flag **before** the attempt; test stubs now stamp `_last_session_end` and
+flip the flag like the real exit does. Mutation-proved: reverting the snapshot turns 4 tests red.
+
+Left open by the bracketing (all measured gaps followed a *read's* close): whether 3.0 s after a
+FAILED write's close also suffices — the retry path exercises exactly that. Answered by the
+acceptance run below: yes. Four commands in that run hit `61 13` on their first session, retried
+3.0 s after the failed attempt's own close, and every one succeeded on the second attempt.
+
+## M8 acceptance run — PASSED 2026-08-12
+
+Four stages, run as one invocation of `tests/hardware/test_m8_acceptance.py` against the
+MS450P22 (loco 3) on the programming track, isolated config dir, 2 min 18 s total:
+
+| stage | observable | result |
+| --- | --- | --- |
+| 1 | doctor, no `--power-on` | D5/D6/D7 ok, D3/D4/D10 honest `unknown` (track power off), capabilities saved |
+| 2 | batch read CV1,3,8,29 | all ok: CV1=3, CV3=26, CV8=145, CV29=14 |
+| 3 | verified write, restored | CV3: 26 → 20 → 26, every step `verified: true` by independent read-back |
+| 4 | CV1025 refusal | exit 15 `cv_out_of_range`, `1..1024` named, `railctl doctor` suggested, no telegram |
+
+The retry-once fix was visible working, not idle: stage 3's four back-to-back commands (write,
+read-back, restore, final read) each opened their first session moments after the previous
+invocation's close, each got `61 13`, and each healed on the one retry — reported honestly as a
+`service.session_retried` warning in the envelope, never silently. Stage 2's batch and stage 3's
+pre-read carried no warning: their previous session had closed while the operator sat at a gate,
+so the first attempt simply succeeded. Cost of the unknown-history retry: ~3 s per back-to-back
+invocation, paid only when the gap is actually hit.

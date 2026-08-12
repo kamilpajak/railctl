@@ -14,15 +14,34 @@ from collections.abc import Callable, Sequence
 from typing import NoReturn
 
 import typer
+from typer.core import TyperGroup
 
 from railctl.cli._errors import OutputContext, _internal_report, report_for, usage_report
-from railctl.cli._meta import GLOBAL_OPTIONS, root_epilog, typer_option
-from railctl.cli.commands import basics, doctor, monitor, power, schema, throttle
+from railctl.cli._meta import GLOBAL_OPTIONS, TREE_ORDER, root_epilog, typer_option
+from railctl.cli.commands import basics, cv, doctor, monitor, power, schema, throttle
 from railctl.cli.config import VERBOSE_ENV, Config, config_path, load_config
 from railctl.cli.deps import Settings, build_settings, configure_logging, context_for
 from railctl.cli.render import render_error
 from railctl.cli.result import ErrorReport
 from railctl.errors import RailctlError
+
+
+class _TreeOrderGroup(TyperGroup):
+    """Lists the root's commands in `_meta.COMMANDS` tree order.
+
+    Typer's `get_group_from_info` assembles every plain command first and every
+    `add_typer` group after them, whatever order the `register()` calls in this
+    file ran in - so the moment `cv` became a group (the first two-word paths,
+    M8), `railctl --help` listed it after `schema` while the manifest said it
+    comes before. That is the same two-tables-of-contents defect the COMMANDS
+    tuple exists to prevent, arriving through the class of the registration
+    instead of its order. `list_commands` is what both Click's and Typer's help
+    rendering iterate, and `tests/cli/test_schema.py` walks it too.
+    """
+
+    def list_commands(self, ctx: object) -> list[str]:
+        return sorted(super().list_commands(ctx), key=TREE_ORDER.index)  # type: ignore[arg-type]
+
 
 # No `no_args_is_help=True`: measured on typer 0.27.1 with this group callback and one
 # command, it puts 944 bytes of help on stdout and exits 2. The contract is error to stderr,
@@ -31,6 +50,7 @@ from railctl.errors import RailctlError
 # 457 on stderr, exit 2).
 app = typer.Typer(
     add_completion=False,
+    cls=_TreeOrderGroup,
     context_settings={"max_content_width": 100},
     # The design's fixed headings apply at EVERY level, and the root is the page an
     # operator reaches first; without this it was the one `--help` in the tool with no
@@ -155,12 +175,13 @@ def global_options(
 # `tests/cli/test_schema.py` compares that order against `_meta.COMMANDS`. Two
 # tables of contents for one tool is a bug that once shipped, so these calls
 # follow the tuple: doctor, status, version, power, stop, drive, function, monitor,
-# schema.
+# cv read, cv write, schema.
 doctor.register(app)
 basics.register(app)
 power.register(app)
 throttle.register(app)
 monitor.register(app)
+cv.register(app)
 schema.register(app)
 
 
