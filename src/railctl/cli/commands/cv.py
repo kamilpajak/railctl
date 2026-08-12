@@ -58,6 +58,7 @@ from railctl.cli.commands.throttle import preflight
 from railctl.cli.config import capabilities_path
 from railctl.cli.cvspec import parse_cv_spec
 from railctl.cli.deps import (
+    StationEventLog,
     UsageProblem,
     check_choice,
     close_after,
@@ -463,7 +464,10 @@ def register(app: typer.Typer) -> None:
                     stderr=output.stderr,
                     retry_argv=[*argv_hint, "--page", str(page)],
                 )
-            station = open_station(settings, capabilities_path=capabilities_path())
+            events = StationEventLog()
+            station = open_station(
+                settings, capabilities_path=capabilities_path(), on_event=events
+            )
             try:
                 resolved = resolve_mode(ProgMode(mode), station.capabilities, operation="read")
                 if resolved is ProgMode.POM:
@@ -515,6 +519,7 @@ def register(app: typer.Typer) -> None:
                 outcome = build_cv_read(
                     outcomes, mode=resolved, address=resolved_address, catalog=catalog
                 )
+                events.attach_to(outcome)
                 outcome.link = link_info(station, settings)
                 outcome.station = station_info(station)
             except BaseException:
@@ -618,7 +623,10 @@ def register(app: typer.Typer) -> None:
                 )
             wanted = MODE_FOR_TRACK[track]
             effective_verify = (track == TRACK_PROG) if verify is None else verify
-            station = open_station(settings, capabilities_path=capabilities_path())
+            events = StationEventLog()
+            station = open_station(
+                settings, capabilities_path=capabilities_path(), on_event=events
+            )
             try:
                 resolved_address: int | None = None
                 if wanted is ProgMode.POM:
@@ -643,6 +651,7 @@ def register(app: typer.Typer) -> None:
                     name=name,
                     verify=effective_verify,
                 )
+                events.attach_to(outcome)
                 outcome.link = link_info(station, settings)
                 outcome.station = station_info(station)
             except BaseException:

@@ -1357,7 +1357,7 @@ def test_address_after_the_subcommand_name_reaches_the_station(monkeypatch):
     # the copy this invocation is a usage error before `status` ever runs.
     seen: list[int | None] = []
 
-    def fake_open(target, *, default_address, capabilities_path, timing):
+    def fake_open(target, *, default_address, capabilities_path, timing, on_event=None):
         seen.append(default_address)
         return _FakeStatusStation()
 

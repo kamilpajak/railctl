@@ -145,12 +145,18 @@ class Station:
         default_address: int | None = None,
         capabilities_path: Path | None = None,
         timing: Timing = TIMING,
+        on_event: Callable[[str, dict[str, object]], None] | None = None,
     ) -> Station:
         """Resolve `target`, open the link, then load capabilities by its identity.
 
         The identity is not knowable before the link opens - it comes from the transport, which
         `open_link` has already asked - so this order (link, then capabilities) is forced, not a
         style choice.
+
+        `on_event` reaches the constructor unchanged: it is how a CLI command
+        hears `cv.stale_result`, `page.unverified` and the other `emit()`
+        events, which are envelope warning content by design - without a
+        callback here every one of them was dropped on the floor.
         """
         link = open_link(target)
         capabilities = (
@@ -164,6 +170,7 @@ class Station:
             default_address=default_address,
             capabilities_path=capabilities_path,
             timing=timing,
+            on_event=on_event,
         )
 
     # -- read-only surface ---------------------------------------------------

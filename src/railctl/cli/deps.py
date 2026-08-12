@@ -13,8 +13,9 @@ from __future__ import annotations
 import dataclasses
 import logging
 import os
-from collections.abc import Mapping, Sequence
+from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass
+from enum import Enum
 from pathlib import Path
 from typing import Final, Literal, TextIO
 
@@ -429,7 +430,54 @@ def configure_logging(verbose: int, stderr: TextIO) -> None:
     wire.setLevel(logging.DEBUG if verbose >= 2 else logging.WARNING)
 
 
-def open_station(settings: Settings, *, capabilities_path: Path | None) -> Station:
+def _jsonable(value: object) -> object:
+    """A payload value the JSON renderer can serialise - `json.dumps` in
+    `render.py` runs with no `default=`, so an enum or tuple in a warning's
+    details would crash the rendering of a result that already happened."""
+    if isinstance(value, Enum):
+        return value.value
+    if isinstance(value, (list, tuple)):
+        return [_jsonable(item) for item in value]
+    if isinstance(value, dict):
+        return {str(key): _jsonable(item) for key, item in value.items()}
+    if value is None or isinstance(value, (bool, int, float, str)):
+        return value
+    return str(value)
+
+
+class StationEventLog:
+    """Collects the `Station.emit` events one command's operations produce, so
+    the command can publish them as envelope warnings.
+
+    The design fixes `cv.stale_result`, `page.unverified`,
+    `cv.unexercised_band` and friends as envelope warning content, and before
+    this seam existed `open_station` passed no callback at all - every event
+    was dropped on the floor for every command. Pass an instance as
+    `open_station(..., on_event=log)` and call `attach_to(outcome)` once the
+    result is built.
+    """
+
+    def __init__(self) -> None:
+        self.events: list[tuple[str, dict[str, object]]] = []
+
+    def __call__(self, name: str, payload: dict[str, object]) -> None:
+        self.events.append((name, dict(payload)))
+
+    def attach_to(self, outcome: CommandResult) -> None:
+        for name, payload in self.events:
+            outcome.warn(
+                name,
+                f"the station reported {name} during this command",
+                **{key: _jsonable(value) for key, value in payload.items()},
+            )
+
+
+def open_station(
+    settings: Settings,
+    *,
+    capabilities_path: Path | None,
+    on_event: Callable[[str, dict[str, object]], None] | None = None,
+) -> Station:
     """Open a `Station` for `settings.target`.
 
     Raises straight through on failure and adds no `try`/`except` of its own:
@@ -442,6 +490,7 @@ def open_station(settings: Settings, *, capabilities_path: Path | None) -> Stati
         default_address=settings.address,
         capabilities_path=capabilities_path,
         timing=TIMING,
+        on_event=on_event,
     )
 
 

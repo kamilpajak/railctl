@@ -472,6 +472,7 @@ class FakeCvStation:
         read_errors: dict[int, Exception] | None = None,
         write_verified: bool | None = None,
         write_error: Exception | None = None,
+        emit_events: list[tuple[str, dict[str, object]]] | None = None,
     ) -> None:
         self.capabilities = capabilities or Capabilities(
             link_identity=self.identity, pom_read=False, service_direct_cv=True
@@ -485,6 +486,18 @@ class FakeCvStation:
         self.singleton_calls: list[dict[str, object]] = []
         self.write_calls: list[dict[str, object]] = []
         self.status_calls = 0
+        #: Events the fake emits through the `on_event` callback `Station.open`
+        #: was handed, once the first facade call runs - `None` callback means
+        #: they are dropped, exactly like the real `Station.emit`.
+        self.emit_events = emit_events or []
+        self.on_event: object | None = None
+
+    def _emit_all(self) -> None:
+        if self.on_event is None:
+            return
+        for name, payload in self.emit_events:
+            self.on_event(name, payload)
+        self.emit_events = []
 
     def status(self) -> StationStatus:
         self.status_calls += 1
@@ -510,6 +523,7 @@ class FakeCvStation:
 
     def cv_read_many(self, specs, *, address=None, mode=ProgMode.SERVICE, on_progress=None):
         self.read_calls.append({"specs": list(specs), "address": address, "mode": mode})
+        self._emit_all()
         outcomes = []
         # Station wire order, like the real batch: sorted by (page, cv). The
         # CLI owns putting rows back into request order.
@@ -540,6 +554,7 @@ class FakeCvStation:
         self.write_calls.append(
             {"cv": cv, "value": value, "address": address, "mode": mode, "verify": verify}
         )
+        self._emit_all()
         if self.write_error is not None:
             raise self.write_error
         # What the fixed station reports: True after an independent read-back
@@ -566,7 +581,13 @@ POM_CAPS = Capabilities(link_identity=FakeCvStation.identity, pom_read=None)
 
 
 def _install(monkeypatch, fake: FakeCvStation) -> FakeCvStation:
-    monkeypatch.setattr(Station, "open", staticmethod(lambda *a, **k: fake))
+    def fake_open(*_a, **kwargs):
+        # The same seam the real `Station.open` provides: the callback the CLI
+        # hands over is what the fake's `_emit_all` calls.
+        fake.on_event = kwargs.get("on_event")
+        return fake
+
+    monkeypatch.setattr(Station, "open", staticmethod(fake_open))
     return fake
 
 
@@ -857,6 +878,45 @@ def test_cv_read_a_mixed_batch_is_a_partial_result_not_an_error(monkeypatch):
     assert payload["result"]["failed"] == 1
     statuses = [row["status"] for row in payload["result"]["cvs"]]
     assert statuses == ["ok", "no_response"]
+
+
+def test_cv_read_station_events_reach_the_envelope_as_warnings(monkeypatch):
+    """C5: `cv.stale_result`, `page.unverified` and friends are envelope
+    warning content by design, and before the `on_event` seam existed they
+    were dropped on the floor for every command. The payload is serialised -
+    a ProgMode enum or a tuple must not crash the JSON renderer."""
+    _install(
+        monkeypatch,
+        FakeCvStation(
+            read_values={8: 145},
+            emit_events=[
+                ("cv.stale_result", {"cv": 8, "raw_cv": 3, "encoding": "SERVICE_DIRECT"}),
+                ("page.unverified", {"page": (10, 2), "mode": ProgMode.SERVICE}),
+            ],
+        ),
+    )
+    result = runner.invoke(app, ["cv", "read", "8", "--format", "json"])
+    assert result.exit_code == 0, result.stderr
+    warnings = json.loads(result.stdout)["warnings"]
+    by_name = {w["name"]: w for w in warnings}
+    assert by_name["cv.stale_result"]["details"] == {
+        "cv": 8,
+        "raw_cv": 3,
+        "encoding": "SERVICE_DIRECT",
+    }
+    assert by_name["page.unverified"]["details"] == {"page": [10, 2], "mode": "service"}
+    assert "cv.stale_result" in by_name["cv.stale_result"]["message"]
+
+
+def test_cv_write_station_events_reach_the_envelope_as_warnings(monkeypatch):
+    _install(
+        monkeypatch,
+        FakeCvStation(emit_events=[("cv.unexercised_band", {"cv": 300, "page": 2})]),
+    )
+    result = runner.invoke(app, ["cv", "write", "3", "20", "--format", "json"])
+    assert result.exit_code == 0, result.stderr
+    warnings = json.loads(result.stdout)["warnings"]
+    assert {"cv": 300, "page": 2} in [w["details"] for w in warnings]
 
 
 def test_cv_write_prog_happy_path_verifies_by_default(monkeypatch):

@@ -28,6 +28,7 @@ from railctl.cli.commands.basics import STATUS_SCHEMA, VERSION_SCHEMA, build_sta
 from railctl.cli.config import Config
 from railctl.cli.deps import (
     Settings,
+    StationEventLog,
     UsageProblem,
     build_settings,
     configure_logging,
@@ -40,7 +41,7 @@ from railctl.cli.deps import (
 )
 from railctl.cli.result import CommandResult
 from railctl.errors import AbortedError, ConfirmationRequiredError, TransportError
-from railctl.station import TIMING, Station
+from railctl.station import TIMING, ProgMode, Station
 from railctl.xbus.replies import StationStatus, StationVersion
 
 
@@ -643,7 +644,7 @@ class _FakeStation:
 def test_open_station_forwards_target_address_capabilities_path_and_timing(monkeypatch, tmp_path):
     calls = []
 
-    def fake_open(target, *, default_address, capabilities_path, timing):
+    def fake_open(target, *, default_address, capabilities_path, timing, on_event=None):
         calls.append((target, default_address, capabilities_path, timing))
         return _FakeStation()
 
@@ -652,6 +653,38 @@ def test_open_station_forwards_target_address_capabilities_path_and_timing(monke
     settings = _settings(target="serial:auto", address=3)
     open_station(settings, capabilities_path=caps)
     assert calls == [("serial:auto", 3, caps, TIMING)]
+
+
+def test_open_station_forwards_the_on_event_callback(monkeypatch):
+    seen = []
+
+    def fake_open(target, *, default_address, capabilities_path, timing, on_event=None):
+        seen.append(on_event)
+        return _FakeStation()
+
+    monkeypatch.setattr(Station, "open", staticmethod(fake_open))
+    log = StationEventLog()
+    open_station(_settings(), capabilities_path=None, on_event=log)
+    assert seen == [log]
+
+
+def test_station_event_log_serialises_payloads_the_json_renderer_can_carry():
+    # `render.py` runs `json.dumps` with no `default=`, so an enum, a tuple, a
+    # nested dict or an arbitrary object in an event payload must be converted
+    # before it reaches the envelope - not crash the rendering of a result
+    # that already happened.
+    class Opaque:
+        def __str__(self) -> str:
+            return "opaque"
+
+    log = StationEventLog()
+    log("page.unverified", {"page": (10, 2), "nested": {"mode": ProgMode.POM}, "obj": Opaque()})
+    outcome = CommandResult(schema="railctl/cv-read/v1", command="cv read")
+    log.attach_to(outcome)
+    warning = outcome.warnings[0]
+    assert warning.name == "page.unverified"
+    assert warning.details == {"page": [10, 2], "nested": {"mode": "pom"}, "obj": "opaque"}
+    json.dumps(outcome.envelope())  # must not raise
 
 
 def test_open_station_lets_transport_error_propagate(monkeypatch):
@@ -786,7 +819,7 @@ def test_both_wired_commands_open_the_station_with_the_resolved_arguments(monkey
     # without it silently discards them.
     calls = []
 
-    def fake_open(target, *, default_address, capabilities_path, timing):
+    def fake_open(target, *, default_address, capabilities_path, timing, on_event=None):
         calls.append((target, default_address, capabilities_path, timing))
         return _StatusStation()
 
