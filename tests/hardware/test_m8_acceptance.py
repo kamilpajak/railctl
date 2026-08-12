@@ -17,10 +17,14 @@ WHAT YOU NEED AT THE BENCH
       it found
 
 THIS FILE WRITES ONE DECODER CV: stage 3 writes CV3 (acceleration rate), reads it
-back, and then writes the original value back. That is the milestone's acceptance
-sentence and it is the only write. If the read-back disagrees, STOP - do not rerun
-until you understand why; a wrong CV3 only changes the acceleration curve, but a
-verification that failed is a finding to record, not to retry away.
+back, and then writes the original value back - the restore sits in a `finally`,
+so it runs even when a check between the write and the restore fails. That is the
+milestone's acceptance sentence and it is the only write. If the read-back
+disagrees, STOP - do not rerun until you understand why; a wrong CV3 only changes
+the acceleration curve, but a verification that failed is a finding to record,
+not to retry away. Expect each `cv write` to take two service-mode sessions: the
+write, then the command's own independent read-back (that read-back is what
+`verified: true` means).
 
 Your real ~/.config/railctl/capabilities.json is never touched: the run writes into
 a temporary directory and prints the path. Stage 1 populates it with a doctor run so
@@ -159,28 +163,52 @@ def test_2_reading_the_identity_cvs_returns_plausible_values():
 def test_3_writing_cv3_and_reading_it_back_agrees_then_restores_the_original():
     """Stage 3. THE ONE WRITE: CV3, verified by read-back, then put back.
 
-    `cv write` verifies by default, so the command's own `verified: true` is the
-    first half of the acceptance; the explicit `cv read 3` afterwards is the
-    second, independent half - a station echo proves the station produced a
-    value, not that the decoder kept it.
+    One observable: "a verified write, restored" (M6's rule - the reads exist
+    to serve the write, not as observables of their own). Three properties an
+    earlier version of this stage got wrong, all corrected here:
+
+    * NOTHING touches the station before the gate - the pre-read of CV3 runs
+      after you press Enter, so the values are printed then, not promised in
+      the gate text.
+    * `verified: true` is now a real claim: since the verify fix, `cv write`
+      performs its own independent `cv read` after the write and only reports
+      true when it agreed. The explicit `_read_one(3)` afterwards is the
+      second witness, measured by a separate invocation.
+    * The restore is in a `finally`, so a failing assertion between the write
+      and the restore cannot leave CV3 changed - the file's own "writes the
+      original value back" promise held only on the green path before. The
+      finally PRINTS what it restored and whether the restore verified (an
+      assert there could mask the original failure); the green-path asserts
+      on the restore run after the try block.
     """
+    _gate(
+        "STAGE 3 of 4 - THIS WRITES CV3.\n"
+        "The stage reads CV3, writes a different value (20, or 21 if CV3 is\n"
+        "already 20), reads it back, and then writes the original value back in\n"
+        "a finally - the restore runs even if a check in the middle fails.\n"
+        "CV3 is the acceleration rate - a wrong value cannot move the\n"
+        "locomotive, but a failed read-back is a finding: record it, do not\n"
+        "rerun blindly."
+    )
     original = _read_one(3)
     target = ACCEPTANCE_CV3_VALUE if original != ACCEPTANCE_CV3_VALUE else ALTERNATE_CV3_VALUE
-    _gate(
-        f"STAGE 3 of 4 - THIS WRITES CV3.\n"
-        f"Current CV3 = {original}. The stage writes {target}, reads it back, and\n"
-        f"then writes {original} back. CV3 is the acceleration rate - a wrong value\n"
-        f"cannot move the locomotive, but a failed read-back is a finding: record\n"
-        f"it, do not rerun blindly."
-    )
-    written = _run("cv", "write", "3", str(target), "--format", "json")
-    assert written.exit_code == 0, written.stderr
-    body = json.loads(written.stdout)
-    assert body["schema"] == "railctl/cv-write/v1"
-    assert body["result"]["verified"] is True, body["result"]
-    assert _read_one(3) == target, "the independent read-back must agree with the write"
-
-    restored = _run("cv", "write", "3", str(original), "--format", "json")
+    print(f"\nCV3 = {original}; writing {target}, restoring {original} afterwards")
+    try:
+        written = _run("cv", "write", "3", str(target), "--format", "json")
+        assert written.exit_code == 0, written.stderr
+        body = json.loads(written.stdout)
+        assert body["schema"] == "railctl/cv-write/v1"
+        assert body["result"]["verified"] is True, body["result"]
+        assert _read_one(3) == target, "the independent read-back must agree with the write"
+    finally:
+        restored = _run("cv", "write", "3", str(original), "--format", "json")
+        restore_verified: object = "unknown"
+        if restored.exit_code == 0 and restored.stdout.strip():
+            restore_verified = json.loads(restored.stdout)["result"]["verified"]
+        print(
+            f"\nrestore: wrote CV3 = {original} back "
+            f"(exit {restored.exit_code}, verified: {restore_verified})"
+        )
     assert restored.exit_code == 0, restored.stderr
     assert json.loads(restored.stdout)["result"]["verified"] is True
     assert _read_one(3) == original, "the decoder must leave this stage as it entered it"
