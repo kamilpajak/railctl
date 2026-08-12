@@ -72,6 +72,23 @@ def _isolated(monkeypatch, bench_config):
         monkeypatch.delenv(key)
 
 
+def _require_stage_1(bench_config) -> None:
+    """Stages that resolve `--mode service` need the capabilities stage 1 wrote.
+
+    The config directory is a fresh temporary directory every invocation, so
+    running one stage alone (`-k test_3`) resolves against a bench with no
+    proven encodings and dies with exit 18 `service_encoding_unknown` - a
+    confusing verdict at the bench (it happened on 2026-08-12). Skip with the
+    real reason instead: run the whole file, stage 1 included.
+    """
+    if not (bench_config / "railctl" / "capabilities.json").exists():
+        pytest.skip(
+            "stage 1 has not run in this invocation, so there are no proven service-mode "
+            "encodings to resolve against - run the whole file, not a single stage: "
+            "uv run pytest -m hardware -s tests/hardware/test_m8_acceptance.py"
+        )
+
+
 def _gate(question: str) -> None:
     """Stop, say what is about to happen, and wait. One observable per stage.
 
@@ -130,7 +147,7 @@ def test_1_doctor_populates_the_capabilities_the_cv_commands_resolve_against(ben
     print(f"\ncapabilities written under {bench_config}")
 
 
-def test_2_reading_the_identity_cvs_returns_plausible_values():
+def test_2_reading_the_identity_cvs_returns_plausible_values(bench_config):
     """Stage 2. Reads only: CV1, CV3, CV8, CV29 in one batch.
 
     Plausibility, not just presence: CV8 is the one value this bench KNOWS
@@ -139,6 +156,7 @@ def test_2_reading_the_identity_cvs_returns_plausible_values():
     batch must come back complete - a `no_response` row here means wheel
     contact, and the warning on stderr should say exactly that.
     """
+    _require_stage_1(bench_config)
     _gate(
         "STAGE 2 of 4 - reading CV1, CV3, CV8, CV29 in service mode.\n"
         "Reads only; nothing is written. Expect a few seconds per CV."
@@ -160,7 +178,7 @@ def test_2_reading_the_identity_cvs_returns_plausible_values():
     )
 
 
-def test_3_writing_cv3_and_reading_it_back_agrees_then_restores_the_original():
+def test_3_writing_cv3_and_reading_it_back_agrees_then_restores_the_original(bench_config):
     """Stage 3. THE ONE WRITE: CV3, verified by read-back, then put back.
 
     One observable: "a verified write, restored" (M6's rule - the reads exist
@@ -181,6 +199,7 @@ def test_3_writing_cv3_and_reading_it_back_agrees_then_restores_the_original():
       assert there could mask the original failure); the green-path asserts
       on the restore run after the try block.
     """
+    _require_stage_1(bench_config)
     _gate(
         "STAGE 3 of 4 - THIS WRITES CV3.\n"
         "The stage reads CV3, writes a different value (20, or 21 if CV3 is\n"
