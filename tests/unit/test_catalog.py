@@ -354,3 +354,14 @@ def test_a_malformed_container_is_a_catalog_error_not_a_type_error(tmp_path: Pat
     """
     with pytest.raises(CatalogError, match="array of tables"):
         load_catalog(_write(tmp_path, body))
+
+
+def test_a_hollow_catalog_is_damage_not_an_empty_answer(tmp_path: Path):
+    """A correct header with zero blocks is what a truncated file looks like.
+
+    It used to load as {} - and M9's backup would have read zero CVs and reported a
+    complete, empty backup. The >=60 floor is test-only and never runs against an
+    installed file, so the load-time guard is the only one production ever meets.
+    """
+    with pytest.raises(CatalogError, match="truncated"):
+        load_catalog(_write(tmp_path, ""))

@@ -111,6 +111,16 @@ def load_catalog(path: Path | None = None) -> dict[int, CatalogEntry]:
         # A [[cv]] always wins over a [[range]] covering the same number.
         entries[entry.num] = entry
 
+    if not entries:
+        # A correctly-headed file with no blocks parsed cleanly and loaded as {} - which a
+        # truncated shipped TOML (partial write, corrupt wheel) produces exactly. M9's backup
+        # would then read zero CVs and report a complete, empty backup. The >=60 floor lives
+        # in the tests and never runs against an installed file, so this is the only guard
+        # that reaches production. Zero entries is not a catalog; it is damage.
+        raise CatalogError(
+            "the catalog contains no [[cv]] or [[range]] blocks - the file is truncated "
+            "or damaged; reinstall railctl or restore zimo.toml"
+        )
     _check_slugs_unique(entries)
     return dict(sorted(entries.items()))
 
