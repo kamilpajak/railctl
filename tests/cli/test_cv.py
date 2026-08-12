@@ -1154,6 +1154,20 @@ def test_cv_write_a_blocked_confirmation_on_main_suggests_the_main_track_argv(mo
     ]
 
 
+def test_cv_write_confirmation_refusal_comes_before_the_station_opens(monkeypatch):
+    """C10: the refusal test proved the refusal, not its ORDER - a fake whose
+    `open` raises proves the gate runs before any port is touched, so a
+    blocked confirmation costs the operator nothing on the wire."""
+
+    def _boom(*_a, **_k):
+        raise AssertionError("the confirmation refusal must come before the station opens")
+
+    monkeypatch.setattr(Station, "open", staticmethod(_boom))
+    result = runner.invoke(app, ["cv", "write", "29", "6", "--non-interactive", "--format", "json"])
+    assert result.exit_code == 2, result.stderr
+    assert _stderr_envelope(result)["code"] == "confirmation_required"
+
+
 def test_cv_write_yes_answers_the_confirmation(monkeypatch):
     fake = _install(monkeypatch, FakeCvStation())
     result = runner.invoke(app, ["cv", "write", "29", "6", "--yes", "--format", "json"])
