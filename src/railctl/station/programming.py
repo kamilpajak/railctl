@@ -336,10 +336,19 @@ class CvProgrammer:
         Idempotent by construction for both callers: re-reading a CV reads it
         again, and re-writing the same value writes the same value.
         """
+        # Snapshot BEFORE the attempt: a failed attempt's own `finally` exits the
+        # session and sets `_session_history_unknown = False`, so reading the flag
+        # at catch time always says "known" and the retry never fires. That is
+        # exactly how the first shipped version behaved on the bench (2026-08-12,
+        # second acceptance run): the hint claimed the retry had run while the
+        # helper had re-raised immediately - and the unit test missed it because
+        # its mocked `exit_service_mode` skipped the very state transition that
+        # breaks the check.
+        history_was_unknown = self._session_history_unknown
         try:
             return attempt()
         except DecoderNoAckError:
-            if not self._session_history_unknown:
+            if not history_was_unknown:
                 raise
             self._station.emit(
                 "service.session_retried",

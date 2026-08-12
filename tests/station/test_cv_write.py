@@ -1550,7 +1550,15 @@ def test_a_first_session_no_ack_on_a_fresh_instance_is_retried_once(bench_factor
 
     events: list[tuple[str, dict]] = []
     monkeypatch.setattr(programmer, "await_result", flaky_await)
-    monkeypatch.setattr(programmer, "exit_service_mode", lambda **_: None)
+
+    def _exit_like_the_real_one(**_):
+        # The real exit stamps the clock and flips the history flag - the state
+        # transition the retry's snapshot exists to survive. A bare no-op stub
+        # here is what let the first version's read-after-mutation bug ship.
+        programmer._last_session_end = bench.clock.monotonic()
+        programmer._session_history_unknown = False
+
+    monkeypatch.setattr(programmer, "exit_service_mode", _exit_like_the_real_one)
     monkeypatch.setattr(bench.station, "emit", lambda name, payload: events.append((name, payload)))
     bench.expect(cmd_station_status(), reply=STATUS_POWERED)
     bench.expect(cmd_z21_cv_write(8, 145), reply=ACK)
@@ -1578,7 +1586,15 @@ def test_a_second_no_ack_after_the_retry_is_the_real_thing(bench_factory, monkey
         return NoAck()
 
     monkeypatch.setattr(programmer, "await_result", always_no_ack)
-    monkeypatch.setattr(programmer, "exit_service_mode", lambda **_: None)
+
+    def _exit_like_the_real_one(**_):
+        # The real exit stamps the clock and flips the history flag - the state
+        # transition the retry's snapshot exists to survive. A bare no-op stub
+        # here is what let the first version's read-after-mutation bug ship.
+        programmer._last_session_end = bench.clock.monotonic()
+        programmer._session_history_unknown = False
+
+    monkeypatch.setattr(programmer, "exit_service_mode", _exit_like_the_real_one)
     bench.expect(cmd_station_status(), reply=STATUS_POWERED)
     bench.expect(cmd_z21_cv_write(8, 145), reply=ACK)
     bench.expect(cmd_station_status(), reply=STATUS_POWERED)
