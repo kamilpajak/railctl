@@ -547,6 +547,10 @@ class _BackupRun:
                 "interrupted; the target was stdout (--out -), so no partial file was written"
             ) from None
         partial = _document(collection, context, interrupted=True)
+        # Assigned BEFORE writing, so the ndjson `finally` reads its counts
+        # and `complete` off the SAME document the file was written from -
+        # two channels describing one run must not disagree about it.
+        self.document = partial
         write_backup_to(partial, self.plan.path)
         self.written = self.plan.path
         raise AbortedError(
@@ -661,9 +665,21 @@ def _write_error(report: ErrorReport, output: OutputContext) -> None:
     output.stderr.write(json.dumps(report.envelope(), separators=(",", ":")) + "\n")
 
 
-def _summary_counts(collection: _Collection | None) -> dict[str, int]:
+#: The summary line's five count keys, in the file's own order.
+_COUNT_KEYS: Final[tuple[str, ...]] = ("requested", "ok", "no_response", "error", "skipped")
+
+
+def _summary_counts(run: _BackupRun | None) -> dict[str, object]:
+    """The stream summary's counts, read off the run's document when one was
+    built - the SAME rows the file was written from, so the counts sum to
+    their own `requested` - and off the incremental collection only when no
+    document exists (an abort or refusal before one could be assembled)."""
+    if run is not None and run.document is not None:
+        summary = run.document.summary
+        return {key: summary[key] for key in _COUNT_KEYS}
+    collection = run.collection if run is not None else None
     if collection is None:
-        return dict.fromkeys(("requested", "ok", "no_response", "error", "skipped"), 0)
+        return dict.fromkeys(_COUNT_KEYS, 0)
     counts = dict.fromkeys(ReadStatus, 0)
     for record in collection.records.values():
         counts[record.status] += 1
@@ -757,7 +773,7 @@ def _run_ndjson(
             written = backup_run.written if backup_run is not None else None
             document = backup_run.document if backup_run is not None else None
             complete = bool(document.summary["complete"]) if document is not None else False
-            counts = _summary_counts(backup_run.collection if backup_run is not None else None)
+            counts = _summary_counts(backup_run)
             stream.summary(
                 **counts,
                 complete=complete,

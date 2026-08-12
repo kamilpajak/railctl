@@ -739,6 +739,8 @@ def test_backup_ctrl_c_writes_the_partial_file_and_exits_9(monkeypatch, tmp_path
     document = read_backup(out)
     assert document.interrupted is True
     assert document.summary["requested"] == len(CURATED)
+    # An interrupted run is not complete by definition, whatever its rows say.
+    assert document.summary["complete"] is False
     details = {record.detail for record in document.cvs}
     assert "not attempted" in details
 
@@ -834,9 +836,19 @@ def test_backup_ndjson_ctrl_c_streams_the_summary_after_the_partial_file(monkeyp
     summary = lines[-1]
     assert summary["type"] == "summary"
     assert summary["exit_code"] == 9
-    assert summary["complete"] is False  # the RUN was cut short, whatever the file says
     assert summary["path"] == str(out)
-    assert read_backup(out).interrupted is True
+    document = read_backup(out)
+    assert document.interrupted is True
+    # The stream and the file describe the SAME run: every summary count and
+    # `complete` on the last line match the document the file was written
+    # from, and the counts sum to their own `requested`.
+    for key in ("requested", "ok", "no_response", "error", "skipped", "complete"):
+        assert summary[key] == document.summary[key], key
+    assert summary["complete"] is False
+    assert (
+        summary["ok"] + summary["no_response"] + summary["error"] + summary["skipped"]
+        == summary["requested"]
+    )
     assert _stderr_envelope(result)["code"] == "aborted"
 
 

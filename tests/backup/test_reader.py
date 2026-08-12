@@ -50,6 +50,19 @@ def test_an_interrupted_file_round_trips_with_the_flag_set(tmp_path):
     assert read_backup(target).interrupted is True
 
 
+def test_an_interrupted_all_ok_file_round_trips_with_complete_false(tmp_path):
+    # Writer and reader share the rule through `BackupDocument.summary`: the
+    # stored summary of an interrupted file says `complete: false` even with
+    # every row ok, and the reader's recomputation agrees rather than
+    # rejecting its own writer's output.
+    records = (CvRecord(cv=1, name="primary_address", status=ReadStatus.OK, value=3),)
+    target = tmp_path / "interrupted.json"
+    write_backup_to(make_document(cvs=records, interrupted=True), target)
+    document = read_backup(target)
+    assert document.interrupted is True
+    assert document.summary["complete"] is False
+
+
 def test_non_ascending_row_order_is_tolerated_and_kept(tmp_path):
     def reverse_rows(parsed: dict) -> None:
         parsed["cvs"] = list(reversed(parsed["cvs"]))

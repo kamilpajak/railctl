@@ -117,8 +117,12 @@ class BackupDocument:
     @property
     def summary(self) -> dict[str, object]:
         """Counts derived from the rows. `complete` is `no_response == 0 and
-        error == 0` - a `skipped` row is a recorded decision, not a hole, so
-        skips never make a file incomplete."""
+        error == 0 and not interrupted` - a `skipped` row is a recorded
+        decision, not a hole, so skips never make a file incomplete; an
+        interrupted run is not complete by definition, whatever its rows say.
+        Both the writer (which stores this) and the reader (which recomputes
+        and compares it) go through this one property, so the stored
+        `complete` of an interrupted file is false on both sides."""
         counts = dict.fromkeys(ReadStatus, 0)
         for record in self.cvs:
             counts[record.status] += 1
@@ -128,5 +132,9 @@ class BackupDocument:
             "no_response": counts[ReadStatus.NO_RESPONSE],
             "error": counts[ReadStatus.ERROR],
             "skipped": counts[ReadStatus.SKIPPED],
-            "complete": counts[ReadStatus.NO_RESPONSE] == 0 and counts[ReadStatus.ERROR] == 0,
+            "complete": (
+                counts[ReadStatus.NO_RESPONSE] == 0
+                and counts[ReadStatus.ERROR] == 0
+                and not self.interrupted
+            ),
         }

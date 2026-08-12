@@ -188,6 +188,14 @@ def test_an_error_row_makes_the_file_incomplete():
     assert summary["complete"] is False
 
 
+def test_an_interrupted_document_is_never_complete():
+    # Every row ok, yet the run was cut short: `complete` answers for the
+    # run, and an interrupted run is not complete by definition.
+    records = (CvRecord(cv=1, name="primary_address", status=ReadStatus.OK, value=3),)
+    summary = json.loads(write_backup(make_document(cvs=records, interrupted=True)))["summary"]
+    assert summary["complete"] is False
+
+
 def test_interrupted_is_absent_when_false_and_sits_before_cvs_when_true():
     completed = write_backup(make_document())
     assert "interrupted" not in json.loads(completed)
