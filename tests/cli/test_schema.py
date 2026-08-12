@@ -219,6 +219,7 @@ def test_manifest_with_no_path_returns_the_tree_shape():
         "monitor",
         "cv read",
         "cv write",
+        "backup",
         "schema",
     ]
     assert {o["name"] for o in payload["global_options"]} == {o.name for o in GLOBAL_OPTIONS}
@@ -463,6 +464,7 @@ def test_build_schema_returns_the_tree_when_no_path_is_given():
         "monitor",
         "cv read",
         "cv write",
+        "backup",
         "schema",
     ]
 
@@ -577,6 +579,21 @@ class _FakeStatusStation:
     def status(self) -> StationStatus:
         return StationStatus.from_raw(self.raw_status)
 
+    def cv_read(self, cv, *, address=None, mode=ProgMode.SERVICE, page=None):
+        # `backup` reads the CV31/CV32 selectors and CV29 as singletons. The
+        # selectors answer 0 - the default page - so the generic drives here
+        # never hit backup's exit-17 page refusal; everything else answers the
+        # same 145 the batch below does.
+        return CvResult(
+            cv=cv,
+            value=0 if cv in (31, 32) else 145,
+            mode=ProgMode.SERVICE,
+            encoding=CvEncoding.SERVICE_DIRECT,
+            operation="read",
+            verified=None,
+            elapsed=0.01,
+        )
+
     def cv_read_many(self, specs, *, address=None, mode=ProgMode.SERVICE, on_progress=None):
         return [
             CvReadOutcome(
@@ -682,6 +699,10 @@ _EXTRA_ARGV: dict[str, list[str]] = {
     # neither invocation needs an address.
     "cv read": ["8"],
     "cv write": ["3", "20"],
+    # `backup` always needs an address (the file is named after the
+    # locomotive), and `--out -` keeps these generic drives from touching the
+    # real ~/railctl-backups - the environment fixture isolates XDG, not HOME.
+    "backup": ["--address", "3", "--out", "-"],
 }
 
 
@@ -1135,6 +1156,7 @@ def test_schema_json_prints_one_envelope_with_the_registered_paths_in_tree_order
         "monitor",
         "cv read",
         "cv write",
+        "backup",
         "schema",
     ]
 
