@@ -247,6 +247,7 @@ EVENT_NAMES: Final[tuple[str, ...]] = (
     "power.off",
     "loco.emergency_stop",
     "service.entered",
+    "service.session_retried",
     "reply.unknown",
 )
 

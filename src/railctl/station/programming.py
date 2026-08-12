@@ -11,7 +11,7 @@ from __future__ import annotations
 
 from collections.abc import Callable, Sequence
 from dataclasses import dataclass
-from typing import TYPE_CHECKING, Final, Literal
+from typing import TYPE_CHECKING, Final, Literal, TypeVar
 
 from railctl.errors import (
     CvOutOfRangeError,
@@ -124,6 +124,8 @@ class TimedOut:
 
 WaitOutcome = Reply | TimedOut
 ResultChannelSeen = Literal["broadcast", "poll"]
+
+_T = TypeVar("_T")
 
 SERVICE_ENCODING_ORDER: Final[tuple[tuple[str, CvEncoding], ...]] = (
     ("z21_cv_opcodes", CvEncoding.Z21_16BIT),
@@ -300,6 +302,54 @@ class CvProgrammer:
         # closed since the gap it owed was already paid. See
         # `_await_session_gap`.
         self._last_session_end: float | None = None
+        # Whether this INSTANCE has ever closed a service session. `None` in
+        # `_last_session_end` is two different facts wearing one value: "the
+        # gap was paid" and "this instance has no idea when the previous
+        # invocation's session closed". Every CLI invocation builds a fresh
+        # programmer, so the second fact is the normal one - and treating it
+        # as the first is how the M8 acceptance's write failed `61 13` one
+        # second after a read (docs/probe-results.md, "The session gap
+        # crosses invocations"). This flag tells the two apart; see
+        # `_retry_once_for_unknown_gap`.
+        self._session_history_unknown = True
+
+    def _retry_once_for_unknown_gap(self, attempt: Callable[[], _T]) -> _T:
+        """Run `attempt`; on a first-session `61 13` with unknown history, retry once.
+
+        A session opened within ~1.5-1.75 s of the previous one closing fails
+        wholesale with `61 13` (measured 2026-08-07), and a fresh programmer
+        instance cannot know when the previous INVOCATION's session closed -
+        `railctl cv read 3 && railctl cv write 3 26` failed exactly this way
+        on the bench (2026-08-12) while the same write after an idle minute
+        succeeded. The two causes of `61 13` are indistinguishable in the
+        moment, but they separate under one retry: the failed attempt's exit
+        stamps `_last_session_end`, so the second attempt's own
+        `_await_session_gap` waits out the full measured gap - after which a
+        second `61 13` is the real thing, a decoder that did not answer.
+
+        Retries only while `_session_history_unknown`: an instance that has
+        closed a session before owns its timing, and a `61 13` then is an
+        answer, not an artefact. The retry emits `service.session_retried` so
+        the envelope says the first attempt was discarded and why - a silent
+        retry would hide the very timing fact this exists to handle.
+
+        Idempotent by construction for both callers: re-reading a CV reads it
+        again, and re-writing the same value writes the same value.
+        """
+        try:
+            return attempt()
+        except DecoderNoAckError:
+            if not self._session_history_unknown:
+                raise
+            self._station.emit(
+                "service.session_retried",
+                {
+                    "reason": "first session of this invocation answered 61 13; the "
+                    "previous invocation's session may have closed moments ago",
+                    "gap_s": self._station.timing.service_session_gap,
+                },
+            )
+            return attempt()
 
     def _await_session_gap(self) -> None:
         """Wait out `service_session_gap` if a session closed too recently.
@@ -383,14 +433,11 @@ class CvProgrammer:
     ) -> tuple[CvEncoding, bool]:
         """Puts one CV write on the wire and confirms the station accepted it.
 
-        Does NOT call `_await_session_gap`, unlike the read path. A write
-        that immediately followed a read's closed session could hit the same
-        "reopened too soon" failure the gap exists to prevent - but nothing
-        does that today (`service_write` confirms from its own echo and never
-        reads back), and the write path was never measured for it. The
-        asymmetry runs the safe way round: a READ pays the gap whatever
-        closed the previous session, a write included. Measure before adding
-        a delay here.
+        Pays `_await_session_gap` like the read path, since 2026-08-12. The
+        earlier asymmetry ("nothing does that today ... measure before adding
+        a delay here") ended when M8's `cv write` followed `cv read`'s closed
+        session and failed `61 13`, reproduced deterministically on the bench
+        (docs/probe-results.md, "The session gap crosses invocations").
 
         POM: the interface ack IS the confirmation - there is no other channel
         (module docstring: "neither the PC nor the interface can determine
@@ -421,6 +468,13 @@ class CvProgrammer:
             self._station.pause(self._station.timing.pom_write_settle)
             return CvEncoding.POM_ZERO_BASED, False
         telegram, encoding, page_index = self.service_write_telegram(cv, value)
+        # The comment that used to sit here said "nothing does that today" of a write
+        # following a read's closed session, and asked for a measurement before adding
+        # the delay. The measurement exists now: 2026-08-12 (docs/probe-results.md,
+        # "The session gap crosses invocations"), `cv read 3` then `cv write 3 26`
+        # back-to-back failed `61 13` while the identical write after an idle gap
+        # succeeded. A service WRITE pays the same gap a read does.
+        self._await_session_gap()
         before = self._status_before()
         echo_confirmed_only = False
         try:
@@ -456,9 +510,15 @@ class CvProgrammer:
             # still is not proof the decoder RETAINED the value, so it sets
             # `echo_confirmed_only` rather than being trusted the way `Ready`
             # is.
+            # The hint no longer says "use POM instead": on this bench POM READ is
+            # silence (R1), so that advice sent the operator to a mode that cannot
+            # verify. And it names the wheel contact FIRST, because the M8 acceptance
+            # proved a 61 13 can be the tool's own timing - now retried automatically
+            # before this error is ever raised (see _retry_once_for_unknown_gap).
             no_ack_hint = (
-                "decoder did not acknowledge; sound decoders often fail "
-                "on a 750 mA programming track - use POM instead"
+                "decoder did not acknowledge, and the session-gap retry already ran - "
+                "check the wheels are making contact with the programming track; sound "
+                "decoders can also fail on a 750 mA programming output"
             )
             if isinstance(outcome, NoAck):
                 raise DecoderNoAckError(
@@ -760,6 +820,9 @@ class CvProgrammer:
                 )
         finally:
             self._last_session_end = self._station.now()
+            # From here on this instance KNOWS its history: the clock above is
+            # authoritative and `_await_session_gap` owns the timing.
+            self._session_history_unknown = False
             self._station.invalidate_caches()
 
     def service_read(self, cv: int, *, page: CvPage | None = None) -> CvResult:
@@ -797,13 +860,17 @@ class CvProgrammer:
         so a caller relying on paging in service mode finds out immediately,
         instead of reading whatever page the decoder already had selected.
         """
-        before = self._station.status()
-        try:
-            return self._read_in_open_session(cv, page=page)
-        finally:
-            self.exit_service_mode(
-                restore_power=before.track_power, restore_hold=before.emergency_stop
-            )
+
+        def attempt() -> CvResult:
+            before = self._station.status()
+            try:
+                return self._read_in_open_session(cv, page=page)
+            finally:
+                self.exit_service_mode(
+                    restore_power=before.track_power, restore_hold=before.emergency_stop
+                )
+
+        return self._retry_once_for_unknown_gap(attempt)
 
     def service_read_many(self, cvs: Sequence[int]) -> list[CvReadOutcome]:
         """Read several CVs inside ONE service-mode session.
@@ -920,9 +987,11 @@ class CvProgrammer:
         outcome: object,
         start: float,
     ) -> CvResult:
+        # Same wording as the write path's hint, for the same measured reasons.
         no_ack_hint = (
-            "decoder did not acknowledge; sound decoders often fail on a 750 mA "
-            "programming track - use POM instead"
+            "decoder did not acknowledge, and the session-gap retry already ran - "
+            "check the wheels are making contact with the programming track; sound "
+            "decoders can also fail on a 750 mA programming output"
         )
         if isinstance(outcome, CvValue):
             if encoding is CvEncoding.SERVICE_EXT and page_index in UNEXERCISED_BANDS:
@@ -1602,10 +1671,12 @@ class CvProgrammer:
         emits `page.not_selected` for a page that IS selected.
         """
         started = self._station.now()
+
+        def attempt() -> tuple[CvEncoding, bool]:
+            return self._write_and_confirm(cv, value, address=None, mode=ProgMode.SERVICE)
+
         try:
-            encoding, echo_confirmed_only = self._write_and_confirm(
-                cv, value, address=None, mode=ProgMode.SERVICE
-            )
+            encoding, echo_confirmed_only = self._retry_once_for_unknown_gap(attempt)
         except RailctlError:
             self._station.invalidate_caches()
             raise

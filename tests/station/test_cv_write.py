@@ -672,6 +672,10 @@ def test_service_write_raises_decoder_no_ack_when_the_wait_loop_reports_no_ack(
 
     bench = bench_factory(capabilities=make_capabilities(z21_cv_opcodes=True))
     programmer = bench.station.programmer
+    # A KNOWN history: these tests pin the raise semantics of an instance that
+    # owns its timing. A fresh instance retries a first-session 61 13 once - that
+    # path has its own tests below.
+    programmer._session_history_unknown = False
     bench.expect(cmd_station_status(), reply=STATUS_POWERED)
     bench.expect(cmd_z21_cv_write(8, 145), reply=ACK)
     monkeypatch.setattr(programmer, "await_result", lambda *a, **k: NoAck())
@@ -687,6 +691,10 @@ def test_service_write_calls_exit_service_mode_and_invalidates_cache_on_failure(
 
     bench = bench_factory(capabilities=make_capabilities(z21_cv_opcodes=True))
     programmer = bench.station.programmer
+    # A KNOWN history: these tests pin the raise semantics of an instance that
+    # owns its timing. A fresh instance retries a first-session 61 13 once - that
+    # path has its own tests below.
+    programmer._session_history_unknown = False
     invalidated = watch_invalidations(bench.station)
     bench.expect(cmd_station_status(), reply=STATUS_POWERED)
     bench.expect(cmd_z21_cv_write(8, 145), reply=ACK)
@@ -753,6 +761,10 @@ def test_service_write_raises_decoder_no_ack_when_the_wait_loop_times_out_after_
 ):
     bench = bench_factory(capabilities=make_capabilities(z21_cv_opcodes=True))
     programmer = bench.station.programmer
+    # A KNOWN history: these tests pin the raise semantics of an instance that
+    # owns its timing. A fresh instance retries a first-session 61 13 once - that
+    # path has its own tests below.
+    programmer._session_history_unknown = False
     bench.expect(cmd_station_status(), reply=STATUS_POWERED)
     bench.expect(cmd_z21_cv_write(8, 145), reply=ACK)
     monkeypatch.setattr(
@@ -1503,3 +1515,96 @@ def test_pom_write_to_cv29_lets_a_decoder_not_responding_error_propagate_when_po
     monkeypatch.setattr(programmer, "pom_read", fake_pom_read)
     with pytest.raises(DecoderNotRespondingError):
         programmer.pom_write(29, 6, address=ADDRESS, verify=True)
+
+
+ANY_PAYLOAD = object()
+
+
+# -- the unknown-history retry ------------------------------------------------
+
+
+def test_a_first_session_no_ack_on_a_fresh_instance_is_retried_once(bench_factory, monkeypatch):
+    """The two causes of `61 13` separate under one retry.
+
+    A fresh programmer cannot know when the previous INVOCATION's session closed, and a
+    session reopened within ~1.5-1.75 s fails wholesale with `61 13` (measured 2026-08-07).
+    The M8 acceptance hit exactly this: `cv write` one second after `cv read` failed twice,
+    while the identical write after an idle minute succeeded (2026-08-12). The failed
+    attempt's exit stamps the session clock, so the retry's own `_await_session_gap` waits
+    out the measured gap - no separate pause needed.
+    """
+    from railctl.xbus.replies import NoAck, Ready
+
+    bench = bench_factory(capabilities=make_capabilities(z21_cv_opcodes=True))
+    programmer = bench.station.programmer
+    assert programmer._session_history_unknown is True  # fresh instance: the normal CLI case
+
+    attempts: list[int] = []
+
+    def flaky_await(*_a, **_k):
+        attempts.append(1)
+        if len(attempts) == 1:
+            return NoAck()
+        return Ready()
+
+    events: list[tuple[str, dict]] = []
+    monkeypatch.setattr(programmer, "await_result", flaky_await)
+    monkeypatch.setattr(programmer, "exit_service_mode", lambda **_: None)
+    monkeypatch.setattr(bench.station, "emit", lambda name, payload: events.append((name, payload)))
+    bench.expect(cmd_station_status(), reply=STATUS_POWERED)
+    bench.expect(cmd_z21_cv_write(8, 145), reply=ACK)
+    bench.expect(cmd_station_status(), reply=STATUS_POWERED)
+    bench.expect(cmd_z21_cv_write(8, 145), reply=ACK)
+
+    result = programmer.service_write(8, 145, verify=False)
+    assert result.value == 145
+    assert len(attempts) == 2
+    assert ("service.session_retried", ANY_PAYLOAD) in [(n, ANY_PAYLOAD) for n, _ in events]
+
+
+def test_a_second_no_ack_after_the_retry_is_the_real_thing(bench_factory, monkeypatch):
+    """One retry, never two: after the gap has demonstrably been paid, `61 13` is a decoder
+    that did not answer, and repeating the write would turn a measurement into a loop."""
+    from railctl.xbus.replies import NoAck
+
+    bench = bench_factory(capabilities=make_capabilities(z21_cv_opcodes=True))
+    programmer = bench.station.programmer
+
+    calls: list[int] = []
+
+    def always_no_ack(*_a, **_k):
+        calls.append(1)
+        return NoAck()
+
+    monkeypatch.setattr(programmer, "await_result", always_no_ack)
+    monkeypatch.setattr(programmer, "exit_service_mode", lambda **_: None)
+    bench.expect(cmd_station_status(), reply=STATUS_POWERED)
+    bench.expect(cmd_z21_cv_write(8, 145), reply=ACK)
+    bench.expect(cmd_station_status(), reply=STATUS_POWERED)
+    bench.expect(cmd_z21_cv_write(8, 145), reply=ACK)
+    with pytest.raises(DecoderNoAckError):
+        programmer.service_write(8, 145, verify=True)
+    assert len(calls) == 2
+
+
+def test_a_known_history_instance_never_retries(bench_factory, monkeypatch):
+    """An instance that has closed a session owns its timing; its `61 13` is an answer."""
+    from railctl.xbus.replies import NoAck
+
+    bench = bench_factory(capabilities=make_capabilities(z21_cv_opcodes=True))
+    programmer = bench.station.programmer
+    programmer._session_history_unknown = False
+
+    calls: list[int] = []
+
+    def no_ack(*_a, **_k):
+        calls.append(1)
+        return NoAck()
+
+    monkeypatch.setattr(programmer, "await_result", no_ack)
+    monkeypatch.setattr(programmer, "exit_service_mode", lambda **_: None)
+    bench.expect(cmd_station_status(), reply=STATUS_POWERED)
+    bench.expect(cmd_z21_cv_write(8, 145), reply=ACK)
+    with pytest.raises(DecoderNoAckError):
+        programmer.service_write(8, 145, verify=True)
+    assert len(calls) == 1

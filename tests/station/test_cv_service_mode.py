@@ -434,15 +434,25 @@ def test_a_no_ack_outcome_raises_decoder_no_ack_and_still_runs_exit_once(
     assert bench.transport.script_pending == []
 
 
-def test_a_no_ack_reply_names_pom_as_the_alternative(bench_factory, monkeypatch):
+def test_a_no_ack_hint_names_the_wheels_and_the_retry_never_pom(bench_factory, monkeypatch):
+    """The old hint said "use POM instead" - advice into a mode whose READ is silence on
+    this bench (R1), so it sent the operator somewhere that cannot verify. And the M8
+    acceptance measured that a `61 13` can be the tool's own inter-session timing, which
+    is retried automatically before this error is raised - so by the time an operator
+    reads this hint, the retry has run and the likeliest remaining cause is contact."""
     capabilities = make_capabilities(z21_cv_opcodes=True)
     bench = bench_factory(capabilities=capabilities)
+    programmer = bench.station.programmer
+    programmer._session_history_unknown = False  # the raise path, not the retry path
     _script_read_and_clean_exit(bench, cmd_z21_cv_read(8))
-    monkeypatch.setattr(bench.station.programmer, "await_result", lambda matcher, **kw: NoAck())
+    monkeypatch.setattr(programmer, "await_result", lambda matcher, **kw: NoAck())
 
     with pytest.raises(DecoderNoAckError) as caught:
-        bench.station.programmer.service_read(8)
-    assert "pom" in caught.value.hint.lower()
+        programmer.service_read(8)
+    hint = caught.value.hint.lower()
+    assert "wheels" in hint
+    assert "retry already ran" in hint
+    assert "use pom instead" not in hint
 
 
 def test_a_short_circuit_raises_short_circuit_error(bench_factory, monkeypatch):
