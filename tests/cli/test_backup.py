@@ -31,6 +31,7 @@ from railctl.errors import (
     IndexPageRequiredError,
     PomReadUnsupportedError,
     ServiceEncodingUnknownError,
+    ShortCircuitError,
     UnsupportedCommandError,
 )
 from railctl.station import (
@@ -113,6 +114,7 @@ class FakeBackupStation:
         interrupt_after: int | None = None,
         interrupt_singleton: int | None = None,
         emit_events: list[tuple[str, dict[str, object]]] | None = None,
+        batch_raises: Exception | None = None,
     ) -> None:
         self.capabilities = capabilities or SERVICE_CAPS
         self.raw_status = raw_status
@@ -124,6 +126,9 @@ class FakeBackupStation:
         #: Raise KeyboardInterrupt when this CV is read as a singleton - a
         #: Ctrl-C before the curated list exists.
         self.interrupt_singleton = interrupt_singleton
+        #: Raise this from `cv_read_many` before any batch read - the shape a
+        #: station-level failure (a short, a busy station) takes mid-run.
+        self.batch_raises = batch_raises
         self.emit_events = emit_events or []
         self.on_event: object | None = None
         self.singleton_calls: list[dict[str, object]] = []
@@ -168,6 +173,8 @@ class FakeBackupStation:
     def cv_read_many(self, specs, *, address=None, mode=ProgMode.SERVICE, on_progress=None):
         self.batch_calls.append({"specs": list(specs), "address": address, "mode": mode})
         self._emit_all()
+        if self.batch_raises is not None:
+            raise self.batch_raises
         outcomes = []
         total = len(specs)
         for index, spec in enumerate(specs):
@@ -1154,6 +1161,29 @@ def test_backup_ndjson_stdout_refusal_comes_before_the_missing_address(monkeypat
         ["railctl", "backup", "--format", "ndjson"],
         ["railctl", "backup", "--out", "-", "--format", "json"],
     ]
+
+
+def test_backup_ndjson_a_mid_batch_station_failure_counts_what_was_measured(monkeypatch, tmp_path):
+    # A short mid-batch aborts before any document is assembled: the summary
+    # still reports the counts as they stood - the three singletons and the
+    # over-bound skips - against the full curated `requested`.
+    _install(
+        monkeypatch,
+        FakeBackupStation(batch_raises=ShortCircuitError("short on the programming track")),
+    )
+    result = runner.invoke(
+        app,
+        ["backup", "--address", "3", "--out", str(tmp_path / "short.json"), "--format", "ndjson"],
+    )
+    assert result.exit_code == 11, result.stderr
+    assert _stderr_envelope(result)["code"] == "short_circuit"
+    summary = _ndjson_lines(result.stdout)[-1]
+    assert summary["type"] == "summary"
+    assert summary["requested"] == len(CURATED)
+    assert summary["ok"] == 3
+    assert summary["skipped"] == len(OVER_BOUND)
+    assert summary["complete"] is False
+    assert summary["exit_code"] == 11
 
 
 def test_backup_ndjson_usage_refusal_produces_no_stream_at_all(monkeypatch):
