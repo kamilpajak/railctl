@@ -16,6 +16,7 @@ safety property is explicit here rather than emergent:
 * the catalog's min/max are ENFORCING on write - the refusal goes out before
   any telegram, exit 15 - and only ADVISORY on read, where the decoder's own
   value is the measurement and the catalog is the opinion;
+
 * writes to `CONFIRM_CVS` ({1, 8, 17, 18, 29, 31, 32, 144}: the address CVs,
   the factory-reset trigger, the index selectors, CV144) are confirmed, with
   CV8's own wording, and `--yes` bypasses;
@@ -126,6 +127,13 @@ VALUE_MAX: Final[int] = 255
 #: p.30, docs/vendor-references.md).
 FACTORY_RESET_CV: Final[int] = 8
 FACTORY_RESET_VALUE: Final[int] = 8
+
+#: One service-mode CV read costs about this on the YD7010 - measured 2026-08-04
+#: (docs/probe-results.md). A silent POM attempt costs 6.7 s, so this is a floor.
+SERVICE_READ_SECONDS: Final[float] = 1.7
+#: Batch size above which `cv read` asks first: the design's 60 s confirmation
+#: threshold divided by the measured per-read cost, rounded down.
+SWEEP_CONFIRM_CVS: Final[int] = int(60 / SERVICE_READ_SECONDS)  # = 35
 
 #: The confirmation set, derived from the station layer's own constants
 #: rather than retyped: the address CVs {1, 17, 18, 29}, the factory-reset
@@ -464,6 +472,23 @@ def register(app: typer.Typer) -> None:
                     stderr=output.stderr,
                     retry_argv=[*argv_hint, "--page", str(page)],
                 )
+            if len(cvs) > SWEEP_CONFIRM_CVS:
+                # Design L6: "any sweep estimated over 60 s" is confirmed. The grammar makes
+                # `cv read 1-1024` typable today, and on this station one service read costs
+                # about SERVICE_READ_SECONDS (measured 2026-08-04, docs/probe-results.md) -
+                # so 1024 CVs is half an hour of bus traffic nobody was asked about. The
+                # figure is a floor: a silent POM attempt costs 6.7 s, so a POM-resolved
+                # sweep runs LONGER than this estimate, never shorter.
+                estimate = int(len(cvs) * SERVICE_READ_SECONDS)
+                confirm(
+                    f"reading {len(cvs)} CVs takes roughly {estimate} s on this station "
+                    f"(about {SERVICE_READ_SECONDS} s per service-mode read, measured; "
+                    f"POM is slower). Proceed",
+                    settings=settings,
+                    stdin=sys.stdin,
+                    stderr=output.stderr,
+                    retry_argv=argv_hint,
+                )
             events = StationEventLog()
             station = open_station(settings, capabilities_path=capabilities_path(), on_event=events)
             try:
@@ -472,7 +497,7 @@ def register(app: typer.Typer) -> None:
                     # Usage first (cheap, runnable answer), then the status
                     # pre-flight every POM cv command runs (design L6).
                     resolved_address: int | None = require_address(settings, argv_hint=argv_hint)
-                    preflight(station, speed=None)
+                    preflight(station, speed=None, action="a main-track (POM) CV read")
                 else:
                     resolved_address = None
                     print(PROG_TRACK_NOTICE, file=output.stderr)
@@ -630,7 +655,7 @@ def register(app: typer.Typer) -> None:
                         settings,
                         argv_hint=[*prefix, cv, str(value), "--track", "main"],
                     )
-                    preflight(station, speed=None)
+                    preflight(station, speed=None, action="a main-track (POM) CV write")
                 else:
                     print(PROG_TRACK_NOTICE, file=output.stderr)
                 written = station.cv_write(

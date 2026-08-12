@@ -14,6 +14,7 @@ import json
 import pytest
 from typer.testing import CliRunner
 
+import railctl.cli.commands.cv as cv_module
 from railctl.catalog import load_catalog
 from railctl.cli._meta import (
     CV_READ_MODE_OPT,
@@ -28,6 +29,7 @@ from railctl.cli.commands.cv import (
     MODE_FOR_TRACK,
     PROG_TRACK_NOTICE,
     SILENCE_GUIDANCE,
+    SWEEP_CONFIRM_CVS,
     TRACK_FOR_MODE,
     _all_failed,
     _confirm_question,
@@ -1211,3 +1213,100 @@ def test_the_bare_cv_group_is_a_usage_error_with_empty_stdout():
     result = runner.invoke(app, ["cv"])
     assert result.exit_code == 2
     assert result.stdout == ""
+
+
+# -- the sweep confirmation gate ----------------------------------------------
+
+
+def test_a_read_at_the_sweep_threshold_runs_unconfirmed(monkeypatch):
+    """35 CVs is the last batch under the design's 60 s line (35 x 1.7 s = 59.5 s)."""
+    _install(monkeypatch, FakeCvStation(read_values=dict.fromkeys(range(1, 36), 1)))
+    result = runner.invoke(
+        app, ["cv", "read", f"1-{SWEEP_CONFIRM_CVS}", "--non-interactive", "--format", "json"]
+    )
+    assert result.exit_code == 0, result.stderr
+    assert json.loads(result.stdout)["result"]["requested"] == SWEEP_CONFIRM_CVS
+
+
+def test_a_read_one_past_the_threshold_refuses_without_yes(monkeypatch):
+    """The design's rule is "any sweep estimated over 60 s is confirmed", and the grammar
+    makes `cv read 1-1024` typable today. One service read costs ~1.7 s measured, a silent
+    POM attempt 6.7 s, so the estimate the prompt names is a floor. Refusal happens before
+    the station opens - the fake here explodes on open to prove it.
+    """
+
+    def explode(*_a, **_k):
+        raise AssertionError("the station must not be opened for a refused sweep")
+
+    monkeypatch.setattr(Station, "open", staticmethod(explode))
+    result = runner.invoke(
+        app,
+        ["cv", "read", f"1-{SWEEP_CONFIRM_CVS + 1}", "--non-interactive", "--format", "json"],
+    )
+    assert result.exit_code == 2
+    body = _stderr_envelope(result)
+    assert body["code"] == "confirmation_required"
+    assert ["railctl", "cv", "read", f"1-{SWEEP_CONFIRM_CVS + 1}", "--yes"] in body["suggestions"]
+
+
+def test_a_confirmed_sweep_proceeds_with_yes(monkeypatch):
+    _install(monkeypatch, FakeCvStation(read_values=dict.fromkeys(range(1, 38), 1)))
+    result = runner.invoke(app, ["cv", "read", "1-37", "--yes", "--format", "json"])
+    assert result.exit_code == 0, result.stderr
+    assert json.loads(result.stdout)["result"]["requested"] == 37
+
+
+# -- a damaged catalog is a catalog error, not an internal one ----------------
+
+
+def test_a_damaged_catalog_reports_catalog_exit_9_not_internal(monkeypatch):
+    """`cv read accel_rate` is the first command whose happy path needs the catalog at
+    runtime. A damaged zimo.toml raises CatalogError, which is a RailctlError - so run()
+    renders code "catalog", exit 9: a data-file problem, not a railctl bug and not the
+    operator's typo. Correct by construction since M7; pinned here because a refactor that
+    moved load_catalog() outside work() would silently change the envelope.
+    """
+    from railctl.errors import CatalogError
+
+    def damaged():
+        raise CatalogError("the catalog contains no [[cv]] or [[range]] blocks")
+
+    monkeypatch.setattr(cv_module, "load_catalog", damaged)
+    result = runner.invoke(app, ["cv", "read", "accel_rate", "--format", "json"])
+    assert result.exit_code == 9
+    body = _stderr_envelope(result)
+    assert body["code"] == "catalog"
+
+
+# -- the preflight refusal names the CV operation -----------------------------
+
+
+def test_a_refused_main_track_write_names_the_cv_operation_not_a_drive(monkeypatch):
+    """`preflight(speed=None)` used to phrase the refusal "refusing to send this command",
+    which told a CV operator a throttle command was refused. The refusal now names the
+    operation.
+    """
+    _install(
+        monkeypatch,
+        FakeCvStation(raw_status=0x06),  # emergency off: the preflight must refuse
+    )
+    result = runner.invoke(
+        app,
+        [
+            "cv",
+            "write",
+            "3",
+            "20",
+            "--track",
+            "main",
+            "--address",
+            "3",
+            "--yes",
+            "--format",
+            "json",
+        ],
+    )
+    assert result.exit_code == 20
+    body = _stderr_envelope(result)
+    assert "CV write" in body["message"]
+    assert "speed" not in body["message"]
