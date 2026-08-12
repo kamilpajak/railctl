@@ -25,7 +25,14 @@ from railctl.cli._meta import command_meta
 from railctl.cli.commands.backup import SET_NAME
 from railctl.cli.commands.cv import PROG_TRACK_NOTICE, SILENCE_GUIDANCE
 from railctl.cli.main import app
-from railctl.errors import DecoderNotRespondingError, UnsupportedCommandError
+from railctl.errors import (
+    CvOutOfRangeError,
+    DecoderNotRespondingError,
+    IndexPageRequiredError,
+    PomReadUnsupportedError,
+    ServiceEncodingUnknownError,
+    UnsupportedCommandError,
+)
 from railctl.station import (
     Capabilities,
     CvEncoding,
@@ -645,6 +652,50 @@ def test_backup_a_station_error_row_also_makes_the_file_incomplete(monkeypatch, 
     assert envelope["details"]["error"] == [65]
     row = next(r for r in json.loads(out.read_text())["cvs"] if r["cv"] == 65)
     assert row["status"] == "error"
+
+
+@pytest.mark.parametrize(
+    "error",
+    [
+        PomReadUnsupportedError("the station answered 61 82 mid-run"),
+        ServiceEncodingUnknownError("no service-mode encoding established yet"),
+    ],
+    ids=["pom-refusal", "encoding-unknown"],
+)
+def test_backup_a_mid_run_refusal_is_an_error_row_and_exit_9(monkeypatch, tmp_path, error):
+    """A live refusal is the instrument failing to measure, never a recorded
+    decision: the row is `error`, the file incomplete, the exit code 9."""
+    out = tmp_path / "refused.json"
+    _install(monkeypatch, FakeBackupStation(read_errors={65: error}))
+    result = runner.invoke(app, ["backup", "--address", "3", "--out", str(out), "--format", "json"])
+    assert result.exit_code == 9, result.stderr
+    on_disk = json.loads(out.read_text(encoding="utf-8"))
+    row = next(r for r in on_disk["cvs"] if r["cv"] == 65)
+    assert row["status"] == "error"
+    assert row["detail"] == str(error)
+    assert on_disk["summary"]["complete"] is False
+
+
+@pytest.mark.parametrize(
+    "error",
+    [
+        CvOutOfRangeError("direct opcodes only cover CV1..255"),
+        IndexPageRequiredError("CV65 lives behind an index page"),
+    ],
+    ids=["out-of-range", "index-page"],
+)
+def test_backup_a_preflight_skip_row_stays_skipped_and_exits_0(monkeypatch, tmp_path, error):
+    # The boundary of the reclassification: these two are pre-flight refusals
+    # inside the programmer - no telegram sent - so they remain recorded
+    # decisions and never touch the exit code.
+    out = tmp_path / "skips.json"
+    _install(monkeypatch, FakeBackupStation(read_errors={65: error}))
+    result = runner.invoke(app, ["backup", "--address", "3", "--out", str(out), "--format", "json"])
+    assert result.exit_code == 0, result.stderr
+    on_disk = json.loads(out.read_text(encoding="utf-8"))
+    row = next(r for r in on_disk["cvs"] if r["cv"] == 65)
+    assert row["status"] == "skipped"
+    assert on_disk["summary"]["complete"] is True
 
 
 def test_backup_ext_service_opcodes_reach_past_the_direct_bound(monkeypatch, tmp_path):

@@ -84,8 +84,6 @@ def test_silence_in_both_flavours_is_no_response_with_the_stations_text(error: R
     [
         CvOutOfRangeError("direct opcodes only cover CV1..255"),
         IndexPageRequiredError("CV397 lives behind an index page"),
-        PomReadUnsupportedError("pom reads are recorded unavailable here"),
-        ServiceEncodingUnknownError("no service-mode encoding established yet"),
     ],
 )
 def test_a_cv_the_mode_cannot_reach_is_skipped_with_the_stations_text(error: RailctlError):
@@ -100,6 +98,12 @@ def test_a_cv_the_mode_cannot_reach_is_skipped_with_the_stations_text(error: Rai
         LinkTimeout("no reply within 5.0 s"),
         StationBusyError("still busy after the station-side retries"),
         XBusDecodeError("garbled reply"),
+        # The instrument failing to measure mid-run, not a recorded decision:
+        # a live 61 82 refusal, or a service read with no proven encoding.
+        # `skipped` here would keep `complete` true and let a refused run
+        # exit 0 - backup's exit code rides on `complete`.
+        PomReadUnsupportedError("pom reads are recorded unavailable here"),
+        ServiceEncodingUnknownError("no service-mode encoding established yet"),
     ],
 )
 def test_a_refusal_a_short_a_timeout_or_a_garble_is_error_with_the_stations_text(

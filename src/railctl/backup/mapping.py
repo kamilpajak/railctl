@@ -21,9 +21,7 @@ from railctl.errors import (
     DecoderNoAckError,
     DecoderNotRespondingError,
     IndexPageRequiredError,
-    PomReadUnsupportedError,
     RailctlError,
-    ServiceEncodingUnknownError,
 )
 from railctl.station import CvReadOutcome
 
@@ -42,14 +40,18 @@ _NO_RESPONSE_ERRORS: Final[tuple[type[RailctlError], ...]] = (
     DecoderNotRespondingError,
 )
 
-#: "This mode cannot reach this CV" - no telegram was ever attempted for it,
-#: so the row is a recorded decision (`skipped`), not a failure. The same
-#: four classes the `cv read` command treats as skips (ADDENDUM A4).
+#: "This mode cannot reach this CV" - a pre-flight refusal inside the
+#: programmer, no telegram ever sent, so the row is a recorded decision
+#: (`skipped`), not a failure. Deliberately NARROWER than the four-class skip
+#: set `cv read` uses (ADDENDUM A4): `PomReadUnsupportedError` (a live 61 82
+#: refusal) and `ServiceEncodingUnknownError` (no proven encoding to read
+#: with) are the instrument failing to measure mid-run, and backup's exit
+#: code rides on `summary.complete` - mapping them to `skipped` would keep
+#: `complete` true and let a refused run exit 0. Both fall through to
+#: `ERROR` below, per the design's C5 rule (unsupported -> error).
 _SKIP_ERRORS: Final[tuple[type[RailctlError], ...]] = (
     CvOutOfRangeError,
     IndexPageRequiredError,
-    PomReadUnsupportedError,
-    ServiceEncodingUnknownError,
 )
 
 
