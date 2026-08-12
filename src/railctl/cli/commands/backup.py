@@ -30,6 +30,11 @@ NDJSON is this command's streaming mode and bypasses `run()` the same way
 `monitor` does: `start`, `cv` and `event` lines as the run progresses, and a
 `summary` line as the LAST line even on error and on Ctrl-C - once the
 station is open, no ending may leave the stream without one.
+
+The one stream shape that surprises: `start` carries the curated total, which
+is not known until CV29 has been read, so a failure BEFORE that point (the
+index-page refusal, a silent CV29) produces a stream whose only line is the
+summary. A consumer must therefore key on `type`, never on line position.
 """
 
 from __future__ import annotations
