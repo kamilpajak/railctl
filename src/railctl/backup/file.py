@@ -102,6 +102,44 @@ _DECODER_KEYS: Final[tuple[str, ...]] = (
 
 _ROW_REQUIRED_KEYS: Final[tuple[str, ...]] = ("cv", "name", "status", "source")
 
+#: A locomotive address as XpressNet carries it.
+ADDRESS_MIN: Final[int] = 1
+ADDRESS_MAX: Final[int] = 9999
+
+#: The two values `loco.kind` may hold - the short/long split the writer
+#: derives from the address.
+LOCO_KINDS: Final[tuple[str, ...]] = ("short", "long")
+
+#: The `decoder` fields that hold one CV byte each. Every one of them is
+#: OPTIONAL: a CV that did not answer leaves its field out (a hole in the
+#: block, never an abort), so the reader checks the type of what is there
+#: and never demands the field itself.
+_DECODER_BYTE_FIELDS: Final[tuple[str, ...]] = (
+    "manufacturer_id",
+    "decoder_version",
+    "decoder_type",
+)
+SERIAL_BYTE_COUNT: Final[int] = 3
+
+#: The five capabilities that are three-valued (`true`/`false`/`null`) and
+#: the one that is a channel name or `null`. Split because coercing either
+#: into the other is exactly the mistake the project's founding rule forbids:
+#: a capability must never be recorded as absent because something could not
+#: read it.
+_TRISTATE_CAPABILITIES: Final[tuple[str, ...]] = (
+    "pom_read",
+    "pom_echo_zero_based",
+    "service_direct_cv",
+    "service_ext_cv",
+    "z21_cv_opcodes",
+)
+_STRING_CAPABILITIES: Final[tuple[str, ...]] = ("pom_result_channel",)
+
+#: The index selectors. When the payload happens to carry rows for them - the
+#: curated set does today - their values and the top-level `page` describe
+#: the same cursor, and the reader refuses a file where the two disagree.
+PAGE_SELECTOR_ROWS: Final[tuple[int, int]] = (31, 32)
+
 
 def backup_path(address: int, set_name: str, out: str | None) -> Path | None:
     """Where a backup lands: the resolved file path, or `None` for stdout.
@@ -235,7 +273,90 @@ def read_backup(path: Path) -> BackupDocument:
                 f"{path}: summary[{key!r}] is {stored_summary.get(key)!r} but the cv "
                 f"rows say {expected!r}"
             )
+    _check_loco(document.loco, path)
+    _check_decoder(document.decoder, path)
+    _check_capabilities(document.capabilities, path)
+    _check_page_agrees_with_rows(document, path)
     return document
+
+
+def _check_loco(block: Mapping[str, object], path: Path) -> None:
+    """`loco` is the one identity block with no optional part: M10's restore
+    re-targets the station off `address`, and a file that names no locomotive
+    cannot say whose settings it holds."""
+    address = block.get("address")
+    if not _is_int(address) or not ADDRESS_MIN <= address <= ADDRESS_MAX:  # type: ignore[operator]
+        raise BackupFileError(
+            f"{path}: loco.address must be an integer in {ADDRESS_MIN}..{ADDRESS_MAX}, "
+            f"got {address!r}"
+        )
+    kind = block.get("kind")
+    if kind not in LOCO_KINDS:
+        raise BackupFileError(f"{path}: loco.kind must be one of {LOCO_KINDS}, got {kind!r}")
+
+
+def _check_decoder(block: Mapping[str, object], path: Path) -> None:
+    """Type-check what the `decoder` block carries without demanding it: an
+    identity CV that did not answer leaves its field absent, and M10's
+    identity gate must be able to tell "the file never learned this" from
+    "the file says 145". A present field that is not a byte is a broken file,
+    because the gate compares it against a live read."""
+    for field in _DECODER_BYTE_FIELDS:
+        if field not in block:
+            continue
+        value = block[field]
+        if not _is_int(value) or not VALUE_MIN <= value <= VALUE_MAX:  # type: ignore[operator]
+            raise BackupFileError(
+                f"{path}: decoder.{field} must be an integer in "
+                f"{VALUE_MIN}..{VALUE_MAX}, got {value!r}"
+            )
+    if "serial_bytes" not in block:
+        return
+    serial = block["serial_bytes"]
+    if (
+        not isinstance(serial, list)
+        or len(serial) != SERIAL_BYTE_COUNT
+        or not all(_is_int(byte) and VALUE_MIN <= byte <= VALUE_MAX for byte in serial)
+    ):
+        raise BackupFileError(
+            f"{path}: decoder.serial_bytes must be {SERIAL_BYTE_COUNT} integers in "
+            f"{VALUE_MIN}..{VALUE_MAX}, got {serial!r}"
+        )
+
+
+def _check_capabilities(block: Mapping[str, object], path: Path) -> None:
+    """The three-valued rule, enforced at the file boundary. A capability may
+    be `true`, `false` or `null` and nothing else - a string "false" or a 0
+    would read as a measurement nobody made."""
+    for key in _TRISTATE_CAPABILITIES:
+        if key in block and block[key] is not None and not isinstance(block[key], bool):
+            raise BackupFileError(
+                f"{path}: capabilities.{key} must be true, false or null, got {block[key]!r}"
+            )
+    for key in _STRING_CAPABILITIES:
+        if key in block and block[key] is not None and not isinstance(block[key], str):
+            raise BackupFileError(
+                f"{path}: capabilities.{key} must be a string or null, got {block[key]!r}"
+            )
+
+
+def _check_page_agrees_with_rows(document: BackupDocument, path: Path) -> None:
+    """The cursor is recorded twice - as `page` and, while the curated set
+    still contains them, as the CV31/CV32 rows - so the reader refuses a file
+    where the two disagree. Only `ok` rows are compared: a selector that did
+    not answer says nothing about the page. Silent on a payload with no
+    selector rows, which is what a file written after they leave the curated
+    set looks like."""
+    rows = {record.cv: record for record in document.cvs}
+    for cv, recorded in zip(PAGE_SELECTOR_ROWS, document.page, strict=True):
+        row = rows.get(cv)
+        if row is None or row.status is not ReadStatus.OK:
+            continue
+        if row.value != recorded:
+            raise BackupFileError(
+                f"{path}: page says CV{cv}={recorded} but the CV{cv} row reads "
+                f"{row.value} - the file records one cursor twice and the two disagree"
+            )
 
 
 def _ordered_block(block: Mapping[str, object], key_order: tuple[str, ...]) -> dict[str, object]:

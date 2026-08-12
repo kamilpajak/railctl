@@ -296,3 +296,128 @@ def test_an_extra_summary_key_is_tolerated(tmp_path):
         parsed["summary"]["elapsed_s"] = 171
 
     assert read_backup(_write_mutated(tmp_path, add_key)) == make_document()
+
+
+# -- the identity blocks M10's restore drives off ----------------------------
+
+
+def test_a_loco_block_without_an_address_is_rejected(tmp_path):
+    # `loco.address` is what restore re-targets the station to; a file that
+    # names no locomotive cannot say whose settings it holds.
+    def drop_address(parsed: dict) -> None:
+        del parsed["loco"]["address"]
+
+    assert "loco.address" in _rejection(tmp_path, drop_address)
+
+
+@pytest.mark.parametrize("address", [0, 10000, "3", True])
+def test_a_loco_address_outside_the_band_is_rejected(tmp_path, address):
+    # 0 and 10000 sit one past each edge of 1..9999; a string and a bool are
+    # the two shapes JSON makes easy to mistake for a number.
+    def set_address(parsed: dict) -> None:
+        parsed["loco"]["address"] = address
+
+    assert "loco.address" in _rejection(tmp_path, set_address)
+
+
+@pytest.mark.parametrize("address", [1, 9999])
+def test_a_loco_address_on_either_edge_is_accepted(tmp_path, address):
+    def set_address(parsed: dict) -> None:
+        parsed["loco"]["address"] = address
+
+    assert read_backup(_write_mutated(tmp_path, set_address)).loco["address"] == address
+
+
+def test_an_unknown_loco_kind_is_rejected(tmp_path):
+    def set_kind(parsed: dict) -> None:
+        parsed["loco"]["kind"] = "medium"
+
+    assert "loco.kind" in _rejection(tmp_path, set_kind)
+
+
+def test_a_decoder_identity_field_that_is_not_a_byte_is_rejected(tmp_path):
+    # The restore identity gate compares this against a live CV8 read, so a
+    # value no CV could hold is a broken file, not a curiosity.
+    def set_manufacturer(parsed: dict) -> None:
+        parsed["decoder"]["manufacturer_id"] = 256
+
+    assert "decoder.manufacturer_id" in _rejection(tmp_path, set_manufacturer)
+
+
+def test_a_missing_decoder_field_is_tolerated(tmp_path):
+    # A hole in the identity block is exactly what an unanswered CV leaves
+    # behind; the gate must be able to tell that from a recorded value.
+    def drop_type(parsed: dict) -> None:
+        del parsed["decoder"]["decoder_type"]
+
+    assert "decoder_type" not in read_backup(_write_mutated(tmp_path, drop_type)).decoder
+
+
+@pytest.mark.parametrize("serial", [[10, 27], [10, 27, 44, 61], [10, 27, 256], "10,27,44"])
+def test_a_serial_that_is_not_three_bytes_is_rejected(tmp_path, serial):
+    def set_serial(parsed: dict) -> None:
+        parsed["decoder"]["serial_bytes"] = serial
+
+    assert "serial_bytes" in _rejection(tmp_path, set_serial)
+
+
+@pytest.mark.parametrize("value", ["false", 0, 1])
+def test_a_capability_that_is_not_three_valued_is_rejected(tmp_path, value):
+    # The founding rule at the file boundary: a capability is true, false or
+    # null. A string "false" or an integer 0 would read as a measurement
+    # nobody made.
+    def set_capability(parsed: dict) -> None:
+        parsed["capabilities"]["pom_read"] = value
+
+    assert "capabilities.pom_read" in _rejection(tmp_path, set_capability)
+
+
+def test_a_null_capability_is_accepted(tmp_path):
+    def unprobe(parsed: dict) -> None:
+        parsed["capabilities"]["pom_read"] = None
+
+    assert read_backup(_write_mutated(tmp_path, unprobe)).capabilities["pom_read"] is None
+
+
+# -- the cursor recorded twice -----------------------------------------------
+
+
+def test_a_page_that_disagrees_with_its_own_selector_rows_is_rejected(tmp_path):
+    # While CV31/CV32 remain in the curated payload, the file states the
+    # cursor twice. The two must agree or the file is not usable evidence of
+    # which page its indexed values came from.
+    def add_disagreeing_selectors(parsed: dict) -> None:
+        parsed["cvs"].append(
+            {"cv": 31, "name": "index_high", "status": "ok", "value": 145, "source": "catalog"}
+        )
+        parsed["summary"]["requested"] = 4
+        parsed["summary"]["ok"] = 2
+
+    message = _rejection(tmp_path, add_disagreeing_selectors)
+    assert "CV31" in message
+    assert "disagree" in message
+
+
+def test_a_page_that_matches_its_selector_rows_is_accepted(tmp_path):
+    def add_agreeing_selectors(parsed: dict) -> None:
+        parsed["cvs"].append(
+            {"cv": 31, "name": "index_high", "status": "ok", "value": 0, "source": "catalog"}
+        )
+        parsed["summary"]["requested"] = 4
+        parsed["summary"]["ok"] = 2
+
+    assert len(read_backup(_write_mutated(tmp_path, add_agreeing_selectors)).cvs) == 4
+
+
+def test_an_unanswered_selector_row_says_nothing_about_the_page(tmp_path):
+    # A selector that did not answer is silence, and silence never
+    # contradicts a recorded page.
+    def add_silent_selector(parsed: dict) -> None:
+        parsed["cvs"].append(
+            {"cv": 31, "name": "index_high", "status": "no_response", "source": "catalog"}
+        )
+        parsed["page"] = [145, 0]
+        parsed["summary"]["requested"] = 4
+        parsed["summary"]["no_response"] = 2
+
+    assert read_backup(_write_mutated(tmp_path, add_silent_selector)).page == (145, 0)
