@@ -426,6 +426,10 @@ def test_a_no_ack_outcome_raises_decoder_no_ack_and_still_runs_exit_once(
     would raise its own AssertionError."""
     capabilities = make_capabilities(z21_cv_opcodes=True)
     bench = bench_factory(capabilities=capabilities)
+    # Known history: these pin the RAISE semantics. A fresh instance retries a
+    # first-session 61 13 once (tests in test_cv_write.py); with the real exit
+    # path scripted here, an unwanted retry shows up as an exhausted script.
+    bench.station.programmer._session_history_unknown = False
     _script_read_and_clean_exit(bench, cmd_z21_cv_read(8))
     monkeypatch.setattr(bench.station.programmer, "await_result", lambda matcher, **kw: NoAck())
 
@@ -485,6 +489,10 @@ def test_a_busy_state_raises_station_busy_error_not_decoder_not_responding(
 def test_a_timed_out_result_that_saw_a_no_ack_raises_decoder_no_ack(bench_factory, monkeypatch):
     capabilities = make_capabilities(z21_cv_opcodes=True)
     bench = bench_factory(capabilities=capabilities)
+    # Known history: these pin the RAISE semantics. A fresh instance retries a
+    # first-session 61 13 once (tests in test_cv_write.py); with the real exit
+    # path scripted here, an unwanted retry shows up as an exhausted script.
+    bench.station.programmer._session_history_unknown = False
     _script_read_and_clean_exit(bench, cmd_z21_cv_read(8))
     monkeypatch.setattr(
         bench.station.programmer,
