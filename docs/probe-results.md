@@ -827,3 +827,32 @@ Also settled by the same failure: the `decoder_no_ack` hint blamed a 750 mA prog
 and said `retryable: false`. Both wrong here - the cause was the tool's own timing, and the
 failure heals with a 3 s wait. CV3 was confirmed unchanged (26) after both failed writes:
 nothing reached the decoder.
+
+## The retry that reported itself and never ran — SETTLED 2026-08-12
+
+The first fix for the cross-invocation gap (writes pay `_await_session_gap`, plus a retry-once
+when the instance's session history is unknown) failed its own acceptance rerun: stage 3 died
+`61 13` again, with the new hint claiming "the session-gap retry already ran". It had not run.
+
+Bracketing on the bench, same decoder, same `cv write 3 20`, each preceded by a `cv read 3`:
+
+| gap after the read's session close | result |
+| --- | --- |
+| ~3.2 s | write succeeds, verified |
+| ~5 s | write succeeds, verified |
+| ~10 s | write succeeds, verified |
+| minutes idle | write succeeds, verified |
+
+So the 3.0 s retry gap is sufficient — the retry itself never fired. The defect:
+`_retry_once_for_unknown_gap` read `_session_history_unknown` at **catch time**, but the failed
+attempt's own `finally` (`exit_service_mode`) had already stamped the session end and set the
+flag to `False`. By the time the exception arrived, history always looked "known" and the retry
+was skipped. The unit test passed because its `exit_service_mode` stub was a no-op that skipped
+exactly the state transition under test — the mock hid the bug.
+
+Fix: snapshot the flag **before** the attempt; test stubs now stamp `_last_session_end` and
+flip the flag like the real exit does. Mutation-proved: reverting the snapshot turns 4 tests red.
+
+Left open by the bracketing (all measured gaps followed a *read's* close): whether 3.0 s after a
+FAILED write's close also suffices — the retry path exercises exactly that. The next acceptance
+run answers it.
