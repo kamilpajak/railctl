@@ -30,6 +30,10 @@ path = "src/railctl/__init__.py"
 
 [tool.hatch.build.targets.wheel]
 packages = ["src/railctl"]
+# The curated CV catalog ships as package data. Hatchling includes package
+# files by default; this keeps the inclusion explicit, and
+# tests/unit/test_catalog.py proves it against a freshly built wheel.
+artifacts = ["*.toml"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]

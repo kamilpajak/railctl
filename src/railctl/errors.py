@@ -343,6 +343,18 @@ class IndexPageRequiredError(ProgrammingError):
     code: ClassVar[str] = "index_page_required"
 
 
+class CatalogError(RailctlError):
+    """The curated CV catalog failed to load.
+
+    Unparseable TOML, a wrong family or schema, a duplicate CV number or slug,
+    or a malformed block. A defect in shipped reference data rather than an
+    operator mistake, so like `StationError` it takes no row in `EXIT_CODES`
+    and resolves to the base 9; the machine-readable detail lives in `code`.
+    """
+
+    code: ClassVar[str] = "catalog"
+
+
 class AbortedError(RailctlError):
     """The operator interrupted the run. Cleanup ran; exit 9."""
 
