@@ -143,10 +143,15 @@ def test_rule_4_connection_targets_are_opaque_outside_transport():
 
 def test_rule_5_catalog_and_backup_touch_no_wire_layer():
     """catalog/ and backup/ never import transport, envelope or xbus, and never
-    name framing bytes, device paths or the 0x21 opcode."""
-    files = _python_files("catalog", "backup")
-    assert files, "the guard scanned no files; catalog/ exists and must be scanned"
-    assert _offenders(files, RULE_5_PATTERNS) == []
+    name framing bytes, device paths or the 0x21 opcode.
+
+    Each package is asserted non-empty on its own, not just their union: with
+    both existing, a rename of either would leave the combined list non-empty
+    and the guard silently scanning half of what it claims to.
+    """
+    for rel in ("catalog", "backup"):
+        assert _python_files(rel), f"the guard scanned no files in {rel}/; the package layout moved"
+    assert _offenders(_python_files("catalog", "backup"), RULE_5_PATTERNS) == []
 
 
 def test_the_rule_1_and_2_targets_are_scanned_once_they_exist():
