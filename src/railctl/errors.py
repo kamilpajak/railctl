@@ -355,6 +355,19 @@ class IndexPageRequiredError(ProgrammingError):
     code: ClassVar[str] = "index_page_required"
 
 
+class BackupIncompleteError(StationError):
+    """A backup run finished, but the file it wrote has holes.
+
+    Raised AFTER the partial file is written - the file is the product, and
+    this exit code is the honest label on it. `summary.complete` is false
+    exactly when a `no_response` or `error` row exists; a `skipped` row is a
+    recorded decision, not a hole, and never raises this. No row in
+    `EXIT_CODES`: like its `StationError` parent it resolves to the base 9.
+    """
+
+    code: ClassVar[str] = "backup_incomplete"
+
+
 class CatalogError(RailctlError):
     """The curated CV catalog failed to load.
 
@@ -365,6 +378,20 @@ class CatalogError(RailctlError):
     """
 
     code: ClassVar[str] = "catalog"
+
+
+class BackupFileError(RailctlError):
+    """A backup file is malformed, or could not be read or written.
+
+    Both directions of `railctl.backup.file`: a reader rejection (wrong
+    schema, a missing key, a `value` that disagrees with its `status`, a
+    duplicate CV row) and a file the OS refused to read or write. The message
+    names the first offence found. Like `CatalogError` it describes a data
+    file rather than the invocation, takes no row in `EXIT_CODES`, and
+    resolves to the base 9; the machine-readable detail lives in `code`.
+    """
+
+    code: ClassVar[str] = "backup_file"
 
 
 class AbortedError(RailctlError):

@@ -95,6 +95,8 @@ def test_error_code_maps_the_documented_names(exc_cls: type[RailctlError], code:
 PUBLISHED_ERROR_CODES: dict[str, str] = {
     "AbortedError": "aborted",
     "AmbiguousPort": "ambiguous_port",
+    "BackupFileError": "backup_file",
+    "BackupIncompleteError": "backup_incomplete",
     "CatalogError": "catalog",
     "ConfirmationRequiredError": "confirmation_required",
     "CvOutOfRangeError": "cv_out_of_range",

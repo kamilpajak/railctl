@@ -561,6 +561,85 @@ _CV_WRITE = CommandMeta(
 )
 
 
+# -- backup - the curated-set CV backup ---------------------------------------
+
+BACKUP_OUT_OPT = Option(
+    name="--out",
+    help=(
+        "where the backup lands: a file path, an existing directory (the generated "
+        "name is appended), or - for stdout; default ~/railctl-backups/"
+        "loco-<address>-curated.json"
+    ),
+    type="string",
+    default=None,
+)
+BACKUP_NOTE_OPT = Option(
+    name="--note",
+    help="free-text note stored in the file's note field",
+    type="string",
+    default=None,
+)
+BACKUP_FORCE_OPT = Option(
+    name="--force",
+    help="overwrite an existing backup file; without it an existing file is refused",
+    type="boolean",
+    default=False,
+)
+#: Same three words as `cv read`'s `--mode`, but backup's `auto` is stricter:
+#: it resolves to the programming track unless POM reading is MEASURED working
+#: - `auto` on an unprobed station must not gamble a 77-CV run on a channel
+#: nobody has seen answer (docs/probe-results.md R1: POM silence costs 6.7 s
+#: per CV on this station).
+BACKUP_MODE_OPT = Option(
+    name="--mode",
+    help=(
+        f"{_one_of(CV_MODES)}; auto backs up on the programming track unless "
+        f"`railctl doctor` measured POM reading as working"
+    ),
+    type="enum",
+    enum=CV_MODES,
+    default="auto",
+)
+#: Unlike `cv read`'s `--page`, this DECLARES the page the decoder is known to
+#: sit on - a backup never writes CV31/CV32, so a non-default pair read off
+#: the decoder without this flag aborts rather than record rows against a
+#: page the operator did not name.
+BACKUP_PAGE_OPT = Option(
+    name="--page",
+    help=(
+        "acknowledge the CV31:CV32 index page the decoder sits on, for example 145:0; "
+        "a backup never writes the selectors, so a non-default pair without this aborts"
+    ),
+    type="string",
+    default=None,
+)
+
+#: `cv read`'s whole set, unchanged: a backup is a batch of CV reads through
+#: the same station paths, so everything that set can produce - the
+#: programming family 10-19, 20 from the POM pre-flight, the station codes -
+#: this command can produce too. 9 carries three backup-specific meanings
+#: (see `_COMMAND_EXIT_MEANINGS`), and 16 is the `--mode pom` refusal when
+#: POM reading is a measured no. Like the sets above this is "can produce",
+#: not "has been observed": the reachability drives in
+#: tests/cli/test_backup.py cover the backup-specific codes, and dropping a
+#: code an inherited path can still reach is the documented-lie defect
+#: `STATION_EXIT_CODES`'s comment describes.
+BACKUP_EXIT_CODES: Final[tuple[int, ...]] = CV_READ_EXIT_CODES
+
+_BACKUP = CommandMeta(
+    path="backup",
+    help="Back up the curated decoder CVs to a railctl/backup/v1 file",
+    schema="railctl/backup/v1",
+    # Reads only: a backup that changes decoder state is not a backup, and the
+    # one CV pair a read path could write (the CV31/CV32 selectors) is exactly
+    # what this command refuses to touch - a non-default page is acknowledged
+    # with --page or the run aborts.
+    mutates=False,
+    exit_codes=BACKUP_EXIT_CODES,
+    options=(BACKUP_OUT_OPT, BACKUP_NOTE_OPT, BACKUP_FORCE_OPT, BACKUP_MODE_OPT, BACKUP_PAGE_OPT),
+)
+
+
 #: Command-scoped, and deliberately NOT the global `--address` /
 #: RAILCTL_ADDRESS / config default that `drive` and `function` read through
 #: `settings.address`. A user with `address = 3` configured who hits the panic
@@ -606,6 +685,7 @@ COMMANDS: Final[tuple[CommandMeta, ...]] = (
     _MONITOR,
     _CV_READ,
     _CV_WRITE,
+    _BACKUP,
     _SCHEMA,
 )
 
@@ -862,6 +942,18 @@ _COMMAND_EXIT_MEANINGS: Final[dict[str, dict[int, str]]] = {
             "the hold that should be under it, or a locomotive refused the speed-0 telegram. "
             "Treat the layout as able to move"
         ),
+    },
+    # 9 is `RailctlError`'s base code everywhere else, and for `backup` it is the
+    # exit the milestone is judged on: three distinct endings share it, and the
+    # `error.code` string is what tells them apart, not the process status.
+    "backup": {
+        9: (
+            "the backup ran and the file was written, but it has holes - a no_response or "
+            "error row (code backup_incomplete); or the operator interrupted the run and the "
+            'partial file carries "interrupted": true (code aborted); or the backup file '
+            "itself could not be written (code backup_file). A skipped row never causes "
+            "this - a recorded decision is not a hole"
+        )
     },
     # 9 is AbortedError everywhere else, and for `monitor` that IS how a normal run
     # ends - the operator's Ctrl-C. The row exists because the class summary reads as

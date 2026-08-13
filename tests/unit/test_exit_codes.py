@@ -13,6 +13,8 @@ from railctl.errors import (
     UNMAPPED_EXIT_CODE,
     AbortedError,
     AmbiguousPort,
+    BackupFileError,
+    BackupIncompleteError,
     CatalogError,
     ConfirmationRequiredError,
     CvOutOfRangeError,
@@ -96,6 +98,10 @@ def test_every_documented_exit_code_row(exc: RailctlError, code: int):
         (StationError("x"), 9),
         (AbortedError("x"), 9),
         (CatalogError("x"), 9),
+        # M9's three backup exits share 9: BackupIncompleteError through its
+        # StationError parent, BackupFileError straight off the base row.
+        (BackupIncompleteError("x"), 9),
+        (BackupFileError("x"), 9),
     ],
 )
 def test_subclasses_without_their_own_row_inherit_the_parent_code(exc: RailctlError, code: int):
