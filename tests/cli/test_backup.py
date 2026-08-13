@@ -644,6 +644,33 @@ def test_backup_nonzero_page_without_the_flag_exits_17(monkeypatch, tmp_path):
     assert not out.exists()
 
 
+def test_backup_on_the_zimo_resting_bank_needs_no_acknowledgement(monkeypatch, tmp_path):
+    """CV31=0 CV32=1 is where the reference MS450P22 rests, and it will not
+    accept CV32=0 (measured 2026-08-13, the write read back as 1). Treating
+    only 0:0 as neutral aborted every backup of a decoder in its normal
+    state, so the resting bank runs straight through and is recorded."""
+    out = tmp_path / "resting.json"
+    _install(monkeypatch, FakeBackupStation(read_values={31: 0, 32: 1}))
+    result = runner.invoke(app, ["backup", "--address", "3", "--out", str(out), "--format", "json"])
+    assert result.exit_code == 0, result.stderr
+    assert json.loads(out.read_text())["page"] == [0, 1]
+
+
+def test_backup_on_a_real_cv_page_still_aborts_and_names_the_neutral_banks(monkeypatch, tmp_path):
+    """A decoder parked on a genuine CV page - 145:2 holds the audio filters -
+    is the case the refusal exists for: the same CV numbers mean something the
+    catalog does not name there."""
+    out = tmp_path / "never.json"
+    _install(monkeypatch, FakeBackupStation(read_values={31: 145, 32: 2}))
+    result = runner.invoke(app, ["backup", "--address", "3", "--out", str(out), "--format", "json"])
+    assert result.exit_code == 17, result.stderr
+    envelope = _stderr_envelope(result)
+    assert "--page 145:2" in envelope["message"]
+    assert "0:0, 0:1" in envelope["message"]
+    assert envelope["details"]["neutral_pages"] == [[0, 0], [0, 1]]
+    assert not out.exists()
+
+
 def test_backup_page_flag_acknowledges_and_records_the_read_pair(monkeypatch, tmp_path):
     _install(monkeypatch, FakeBackupStation(read_values={31: 145}))
     result = runner.invoke(

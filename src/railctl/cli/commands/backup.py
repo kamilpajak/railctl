@@ -10,9 +10,10 @@ Three properties are load-bearing here rather than emergent:
 
 * **a backup never writes the decoder.** The one CV pair a read path could
   write - the CV31/CV32 page selectors - is exactly what this command refuses
-  to touch: a non-default pair read off the decoder aborts (exit 17) unless
-  `--page` acknowledges it, and the file records the pair as READ, never as
-  declared;
+  to touch: a pair outside `NEUTRAL_PAGES` aborts (exit 17) unless `--page`
+  acknowledges it, and the file records the pair as READ, never as declared.
+  The reference decoder rests at 0:1 and cannot be moved off it, which is why
+  neutral is a set and not the single pair 0:0 this once assumed;
 * **`--mode auto` never gambles on POM.** It resolves to the programming
   track unless `pom_read` is MEASURED working - on this station a silent POM
   attempt costs 6.7 s per CV (docs/probe-results.md R1), and 77 of those is
@@ -118,8 +119,28 @@ SET_NAME: Final[str] = "curated"
 #: XpressNet's short/long address boundary: 1..99 ride in one byte.
 SHORT_ADDRESS_MAX: Final[int] = 99
 
-#: CV31/CV32 both zero - the ZIMO default page a backup expects to find.
+#: The pair a backup reports when it has nothing measured to report.
 DEFAULT_PAGE: Final[CvPage] = (0, 0)
+
+#: The CV31/CV32 pairs that mean "no special CV page is selected", so the
+#: curated CVs above 256 are the NORMAL ones the catalog names.
+#:
+#: Both come from the ZIMO MS/MN manual: (0, 0) is "CV page 0 (main page)",
+#: and (0, 1) is what the manual calls "Resetting the CV bank" (p. 69). The
+#: reference MS450P22 rests at (0, 1) and REFUSES to leave it - measured
+#: 2026-08-13, `cv write 32 0` was accepted by the station and read back as 1,
+#: which the write verification caught. Treating only (0, 0) as neutral
+#: therefore aborted every backup of a decoder in its normal state.
+#:
+#: That (0, 1) really is neutral is measured, not inferred from the manual's
+#: wording, which contradicts itself elsewhere: on that bank CV287, CV395,
+#: CV396 and CV397 read 55, 80, 15 and 14. The last two carry a documented
+#: range of 0-29 and landed on F15/F14, a coherent volume-down/volume-up
+#: pair - see docs/probe-results.md, "The ZIMO index bank rests at 0:1".
+#: Anything else (a real page such as 145/2, which holds the audio filters)
+#: still stops a backup, because there the same CV numbers mean something
+#: the catalog does not name.
+NEUTRAL_PAGES: Final[frozenset[CvPage]] = frozenset({(0, 0), (0, 1)})
 
 #: The design's step 4, in read order: CV7/CV8 (version, manufacturer) and
 #: CV250-253 (decoder type and the three serial bytes) fill the `decoder`
@@ -396,12 +417,17 @@ class _Collection:
         selector_31 = self._singleton(31)
         selector_32 = self._singleton(32)
         page: CvPage = (selector_31.value, selector_32.value)
-        if page != DEFAULT_PAGE and self._declared_page is None:
+        if page not in NEUTRAL_PAGES and self._declared_page is None:
+            neutral = ", ".join(f"{high}:{low}" for high, low in sorted(NEUTRAL_PAGES))
             raise IndexPageRequiredError(
-                f"the decoder sits on index page CV31={page[0]} CV32={page[1]}, not the "
-                f"default {DEFAULT_PAGE[0]}:{DEFAULT_PAGE[1]}; a backup never writes the "
+                f"the decoder sits on CV page CV31={page[0]} CV32={page[1]}, not on a "
+                f"neutral bank ({neutral}); the curated CVs above 256 would not mean "
+                f"what the catalog names them there, and a backup never writes the "
                 f"selectors, so rerun with --page {page[0]}:{page[1]} to acknowledge it",
-                details={"page": list(page)},
+                details={
+                    "page": list(page),
+                    "neutral_pages": [list(p) for p in sorted(NEUTRAL_PAGES)],
+                },
             )
         if self._declared_page is not None and self._declared_page != page:
             self.page_mismatch = self._declared_page
