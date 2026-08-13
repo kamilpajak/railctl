@@ -964,3 +964,52 @@ that cannot repeat the selection.
 What is wrong is the pairing: the operator is asked to approve a write, and then a warning says
 the page was not selected. Both are true of different layers, and together they read as a
 contradiction. Worth an issue against the M8 surface, not a blocker for M9.
+
+## M9 acceptance run — PASSED 2026-08-13
+
+Four stages against the MS450P22 on the programming track, one invocation of
+`tests/hardware/test_m9_acceptance.py`, 1 h 25 min including the gate waits.
+
+| stage | observable | result |
+| --- | --- | --- |
+| 1 | doctor probe | service encodings proven, `service_ext_cv` true |
+| 2 | a real backup file | **77 of 77 ok**, no holes, `complete: true`, validates against `read_backup` |
+| 3 | the same backup again | **byte-identical apart from `created_utc`** (11:27:42Z → 11:52:42Z) |
+| 4 | the NDJSON stream | 79 lines, sequence 0..78 contiguous, `start` first, `summary` last, exit 0 |
+
+Stage 3 is the milestone's acceptance sentence and the only part the unit tests could not make:
+they prove the writer is deterministic given identical reads; only the decoder can prove it
+answers identically twice. It does. The run also opened its first session moments after stage 2
+closed its last, which is the case that used to fail `61 13`, and it passed without a retry.
+
+Recorded in the file: `page: [0, 1]` (the resting bank), `cv_encoding: Z21_16BIT` - the reads
+resolved to the Z21 opcodes, not the direct or extended ones - and the decoder block
+`manufacturer_id 145, decoder_version 5, decoder_type 6, serial_bytes [251, 105, 75]`.
+
+### CV251-253 answer after all
+
+The design says of the serial bytes that they "have never been read on the reference hardware",
+and both the restore identity gate and this acceptance file were built around that. **They
+answered on all three runs, with the same values: CV251=251, CV252=105, CV253=75.** Whether
+they were silent before this firmware or simply never attempted is not established by our own
+record - what is established is that they answer now, repeatably.
+
+Consequence for M10: the serial part of the restore identity gate can be a real gate rather
+than the printed warning the design settled for. That decision should be re-made against this
+measurement, not inherited.
+
+### A backup costs 6 s per CV, and half of it is the session gap
+
+Each backup took 466 s for 77 CVs - **6.05 s per CV**, not the 1.7 s a service read was measured
+at. The NDJSON stream shows why: each `cv` line carries `elapsed_ms` of about 3.0 s (the read
+plus its own service session), and the wall clock is twice that, because every read closes its
+session and the next one waits out `Timing.service_session_gap` (3.0 s) before opening again.
+
+So the cost is structural, not decoder speed: `cv_read_many` gives each CV its own session.
+`CvProgrammer.service_read_many` already exists and reads several CVs inside ONE session -
+written for exactly this - but the batch path does not use it. Using it would remove both the
+per-CV session setup and the gap.
+
+This matters for M11: a `--all` sweep of 1024 CVs at 6 s each is **1 h 42 min**. The >60 s
+confirmation would state it honestly, but the number itself is a tooling choice, not a hardware
+limit.

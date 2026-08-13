@@ -11,9 +11,11 @@ WHAT YOU NEED AT THE BENCH
     * the YD7010 connected over USB, nothing else driving the layout
     * the ZIMO MS450P22 (locomotive 3) standing on the PROGRAMMING track with good
       wheel contact - every read here runs in service mode
-    * patience: each backup reads the whole curated set one CV at a time, about
-      1.7 s per CV measured 2026-08-11, so roughly TWO MINUTES per stage and about
-      SEVEN MINUTES for the file. Expect the track to flicker between stages.
+    * patience: each backup reads the whole curated set one CV at a time and costs
+      about 6 s per CV - 3 s for the read's own service session, 3 s waiting out the
+      inter-session gap before the next one (measured 2026-08-13). That is EIGHT
+      MINUTES per backup and around 25 minutes of machine time for the file, plus
+      however long you take at the gates. Expect the track to flicker between stages.
 
 THIS FILE WRITES NOTHING TO THE DECODER. That is the milestone's central claim, not a
 side effect: `backup` never writes a CV, not even the CV31/CV32 index selectors. If any
@@ -52,12 +54,15 @@ pytestmark = pytest.mark.hardware
 
 ZIMO_MANUFACTURER_ID = 145
 ACCEPTANCE_ADDRESS = "3"
-#: Exit 9 is `backup_incomplete`, and on this bench it is the EXPECTED ending:
-#: CV251-253 (the serial bytes) have never answered here. A run that exits 9
-#: with only those three missing is a pass; the file is still the product.
+#: Exit 9 is `backup_incomplete`. It is accepted here, not expected: the
+#: 2026-08-13 run came back 77 of 77 with no holes at all. A run that exits 9
+#: with only the CVs below missing is still a pass; the file is the product
+#: either way.
 INCOMPLETE_EXIT_CODE = 9
-#: The three the bench has never got an answer from. Anything else silent is a
-#: finding to record, not a known hole.
+#: The serial bytes, tolerated as holes because the design records them as
+#: never having been read on this hardware. They DID answer on 2026-08-13
+#: (251, 105, 75, on all three backups), so a hole here is now itself worth
+#: a note. Anything outside this set stops the run.
 KNOWN_SILENT_CVS = frozenset({251, 252, 253})
 
 runner = CliRunner()
