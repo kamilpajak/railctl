@@ -903,3 +903,64 @@ The missing piece remains a RailCom detector on the layout, not the station's fi
 The second run also exercised the capability merge as designed: its service checks came back
 `unknown` (`61 13` — nothing was standing on the prog track), and the merge preserved the first
 run's measured `true` values instead of letting `unknown` overwrite them.
+
+## The ZIMO index bank rests at 0:1 and will not leave it — SETTLED 2026-08-13
+
+The first `railctl backup` run against the MS450P22 refused with exit 17: the decoder's index
+selectors read **CV31=0, CV32=1**, and the command treated anything but 0:0 as "parked on a CV
+page". The refusal itself was correct behaviour - a backup never writes the selectors - but the
+premise was wrong, and this section is what replaced it.
+
+**The bank cannot be moved.** `cv write 32 0` was accepted by the station and the independent
+read-back returned 1, so the write did not stick (exit 14 `cv_verify`, which is the verification
+doing its job). A `select_page` to 0:1 in the same session verified fine, so this is not
+session volatility: the decoder accepts CV32=1 and refuses CV32=0.
+
+| operation | result |
+| --- | --- |
+| `cv read 31 32 --mode service` | CV31=0, CV32=1 |
+| `cv write 32 0` (service, verified) | station accepted, read-back 1 → `cv_verify`, exit 14 |
+| `select_page((0,1))` inside `cv read 265 --page 0:1` | wrote and verified, decoder unchanged |
+
+**On that bank the CVs above 256 read as the NORMAL ones.** Read with no page selection at all
+(`cv read 287 395 396 397 --mode service`), against the ZIMO MS/MN manual's own CV table:
+
+| CV | slug | read | manual |
+| --- | --- | --- | --- |
+| 287 | brake_squeal_threshold | 55 | default 50, range 0-255 |
+| 395 | volume_limit | 80 | default 64, range 0-255 |
+| 396 | volume_down_key | 15 | range **0-29** |
+| 397 | volume_up_key | 14 | range **0-29** |
+
+CV396 and CV397 carry a documented range of 0-29 and landed on 15 and 14 - F15 and F14, a
+coherent volume-down/volume-up pair. A byte read from the wrong bank lands inside 0-29 with
+probability 30/256; both doing so, adjacent and in the sensible order, is not what a wrong bank
+produces. The doctor's D7 has also been reading CV257 successfully on this bank since the first
+probe, with no page selection anywhere in its path.
+
+The manual contradicts itself here and the measurement settles it: p. 70 says the normal CVs
+"#257 … #512 can only be addressed if CVs #31 and #32 = 0", while p. 69 calls **0:1** the
+result of "Resetting the CV bank". The decoder behaves as though 0:1 is neutral, and refuses
+the state the first sentence demands.
+
+Consequence in the tool: `backup` now treats `NEUTRAL_PAGES = {(0,0), (0,1)}` as "no page
+selected" and only refuses on a real page such as 145/2 (the audio filters), where the same CV
+numbers mean something the catalog does not name. The measured pair is always recorded in the
+file, so a later reader knows which bank the values came from.
+
+**Still unmeasured:** whether a decoder parked on 145/x can be read at all here, and whether
+other ZIMO decoders rest at 0:1 or at 0:0. One decoder is one decoder.
+
+## `cv read --page` does not select a page in service mode — FOUND 2026-08-13
+
+Discovered while measuring the bank above. `cv read 265 --page 0:1 --mode service` prints a
+`page.not_selected` warning: `service_read` cannot honour a page itself, so the value comes
+from whatever bank is live. The CLI's confirmation text, meanwhile, promises that "--page
+selects the ZIMO index page by WRITING CV31/CV32 ... The pair is read first and re-selected as
+found afterwards" - and the batch path (`cv_read_many`) does exactly that, including the
+restore. So the write does happen for a batch, and the extra warning comes from the per-CV read
+that cannot repeat the selection.
+
+What is wrong is the pairing: the operator is asked to approve a write, and then a warning says
+the page was not selected. Both are true of different layers, and together they read as a
+contradiction. Worth an issue against the M8 surface, not a blocker for M9.
