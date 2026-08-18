@@ -18,7 +18,17 @@ from typer.core import TyperGroup
 
 from railctl.cli._errors import OutputContext, _internal_report, report_for, usage_report
 from railctl.cli._meta import GLOBAL_OPTIONS, TREE_ORDER, root_epilog, typer_option
-from railctl.cli.commands import backup, basics, cv, doctor, monitor, power, schema, throttle
+from railctl.cli.commands import (
+    backup,
+    basics,
+    cv,
+    doctor,
+    monitor,
+    power,
+    restore,
+    schema,
+    throttle,
+)
 from railctl.cli.config import VERBOSE_ENV, Config, config_path, load_config
 from railctl.cli.deps import Settings, build_settings, configure_logging, context_for
 from railctl.cli.render import render_error
@@ -183,6 +193,7 @@ throttle.register(app)
 monitor.register(app)
 cv.register(app)
 backup.register(app)
+restore.register(app)
 schema.register(app)
 
 

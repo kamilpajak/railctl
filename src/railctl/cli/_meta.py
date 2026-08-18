@@ -640,6 +640,119 @@ _BACKUP = CommandMeta(
 )
 
 
+# -- restore - writing a curated set back out of a file -----------------------
+
+RESTORE_FILE_ARG = Argument(
+    name="file",
+    help="the railctl/backup/v1 file to restore from",
+    type="string",
+)
+
+#: One word, and that is the whole decision (M10 D1). `restore` runs on the
+#: programming track alone: the identity gate needs reads, and on this station
+#: a POM CV read is measured silent (docs/probe-results.md R1), so a main-track
+#: restore could be neither gated nor verified. The option exists rather than
+#: being dropped because someone will type `--track main` by analogy with
+#: `cv write`, and they deserve the reason instead of "no such option" - which
+#: is also why `main` is NOT published here: the manifest lists what is
+#: accepted, and `commands/restore.py` answers the refused word by name.
+RESTORE_TRACKS: Final[tuple[str, ...]] = ("prog",)
+RESTORE_TRACK_OPT = Option(
+    name="--track",
+    help=(
+        "prog, the programming track - the only track a restore runs on: --track main is "
+        "refused because nothing there can gate the identity or verify a write"
+    ),
+    type="enum",
+    enum=RESTORE_TRACKS,
+    default="prog",
+)
+RESTORE_DRY_RUN_OPT = Option(
+    name="--dry-run",
+    help="read and compare everything, then print the plan; writes nothing at all",
+    type="boolean",
+    default=False,
+)
+RESTORE_WITH_ADDRESS_OPT = Option(
+    name="--with-address",
+    help=(
+        "also write CV17, CV18 and CV1 (in that order, last but for CV144) and CV29 whole; "
+        "needs all four read ok in the file"
+    ),
+    type="boolean",
+    default=False,
+)
+RESTORE_MERGE_CV29_OPT = Option(
+    name="--merge-cv29",
+    help=(
+        "write the file's CV29 with the decoder's own long-address bit preserved; "
+        "contradicts --with-address, which writes the byte whole"
+    ),
+    type="boolean",
+    default=False,
+)
+RESTORE_INCLUDE_SWEEP_OPT = Option(
+    name="--include-sweep",
+    help="also write rows the curated catalog does not name; no source produces them yet",
+    type="boolean",
+    default=False,
+)
+RESTORE_ALLOW_INCOMPLETE_OPT = Option(
+    name="--allow-incomplete",
+    help=(
+        "restore from a file with holes; the holes themselves are never written, "
+        "with or without this"
+    ),
+    type="boolean",
+    default=False,
+)
+#: A resource-bound token, not a bare yes: the value is the serial just read
+#: off the decoder, so it cannot be typed ahead of the refusal that prints it.
+#: `--yes` deliberately does not answer this one - `--yes` is a habit, and the
+#: whole point of the serial gate is the one case where a habit is wrong.
+RESTORE_CONFIRM_OPT = Option(
+    name="--confirm",
+    help=(
+        "the live decoder serial, as the refusal printed it (for example 251.105.75); "
+        "the only way past a serial mismatch"
+    ),
+    type="string",
+    default=None,
+)
+
+#: `cv write`'s set minus 16. A restore is a batch of programming-track CV
+#: writes and reads, so the whole programming family 10-19 and the station
+#: codes come with it, 14 is the verification mismatch this command is judged
+#: on, and 15 is a file value the catalog refuses. 16 is dropped because
+#: nothing here can reach it: `PomReadUnsupportedError` is raised only where
+#: POM was asked for, and `restore` has no POM path at all (D1). 9 carries
+#: several restore-specific meanings - see `_COMMAND_EXIT_MEANINGS`.
+RESTORE_EXIT_CODES: Final[tuple[int, ...]] = tuple(sorted(set(CV_WRITE_EXIT_CODES) - {16}))
+
+_RESTORE = CommandMeta(
+    path="restore",
+    help="Write decoder CVs back from a railctl/backup/v1 file, in four verified stages",
+    schema="railctl/restore/v1",
+    mutates=True,
+    exit_codes=RESTORE_EXIT_CODES,
+    arguments=(RESTORE_FILE_ARG,),
+    options=(
+        RESTORE_DRY_RUN_OPT,
+        RESTORE_WITH_ADDRESS_OPT,
+        RESTORE_MERGE_CV29_OPT,
+        RESTORE_INCLUDE_SWEEP_OPT,
+        RESTORE_ALLOW_INCOMPLETE_OPT,
+        RESTORE_TRACK_OPT,
+        RESTORE_CONFIRM_OPT,
+    ),
+    # Every run but `--dry-run`, which writes nothing and therefore asks
+    # nothing. The question names the file, the locomotive the file carries,
+    # how many CVs would be written and what that costs at the measured 6 s
+    # per CV.
+    confirms=True,
+)
+
+
 #: Command-scoped, and deliberately NOT the global `--address` /
 #: RAILCTL_ADDRESS / config default that `drive` and `function` read through
 #: `settings.address`. A user with `address = 3` configured who hits the panic
@@ -686,6 +799,7 @@ COMMANDS: Final[tuple[CommandMeta, ...]] = (
     _CV_READ,
     _CV_WRITE,
     _BACKUP,
+    _RESTORE,
     _SCHEMA,
 )
 
@@ -954,6 +1068,37 @@ _COMMAND_EXIT_MEANINGS: Final[dict[str, dict[int, str]]] = {
             "itself could not be written (code backup_file). A skipped row never causes "
             "this - a recorded decision is not a hole"
         )
+    },
+    # 9 collects every restore refusal that is about the FILE or the decoder in
+    # front of you rather than about a telegram, and 14 is the one this command
+    # is judged on. Both class summaries are right about their classes and
+    # wrong about this command: `CvVerifyError`'s describes a single write, and
+    # a restore reports a whole stage at once.
+    "restore": {
+        9: (
+            "the run refused before writing anything, or stopped part-way. The error.code "
+            "says which: decoder_identity_mismatch (the decoder on the programming track is "
+            "not the one the file came from), restore_file_incomplete (the file has holes "
+            "and --allow-incomplete was not given), programming_locked (live CV144 is not 0 "
+            "on a decoder family that locks on it), address_set_incomplete (--with-address "
+            "with CV1/CV17/CV18/CV29 not all ok in the file), backup_file (the file is "
+            "unreadable or malformed), or aborted (Ctrl-C - nothing is rolled back)"
+        ),
+        14: (
+            "a stage's read-back disagreed with the value that stage intended to write, "
+            "after one retry and one re-read. The mismatch table names every CV; nothing "
+            "is rolled back, and re-running restore is the recovery"
+        ),
+        15: (
+            "a VALUE in the file falls outside the catalog's min/max for its CV - the "
+            "catalog is enforcing on write. Every offender is listed, and the run refused "
+            "before its first write"
+        ),
+        17: (
+            "the decoder sits on a different CV31/CV32 index page than the file was taken "
+            "on, so the CVs above 256 would not mean the same thing. A restore never writes "
+            "the selectors, so it refuses instead of moving the bank"
+        ),
     },
     # 9 is AbortedError everywhere else, and for `monitor` that IS how a normal run
     # ends - the operator's Ctrl-C. The row exists because the class summary reads as

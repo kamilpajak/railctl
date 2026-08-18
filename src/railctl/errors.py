@@ -410,6 +410,58 @@ class AddressSetIncompleteError(RailctlError):
     code: ClassVar[str] = "address_set_incomplete"
 
 
+class RestoreFileIncompleteError(RailctlError):
+    """`restore` was handed a file with holes, and nobody said that was intended.
+
+    Distinct from `BackupIncompleteError`, which labels a file this tool has
+    just WRITTEN: this one refuses to write a decoder FROM such a file. The
+    holes are never written either way - a `no_response` row carries no value
+    to write - so the flag is not permission to guess, it is the operator
+    stating that a partial restore is what they want. Refused before the link
+    opens, because a refusal that costs a port is a refusal an operator learns
+    to pre-empt with the flag. Takes no row in `EXIT_CODES` and resolves to
+    the base 9.
+    """
+
+    code: ClassVar[str] = "restore_file_incomplete"
+
+
+class DecoderIdentityMismatchError(RailctlError):
+    """The decoder on the programming track is not the one the file came from.
+
+    Service mode addresses the TRACK, not a locomotive, so nothing in the
+    protocol stops a restore writing a whole CV set into whatever happens to
+    be standing there - and the curated set deliberately skips CV1/17/18/29,
+    removing the one symptom (a changed address) that would have shown up
+    later. Only this gate stands between a restore and the wrong locomotive.
+
+    Live CV8 against the file's `manufacturer_id` and live CV250 against its
+    `decoder_type` are hard: no flag overrides them. A serial mismatch
+    (CV251-253) is overridable only by `--confirm=<the serial just read>`,
+    never by `--yes`, because restoring onto a replacement decoder is
+    legitimate and a slip of the hand is not. Takes no row in `EXIT_CODES`
+    and resolves to the base 9.
+    """
+
+    code: ClassVar[str] = "decoder_identity_mismatch"
+
+
+class ProgrammingLockedError(RailctlError):
+    """Live CV144 is non-zero on a decoder family that reads it as the lock.
+
+    On the older ZIMO MX family CV144 is the programming/update lock and a
+    non-zero value blocks writes, so a restore that started anyway would fail
+    CV by CV with nothing saying why. The tool refuses instead of clearing it:
+    the lock is there because somebody set it, and unlocking a decoder is a
+    decision, not a step. On the MS family CV144 is the confirmation jingle
+    and this is not a precondition at all (`station.treats_cv144_as_lock`),
+    which is also why an unread decoder type never raises this. Takes no row
+    in `EXIT_CODES` and resolves to the base 9.
+    """
+
+    code: ClassVar[str] = "programming_locked"
+
+
 class AbortedError(RailctlError):
     """The operator interrupted the run. Cleanup ran; exit 9."""
 
