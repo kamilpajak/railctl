@@ -33,7 +33,6 @@ from railctl.backup.plan import (
     REASON_NEVER_RESTORED,
     REASON_NOT_IN_CATALOG,
     REASON_UNCHANGED,
-    STAGE_C_ORDER,
     STAGES,
 )
 from railctl.backup.types import CvRecord, ReadStatus
@@ -136,9 +135,11 @@ def test_cv28_and_cv29_are_stage_b_with_cv28_first():
 
 
 def test_the_address_cvs_are_stage_c_in_the_order_17_18_1():
+    """The literal order, not `STAGE_C_ORDER`: a test written against the
+    constant it is meant to pin passes whatever the constant is changed to."""
     rows = _plan(_address_records(), {}, with_address=True)
 
-    assert [row.num for row in rows if row.stage == "C"] == list(STAGE_C_ORDER)
+    assert [row.num for row in rows if row.stage == "C"] == [CV17, CV18, CV1]
 
 
 def test_cv144_is_stage_d_and_runs_last():
@@ -244,7 +245,7 @@ def test_with_address_and_merge_cv29_contradict_each_other():
 def test_the_address_cvs_are_skipped_without_the_flag():
     rows = _by_cv(_plan(_address_records(), {}))
 
-    assert [rows[num].reason for num in STAGE_C_ORDER] == [REASON_ADDRESS_WITHOUT_FLAG] * 3
+    assert [rows[num].reason for num in (CV17, CV18, CV1)] == [REASON_ADDRESS_WITHOUT_FLAG] * 3
 
 
 def test_with_address_refuses_a_file_missing_an_address_cv():
