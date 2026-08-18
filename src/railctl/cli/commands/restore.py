@@ -771,7 +771,10 @@ class _RestoreRun:
 # -- the three renderings -----------------------------------------------------
 
 
-def _row_json(row: PlannedWrite) -> dict[str, object]:
+def row_json(row: PlannedWrite) -> dict[str, object]:
+    """One plan row as JSON. Public because `commands/diff.py` renders the same
+    rows from the same planner: two spellings of one table would let a consumer
+    key on `cv` in one envelope and on `num` in the other."""
     return {
         "cv": row.num,
         "name": row.name,
@@ -784,7 +787,10 @@ def _row_json(row: PlannedWrite) -> dict[str, object]:
     }
 
 
-def _row_line(row: PlannedWrite) -> str:
+def row_line(row: PlannedWrite) -> str:
+    """The human form of one plan row, shared with `diff` for the same reason
+    `row_json` is: the arrow reads `what is there -> what the file says` in
+    both commands, because one planner decided both."""
     label = f"CV{row.num} {row.name}" if row.name else f"CV{row.num}"
     if row.action == ACTION_WRITE:
         live = "unread" if row.live_value is None else str(row.live_value)
@@ -841,10 +847,10 @@ def build_restore(state: _RestoreRun) -> CommandResult:
         "written": len(state.written),
         "verified": len(state.verified),
         "stages_completed": list(state.stages_completed),
-        "cvs": [_row_json(row) for row in state.rows],
+        "cvs": [row_json(row) for row in state.rows],
     }
     for row in state.rows:
-        result.say(_row_line(row))
+        result.say(row_line(row))
     result.say(
         f"{counts['write']} to write, {counts['unchanged']} unchanged, "
         f"{counts['skip']} skipped, {counts['unreadable']} unreadable"
@@ -968,7 +974,7 @@ def _run_ndjson(settings: Settings, output: OutputContext, invocation: _Invocati
         )
 
     def on_cv(row: PlannedWrite) -> None:
-        stream.event("cv", **_row_json(row))
+        stream.event("cv", **row_json(row))
 
     def on_stage(stage: str, rows: Sequence[PlannedWrite], mismatches: Sequence[Mismatch]) -> None:
         stream.event(
