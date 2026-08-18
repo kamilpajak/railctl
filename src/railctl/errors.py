@@ -394,6 +394,22 @@ class BackupFileError(RailctlError):
     code: ClassVar[str] = "backup_file"
 
 
+class AddressSetIncompleteError(RailctlError):
+    """`restore --with-address` was asked for an address the file does not fully carry.
+
+    CV1, CV17, CV18 and CV29 decide together which address a locomotive answers
+    to: CV29 bit 5 selects between the short address in CV1 and the long address
+    in CV17/CV18. Writing some of them and not the others leaves a decoder
+    answering at an address that is in no file and on no label, and finding it
+    again means sweeping the address space. So a run refuses before its first
+    write when any of the four is missing from the file or did not read `ok`.
+    Like `BackupFileError` it describes the file rather than the invocation,
+    takes no row in `EXIT_CODES`, and resolves to the base 9.
+    """
+
+    code: ClassVar[str] = "address_set_incomplete"
+
+
 class AbortedError(RailctlError):
     """The operator interrupted the run. Cleanup ran; exit 9."""
 

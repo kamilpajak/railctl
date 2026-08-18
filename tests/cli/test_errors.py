@@ -94,6 +94,7 @@ def test_error_code_maps_the_documented_names(exc_cls: type[RailctlError], code:
 #: renamed inside a major version, so the two copies disagreeing is the alarm, not the bug.
 PUBLISHED_ERROR_CODES: dict[str, str] = {
     "AbortedError": "aborted",
+    "AddressSetIncompleteError": "address_set_incomplete",
     "AmbiguousPort": "ambiguous_port",
     "BackupFileError": "backup_file",
     "BackupIncompleteError": "backup_incomplete",

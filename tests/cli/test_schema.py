@@ -389,7 +389,7 @@ def test_error_codes_list_exactly_the_exception_tree_plus_the_two_reserved_codes
     published = {row["code"] for row in error_codes()}
     assert published == set(PUBLISHED_ERROR_CODES.values()) | RESERVED_CODES
     assert len(error_codes()) == len(published)  # no duplicate rows
-    assert len(published) == 37
+    assert len(published) == 38
 
 
 def test_error_code_rows_read_their_facts_off_the_class():
