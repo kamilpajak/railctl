@@ -1393,6 +1393,114 @@ def test_a_short_circuit_in_the_first_group_leaves_every_later_cv_unattempted(
     assert bench.transport.script_pending == []
 
 
+def test_a_short_circuit_on_the_last_cv_of_a_group_still_ends_the_batch(bench_factory, monkeypatch):
+    """The batch ends on the ERROR, not on the tail the error leaves behind.
+
+    `service_read_many` marks the CVs after a batch-ending error as not
+    attempted by iterating `cvs[len(outcomes):]`, which is empty when the CV
+    that met the error was the LAST of its group. Reading the abort off that
+    tail therefore missed one failure position in every `SERVICE_BATCH_SIZE`,
+    and the next session was opened onto a track the station had just
+    reported shorted. Only the first session is scripted, so an
+    implementation that reads the abort off the tail fails here.
+    """
+    bench = _service_bench(bench_factory)
+    cvs = list(range(101, 101 + SERVICE_BATCH_SIZE + 1))
+    _script_one_session(bench, cvs[:SERVICE_BATCH_SIZE])
+    last_of_group = cvs[SERVICE_BATCH_SIZE - 1]
+    monkeypatch.setattr(
+        bench.station.programmer,
+        "await_result",
+        lambda matcher, **kwargs: (
+            ShortCircuit()
+            if matcher.cv == last_of_group
+            else CvValue(raw_cv=matcher.cv, value=matcher.cv, ident=0x14, z21_form=True)
+        ),
+    )
+
+    outcomes = bench.station.programmer.cv_read_many(
+        [CvSpec(cv=cv) for cv in cvs], mode=ProgMode.SERVICE
+    )
+
+    assert isinstance(outcomes[SERVICE_BATCH_SIZE - 1].error, ShortCircuitError)
+    assert [(o.spec.cv, o.result, o.error) for o in outcomes[SERVICE_BATCH_SIZE:]] == [
+        (cv, None, None) for cv in cvs[SERVICE_BATCH_SIZE:]
+    ]
+    assert bench.transport.script_pending == []
+
+
+def _script_session_that_will_not_close(bench, cvs) -> None:
+    """One session that answers every read and then refuses to leave service
+    mode.
+
+    `exit_service_mode` sends resume-operations twice, the station keeps
+    reporting `62 22 08` both times, and it raises `StationBusyError` out of
+    `service_read_many`'s `finally` - after every CV of the group already has
+    an outcome. Nothing beyond that failing close is scripted, so a further
+    session fails the test where it happens.
+    """
+    bench.expect(STATUS_REQUEST, reply=STATUS_POWER_ON)
+    for cv in cvs:
+        bench.expect(cmd_z21_cv_read(cv), reply=ACK)
+    bench.expect(cmd_track_power_on(), reply=ACK)
+    bench.expect(STATUS_REQUEST, reply=STATUS_SERVICE_MODE)
+    bench.expect(cmd_track_power_on(), reply=ACK)
+    bench.expect(STATUS_REQUEST, reply=STATUS_SERVICE_MODE)
+
+
+def test_a_session_that_will_not_close_never_blames_the_next_group_s_first_cv(
+    bench_factory, monkeypatch
+):
+    """A close that fails between groups leaves the next group NOT ATTEMPTED.
+
+    Its first CV had no telegram sent for it, and `CvReadOutcome` reserves
+    `result=None, error=None` for exactly that. Reported with the previous
+    session's close error instead, `backup/mapping.py::status_for` writes it
+    into the file as `error` - a decoder that was asked and failed - rather
+    than as a CV the sweep never reached.
+    """
+    bench = _service_bench(bench_factory)
+    cvs = list(range(101, 101 + SERVICE_BATCH_SIZE + 1))
+    _script_session_that_will_not_close(bench, cvs[:SERVICE_BATCH_SIZE])
+    _answer_every_read(bench, monkeypatch)
+
+    outcomes = bench.station.programmer.cv_read_many(
+        [CvSpec(cv=cv) for cv in cvs], mode=ProgMode.SERVICE
+    )
+
+    assert [(o.spec.cv, o.result, o.error) for o in outcomes[SERVICE_BATCH_SIZE:]] == [
+        (cv, None, None) for cv in cvs[SERVICE_BATCH_SIZE:]
+    ]
+    assert [outcome.error for outcome in outcomes] == [None] * len(cvs)
+    assert bench.transport.script_pending == []
+
+
+def test_a_session_that_will_not_close_on_the_last_group_reports_the_failure(
+    bench_factory, monkeypatch
+):
+    """A group that answered in full and then could not close says so.
+
+    `StationBusyError` out of `exit_service_mode` means the station is still
+    in service mode and the main track is dead. No CV failed, so no outcome
+    can carry that - and returning a list of clean successes would let
+    `railctl backup` write a complete file and exit 0 over a layout the run
+    left wedged. The values are kept and the fault rides beside them as a
+    `service.session_close_failed` warning, the same rule
+    `cli/deps.py::close_after` applies to a link that will not close.
+    """
+    bench = _service_bench(bench_factory)
+    _script_session_that_will_not_close(bench, (7, 8))
+    _answer_every_read(bench, monkeypatch)
+
+    outcomes = bench.station.programmer.cv_read_many(
+        [CvSpec(cv=7), CvSpec(cv=8)], mode=ProgMode.SERVICE
+    )
+
+    assert "service.session_close_failed" in bench.event_names()
+    assert [outcome.result.value for outcome in outcomes] == [7, 8]
+    assert bench.transport.script_pending == []
+
+
 def test_a_spec_that_carries_a_page_keeps_the_per_cv_path(bench_factory, monkeypatch):
     """Paging still reads CV31/CV32 first, selects, and restores.
 

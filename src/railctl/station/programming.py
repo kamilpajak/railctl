@@ -916,10 +916,15 @@ class CvProgrammer:
         conditions no later CV in the batch can survive, so continuing would
         send telegrams that cannot work and bury the real fault under eight
         copies of its consequences. They are recorded as that CV's outcome
-        and the batch stops there; the CVs after it are simply absent from
-        the returned list, which is not the same as having failed.
-        `cv_read_many` continues past them, but each of its reads opens its
-        own session - here the whole batch shares one.
+        and the batch stops there; every CV after it is IN the returned list,
+        as `result=None, error=None`. Not attempted is not the same fact as
+        failed, and it is not the same as being absent either - a caller that
+        got a shorter list could not tell a CV nobody tried from one it
+        forgot to ask about. `cv_read_many`'s batched path, the only caller
+        that reaches this method, stops with the batch and reports the CVs of
+        the sessions it never opened the same way; its per-CV path keeps
+        reading, because each of those reads opens its own session anyway -
+        here the whole batch shares one.
 
         No `page` parameter, unlike `service_read`. Every caller so far reads
         CVs below 256, and `service_read` cannot honour a page in service
@@ -1203,6 +1208,12 @@ class CvProgrammer:
         keeps reading, as it always has, because each of its reads opens its
         own session anyway.
 
+        A session that read its whole group and then would not close is
+        reported as a `service.session_close_failed` event, not as some CV's
+        error: no CV failed, and the next group's first CV - which no telegram
+        was ever sent for - must not be written into a backup file as
+        tried-and-failed. No further session is opened after it.
+
         `on_progress` fires once per spec, in sorted order, WHILE the batch is
         still running, on both paths - `cli/commands/backup.py` builds its
         Ctrl-C partial file out of those callbacks alone, because the returned
@@ -1338,20 +1349,47 @@ class CvProgrammer:
                 report(CvReadOutcome(spec=first, result=result, error=None))
         while not aborted and pending:
             chunk, pending = pending[:SERVICE_BATCH_SIZE], pending[SERVICE_BATCH_SIZE:]
+            before_chunk = len(outcomes)
             try:
                 aborted = self._read_chunk_in_one_session(chunk, report)
             except RailctlError as exc:
-                # Only the session close can raise out of `_read_chunk_in_one_session`
-                # - every read inside it becomes an outcome. A session that did
-                # not close cleanly is a reason to open no further one, and the
-                # first spec still without an outcome carries the error, the
-                # same shape a batch-ending error has inside a chunk. When
-                # every spec already has one, the reads all answered and only
-                # the close failed; the per-CV path threw that CV's VALUE away
-                # to report the same thing, which is the worse of the two.
+                # Opening the session and closing it are the only two steps
+                # that can raise out of `_read_chunk_in_one_session` - every
+                # read inside it becomes an outcome. Either way no further
+                # session is opened, and WHICH of the two failed decides who
+                # carries the error. The count is taken against THIS chunk,
+                # never against the whole call: `len(outcomes) < total` is
+                # still true after a full chunk whenever another chunk is
+                # pending, and it pointed the error at the next chunk's first
+                # spec - a CV no telegram was ever sent for.
                 aborted = True
-                if len(outcomes) < total:
-                    report(CvReadOutcome(spec=ordered[len(outcomes)], result=None, error=exc))
+                reported_here = len(outcomes) - before_chunk
+                if reported_here < len(chunk):
+                    # The session never opened, or died with CVs of this chunk
+                    # still unread: the first of those carries the error, the
+                    # same shape the per-CV path gave it.
+                    report(CvReadOutcome(spec=chunk[reported_here], result=None, error=exc))
+                else:
+                    # Every CV in this chunk answered and only the CLOSE
+                    # failed, so the error belongs to no CV: attaching it to
+                    # one would either throw away a value that was measured or
+                    # (worse) mark a never-attempted CV as tried-and-failed,
+                    # which `backup/mapping.py::status_for` writes into the
+                    # file as `error` instead of "not attempted". Dropping it
+                    # is not the alternative - after a `StationBusyError` here
+                    # the station is still in service mode and the main track
+                    # is dead, and nothing else in the returned list says so.
+                    # Same rule as `cli/deps.py::close_after`: the values the
+                    # run measured survive, and the close failure rides beside
+                    # them as a warning.
+                    self._station.emit(
+                        "service.session_close_failed",
+                        {
+                            "reason": str(exc),
+                            "after_cv": chunk[-1].cv,
+                            "not_attempted": len(pending),
+                        },
+                    )
         # Whatever is left after an abort was never attempted - both fields
         # None, never a copy of the error that stopped the run.
         for skipped in ordered[len(outcomes) :]:
@@ -1368,9 +1406,13 @@ class CvProgrammer:
         the name a backup row is written under, so each outcome is re-tagged
         with the spec it came from, in order, as it arrives.
 
-        A not-attempted outcome (`result` and `error` both `None`) in the
-        returned list means `service_read_many` met a `BATCH_ENDING_ERRORS`
-        member; the caller stops instead of opening the next session.
+        A `BATCH_ENDING_ERRORS` member on any outcome means the batch ended;
+        the caller stops instead of opening the next session. Read off the
+        ERROR TYPE, not off the not-attempted tail `service_read_many` leaves
+        behind it: that tail is `cvs[len(outcomes):]`, which is empty when the
+        CV that met the error was the LAST of the chunk, so one failure
+        position in every `SERVICE_BATCH_SIZE` produced no marker at all and
+        the next session was opened onto a shorted track.
         """
         remaining = iter(chunk)
 
@@ -1378,7 +1420,7 @@ class CvProgrammer:
             report(CvReadOutcome(spec=next(remaining), result=outcome.result, error=outcome.error))
 
         outcomes = self.service_read_many([spec.cv for spec in chunk], on_result=deliver)
-        return any(outcome.result is None and outcome.error is None for outcome in outcomes)
+        return any(isinstance(outcome.error, BATCH_ENDING_ERRORS) for outcome in outcomes)
 
     def _learn_result_channel(
         self, context: Literal["pom", "service"], channel: ResultChannelSeen
