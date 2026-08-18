@@ -1068,3 +1068,20 @@ The lesson is cheap to state and was expensive to learn: an acceptance assertion
 against a contract, and the contract is readable offline - in the command's unit tests, in
 `railctl schema`, or in the envelope builder itself. Guessing its shape from the prose of a
 brief is not the same as reading it.
+
+### The confirmation run — 2026-08-18, 6 min 37 s
+
+Both fixes above were made AFTER the acceptance run that found them, so the envelope they
+produce had never been seen by the hardware. A short re-run with `RAILCTL_M10_FILES` pointing
+at the saved files (stage 2 skipped, 4 passed 1 skipped) settled that:
+
+- `restore` reported `written: [3]`, `verified: [3]`, `stages_completed: ["A"]` - the CV
+  numbers, not a tally. `--dry-run` reported `written: []`, `verified: []`,
+  `stages_completed: []` on the same file and the same decoder.
+- **No `page.not_selected` warning anywhere in the run.** Before the fix it decorated the
+  CV3 read-back of every restore; CV3 needs no page, and now says nothing about one. The
+  warning still fires for an indexed CV, which is what the station tests pin.
+- The acceptance file passed in full for the first time. Its assertions had been wrong twice
+  while the tool was right both times.
+
+CV3 went 26 -> 20 -> 26 again, and the closing `diff` reported zero differences.
