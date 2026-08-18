@@ -52,7 +52,11 @@ Four properties are load-bearing here rather than emergent:
 * **nothing is ever rolled back.** A partial rollback can leave a state worse
   than the observed one, and the file plus the mismatch table already say
   which CVs disagree. Every failed ending says so and names the recovery:
-  re-run `restore`, which is idempotent.
+  re-run `restore`, which is idempotent. Every ending, not the two that
+  happened to be raised here - a station error escaping a stage is enriched
+  in place with the CVs already written, the ones verified and the stages
+  completed, keeping its own class, `code` and exit code, because the
+  station's verdict on what went wrong is still the verdict.
 
 Verification is per stage, against the INTENDED value (the masked byte for a
 merged CV29, never the raw file value), with one retry and one re-read and no
@@ -204,6 +208,20 @@ SUPPRESSED_EVENT: Final[str] = "cv.write_unverified"
 REASON_IDENTITY_UNRECORDED: Final[str] = "identity_not_in_file"
 REASON_IDENTITY_MISMATCH: Final[str] = "identity_mismatch"
 REASON_SERIAL_MISMATCH: Final[str] = "serial_mismatch"
+
+#: What every failed ending owes the operator, and the recovery that follows
+#: it. Named once and shared by the verification table and by the enrichment
+#: any other mid-stage failure gets, so a partially written decoder is
+#: described the same way whichever error ended the run - the module docstring
+#: promises "every failed ending says so", and two endings out of many is not
+#: that promise.
+NO_ROLLBACK: Final[str] = (
+    "Nothing was rolled back: a partial rollback can leave a state worse than the one just "
+    "measured, and the file plus this report already say which CVs were written"
+)
+RECOVERY: Final[str] = (
+    "re-run the same `railctl restore` - it is idempotent and writes only what still differs"
+)
 
 WARNING_IDENTITY_DEGRADED: Final[str] = "restore.identity_degraded"
 WARNING_IDENTITY_OVERRIDDEN: Final[str] = "restore.identity_overridden"
@@ -704,11 +722,18 @@ class _RestoreRun:
             rows = [row for row in self.writes if row.stage == stage]
             if not rows:
                 continue
-            for row in rows:
-                self._write(station, row)
-                self.written.append(row)
-                self._emit(row)
-            mismatches = self._verify(station, rows)
+            try:
+                for row in rows:
+                    self._write(station, row)
+                    self.written.append(row)
+                    self._emit(row)
+                mismatches = self._verify(station, rows)
+            except RailctlError as exc:
+                # Every OTHER way a stage can end. The verification table
+                # below is raised outside this block on purpose: it already
+                # carries the report, and enriching it twice would append the
+                # same sentence to its own message.
+                raise self._partial_failure(exc, stage) from None
             if self._on_stage is not None:
                 self._on_stage(stage, rows, mismatches)
             if mismatches:
@@ -760,6 +785,39 @@ class _RestoreRun:
                 mismatches.append(Mismatch(row=row, read=read))
         return mismatches
 
+    def _progress(self, stage: str) -> dict[str, object]:
+        """What the executor knows and a station error cannot: which CVs went
+        out, which read back, and how far the run got before it stopped."""
+        return {
+            "stage": stage,
+            "written": [row.num for row in self.written],
+            "verified": [row.num for row in self.verified],
+            "stages_completed": list(self.stages_completed),
+        }
+
+    def _partial_failure(self, exc: RailctlError, stage: str) -> RailctlError:
+        """Any other station failure, carrying the partial-write report.
+
+        `CvVerifyError` and `AbortedError` said what had already been written
+        and nothing else did, so a `RailctlError` out of a write or out of a
+        verification read left the operator of a half-written decoder with a
+        single-CV verdict and no idea what had gone out before it.
+
+        Enriched in place rather than re-raised as something new: the class,
+        the `code` and therefore the exit code stay the station's - its
+        verdict on WHAT went wrong is still the verdict, and only the details
+        grow. For the same reason the message is extended rather than
+        replaced, and the station's own hint (the programming-track placement
+        guidance, for one) keeps its place ahead of the recovery.
+        """
+        exc.args = (
+            f"{exc}. Stage {stage} of the restore stopped here: {len(self.written)} CV(s) had "
+            f"already been written and {len(self.verified)} verified. {NO_ROLLBACK}",
+        )
+        exc.details = {**exc.details, **self._progress(stage)}
+        exc.hint = RECOVERY if exc.hint is None else f"{exc.hint}; {RECOVERY}"
+        return exc
+
     def _verify_failed(self, stage: str, rows: Sequence[PlannedWrite]) -> CvVerifyError:
         listed = "; ".join(
             f"CV{m.row.num} {m.row.name} intended {m.row.new_value}, reads {m.read}"
@@ -767,18 +825,13 @@ class _RestoreRun:
         )
         return CvVerifyError(
             f"stage {stage}: {len(self.mismatches)} of {len(rows)} CV(s) did not read back "
-            f"what was written, each after one retry - {listed}. Nothing was rolled back: a "
-            f"partial rollback can leave a state worse than the one just measured, and this "
-            f"table plus the file already say which CVs disagree",
+            f"what was written, each after one retry - {listed}. {NO_ROLLBACK}",
             hint=(
-                "re-run the same `railctl restore` - it is idempotent and writes only what "
-                "still differs; a CV that fails twice is a decoder or contact problem, not "
-                "a file problem"
+                f"{RECOVERY}; a CV that fails twice is a decoder or contact problem, not a "
+                f"file problem"
             ),
             details={
-                "stage": stage,
-                "written": [row.num for row in self.written],
-                "verified": [row.num for row in self.verified],
+                **self._progress(stage),
                 "mismatches": [
                     {
                         "cv": m.row.num,

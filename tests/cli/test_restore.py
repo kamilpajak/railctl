@@ -25,6 +25,8 @@ from railctl.backup import BackupDocument, CvRecord, ReadStatus, write_backup_to
 from railctl.cli._meta import command_meta
 from railctl.cli.commands.cv import PROG_TRACK_NOTICE, SILENCE_GUIDANCE
 from railctl.cli.commands.restore import (
+    NO_ROLLBACK,
+    RECOVERY,
     RESTORE_SCHEMA,
     SECONDS_PER_CV,
     SUPPRESSED_EVENT,
@@ -199,6 +201,7 @@ class FakeRestoreStation:
         values: dict[int, int] | None = None,
         capabilities: Capabilities | None = None,
         read_errors: dict[int, Exception] | None = None,
+        batch_errors: dict[int, Exception] | None = None,
         write_errors: dict[int, Exception] | None = None,
         ignore_writes: dict[int, int] | None = None,
         interrupt_on_write: int | None = None,
@@ -218,6 +221,11 @@ class FakeRestoreStation:
             **(values or {}),
         }
         self.read_errors = read_errors or {}
+        #: Failures for the LIVE PASS alone. `read_errors` fails every read of
+        #: that CV, singleton and batch, which also fails the verification
+        #: read-back; this one leaves the read-back working, so a test can be
+        #: about a live value that did not answer and nothing else.
+        self.batch_errors = batch_errors or {}
         self.write_errors = write_errors or {}
         #: CV -> how many writes to swallow before the value sticks. This is
         #: what an unverified write looks like from the CLI: the station
@@ -271,7 +279,7 @@ class FakeRestoreStation:
         self.batches.append([spec.cv for spec in specs])
         outcomes = []
         for spec in specs:
-            error = self.read_errors.get(spec.cv)
+            error = self.read_errors.get(spec.cv) or self.batch_errors.get(spec.cv)
             if error is not None:
                 outcomes.append(CvReadOutcome(spec=spec, result=None, error=error))
                 continue
@@ -985,6 +993,60 @@ def test_ctrl_c_mid_run_reports_what_was_written_and_rolls_nothing_back(monkeypa
     assert "nothing is rolled back" in report["message"]
 
 
+# -- a station failure mid-run -------------------------------------------------
+
+
+def test_a_write_that_fails_mid_stage_names_the_cvs_already_written(monkeypatch, tmp_path):
+    """A station error out of `cv_write` used to propagate untouched: the
+    operator of a half-written decoder got a one-CV verdict and learned
+    nothing about the writes that had already gone out."""
+    path = backup_file(tmp_path)
+    install(monkeypatch, FakeRestoreStation(write_errors={4: DecoderNoAckError("61 13", cv=4)}))
+    result = invoke(path, "--yes")
+    assert result.exit_code == 10, result.stderr
+    report = envelope(result)
+    # The station's verdict is still the verdict - only the details grew.
+    assert report["code"] == "decoder_no_ack"
+    assert report["details"]["written"] == [3]
+    assert report["details"]["stage"] == "A"
+    assert NO_ROLLBACK in report["message"]
+    assert RECOVERY in report["hint"]
+
+
+def test_a_verification_read_that_fails_names_what_was_written_and_verified(monkeypatch, tmp_path):
+    """The other half of the same hole: the failure is in the read-back, so
+    stage A's three writes are all out and only two of them are confirmed."""
+    path = backup_file(tmp_path)
+    install(
+        monkeypatch,
+        FakeRestoreStation(read_errors={5: DecoderNotRespondingError("no answer", cv=5)}),
+    )
+    result = invoke(path, "--yes")
+    assert result.exit_code == 13, result.stderr
+    report = envelope(result)
+    assert report["code"] == "decoder_not_responding"
+    assert (report["details"]["written"], report["details"]["verified"]) == ([3, 4, 5], [3, 4])
+    # The station's own placement guidance keeps its place ahead of the
+    # recovery: both are things the operator needs, and neither replaces
+    # the other.
+    assert report["hint"] == f"{SILENCE_GUIDANCE}; {RECOVERY}"
+
+
+def test_a_failure_in_a_later_stage_names_the_stages_that_completed(monkeypatch, tmp_path):
+    """Stage A wrote and verified; stage B is where it stopped. Without
+    `stages_completed` a re-run's operator cannot tell those two apart."""
+    path = backup_file(tmp_path)
+    install(
+        monkeypatch,
+        FakeRestoreStation(write_errors={28: ShortCircuitError("short on the programming track")}),
+    )
+    result = invoke(path, "--yes")
+    assert result.exit_code == 11, result.stderr
+    details = envelope(result)["details"]
+    assert (details["stages_completed"], details["stage"]) == (["A"], "B")
+    assert details["verified"] == [3, 4, 5]
+
+
 # -- the three renderings ------------------------------------------------------
 
 
@@ -1009,16 +1071,26 @@ def test_the_human_rendering_says_a_dry_run_wrote_nothing(monkeypatch, tmp_path)
 
 
 def test_an_unread_live_value_is_written_and_says_why(monkeypatch, tmp_path):
+    """Silence in the live pass is not `unchanged`. CV4 did not answer, so the
+    planner cannot rule the write out as unnecessary - and the row says that
+    rather than inventing a comparison against a value nobody read.
+
+    `batch_errors` and not `read_errors`: this test is about a live value that
+    did not answer, so the verification read-back has to keep working, or the
+    run ends on the station's error and there is no rendered row to assert at
+    all. That failing ending is a separate test, under F2's enrichment above.
+    """
     path = backup_file(tmp_path)
-    install(
+    fake = install(
         monkeypatch,
-        FakeRestoreStation(read_errors={4: DecoderNotRespondingError("no answer", cv=4)}),
+        FakeRestoreStation(batch_errors={4: DecoderNotRespondingError("no answer", cv=4)}),
     )
-    result = invoke(path, "--yes", fmt="human")
-    # The verification read-back for CV4 raises too, so the run ends on the
-    # station's own error - what this pins is the plan row it printed on the
-    # way there.
-    assert result.exit_code == 13, result.stderr
+    result = invoke(path, "--yes")
+    assert result.exit_code == 0, result.stderr
+    row = rows_by_cv(payload(result))[4]
+    assert (row["live_value"], row["action"], row["new_value"]) == (None, "write", 18)
+    assert "did not read back" in row["reason"]
+    assert 4 in [write.cv for write in fake.writes]
 
 
 def test_the_json_envelope_carries_the_plan_the_counts_and_the_identity(monkeypatch, tmp_path):
@@ -1149,10 +1221,12 @@ def test_the_per_write_unverified_event_is_not_published_as_a_warning(monkeypatc
     # together; publishing the station's per-write event would say nothing was
     # checked about writes that were all checked one stage later.
     path = backup_file(tmp_path)
-    install(monkeypatch, FakeRestoreStation())
+    fake = install(monkeypatch, FakeRestoreStation())
     result = invoke(path, "--yes")
     assert result.exit_code == 0, result.stderr
-    assert all(write.verify is False for write in [Write(3, 20, ProgMode.SERVICE, False)])
+    # The calls the command actually made, never a literal built here: a
+    # `Write` this test constructs proves nothing about the one it sent.
+    assert fake.writes and all(write.verify is False for write in fake.writes)
     assert SUPPRESSED_EVENT not in {w["name"] for w in json.loads(result.stdout)["warnings"]}
 
 
