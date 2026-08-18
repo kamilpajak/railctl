@@ -447,8 +447,10 @@ def test_merge_cv29_writes_the_masked_byte_and_verifies_against_it(monkeypatch, 
     merged = 14 | 0b0010_0000
     assert rows_by_cv(payload(result))[29]["new_value"] == merged
     assert Write(cv=29, value=merged, mode=ProgMode.SERVICE, verify=False) in fake.writes
-    # Verification compared against the merged byte, not the file's 14 - a
-    # comparison against the file would have reported this write as a failure.
+    # Verification compared against the merged byte, not the file's 14. Written
+    # exactly once: a read-back checked against the file value would have found
+    # 46 where it wanted 14, retried, and then called the merge a mismatch.
+    assert [write.cv for write in fake.writes].count(29) == 1
     assert fake.values[29] == merged
 
 
