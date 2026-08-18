@@ -9,6 +9,7 @@ same tuple in their own later commits.
 from __future__ import annotations
 
 import dataclasses
+from pathlib import Path
 
 import pytest
 
@@ -34,6 +35,12 @@ from railctl.errors import EXIT_CODES
 # `PARTIAL_EXIT_CODE` names no exception class - a partial run is a RESULT, not an
 # error - so it reaches this set from `result.py` rather than from the exit-code map.
 KNOWN_CODES = set(BASE_EXIT_CODES) | set(EXIT_CODES.values()) | {PARTIAL_EXIT_CODE}
+
+#: A small, complete, well-formed `railctl/backup/v1` file, committed rather
+#: than built per test: the generic drives below need a `restore FILE`
+#: argument that exists before any fixture runs, and this one is read-only -
+#: every drive that uses it passes `--dry-run`.
+RESTORE_FIXTURE = Path(__file__).parent / "data" / "loco-0003-curated.json"
 
 
 def test_command_meta_returns_the_row_for_a_known_path():
@@ -220,6 +227,8 @@ def test_manifest_with_no_path_returns_the_tree_shape():
         "cv read",
         "cv write",
         "backup",
+        "restore",
+        "diff",
         "schema",
     ]
     assert {o["name"] for o in payload["global_options"]} == {o.name for o in GLOBAL_OPTIONS}
@@ -389,7 +398,7 @@ def test_error_codes_list_exactly_the_exception_tree_plus_the_two_reserved_codes
     published = {row["code"] for row in error_codes()}
     assert published == set(PUBLISHED_ERROR_CODES.values()) | RESERVED_CODES
     assert len(error_codes()) == len(published)  # no duplicate rows
-    assert len(published) == 37
+    assert len(published) == 41
 
 
 def test_error_code_rows_read_their_facts_off_the_class():
@@ -465,6 +474,8 @@ def test_build_schema_returns_the_tree_when_no_path_is_given():
         "cv read",
         "cv write",
         "backup",
+        "restore",
+        "diff",
         "schema",
     ]
 
@@ -550,6 +561,13 @@ _STANDING_LOCO = LocoInfo(
 )
 
 
+#: What `_FakeStatusStation.cv_read` answers for the CVs where 145 would send
+#: a command down a path these generic drives are not about: the index-page
+#: selectors (0:0, the neutral bank both `backup` and the restore fixture
+#: expect) and CV250, the ZIMO decoder type (6 = MS450, the reference decoder).
+_FAKE_CV_VALUES: dict[int, int] = {31: 0, 32: 0, 250: 6}
+
+
 class _FakeStatusStation:
     """Bare stand-in for the invocation-order tests below.
 
@@ -582,11 +600,15 @@ class _FakeStatusStation:
     def cv_read(self, cv, *, address=None, mode=ProgMode.SERVICE, page=None):
         # `backup` reads the CV31/CV32 selectors and CV29 as singletons. The
         # selectors answer 0 - the default page - so the generic drives here
-        # never hit backup's exit-17 page refusal; everything else answers the
-        # same 145 the batch below does.
+        # never hit backup's exit-17 page refusal, and `restore`'s fixture
+        # file records the same pair. CV250 answers 6, an MS450: `restore`'s
+        # identity gate compares it against the fixture's `decoder_type`, and
+        # on the MS family CV144 is the confirmation jingle rather than the
+        # programming lock, so no drive here trips that precondition.
+        # Everything else answers the same 145 the batch below does.
         return CvResult(
             cv=cv,
-            value=0 if cv in (31, 32) else 145,
+            value=_FAKE_CV_VALUES.get(cv, 145),
             mode=ProgMode.SERVICE,
             encoding=CvEncoding.SERVICE_DIRECT,
             operation="read",
@@ -703,6 +725,19 @@ _EXTRA_ARGV: dict[str, list[str]] = {
     # locomotive), and `--out -` keeps these generic drives from touching the
     # real ~/railctl-backups - the environment fixture isolates XDG, not HOME.
     "backup": ["--address", "3", "--out", "-"],
+    # A committed, read-only fixture file, and `--dry-run` so these generic
+    # drives write no decoder CV at all: the point here is the parameter
+    # surface, the schema string and the exit codes, none of which needs a
+    # mutation. `--dry-run` also asks no confirmation, which is what keeps
+    # this row from needing `--yes` - and `_FakeStatusStation` answers CV250
+    # with an MS decoder type, so CV144 is not a lock and the plan is reached.
+    "restore": [str(RESTORE_FIXTURE), "--dry-run"],
+    # The same committed fixture, in its ONLINE form - one file argument, so
+    # this drive still goes through `open_station` and the generic checks
+    # below (the schema string, the epilog, the flag positions) cover the path
+    # an operator actually uses. It writes nothing by construction: `diff`
+    # only ever reads.
+    "diff": [str(RESTORE_FIXTURE)],
 }
 
 
@@ -1157,6 +1192,8 @@ def test_schema_json_prints_one_envelope_with_the_registered_paths_in_tree_order
         "cv read",
         "cv write",
         "backup",
+        "restore",
+        "diff",
         "schema",
     ]
 
