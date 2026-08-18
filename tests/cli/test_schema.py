@@ -228,6 +228,7 @@ def test_manifest_with_no_path_returns_the_tree_shape():
         "cv write",
         "backup",
         "restore",
+        "diff",
         "schema",
     ]
     assert {o["name"] for o in payload["global_options"]} == {o.name for o in GLOBAL_OPTIONS}
@@ -474,6 +475,7 @@ def test_build_schema_returns_the_tree_when_no_path_is_given():
         "cv write",
         "backup",
         "restore",
+        "diff",
         "schema",
     ]
 
@@ -730,6 +732,12 @@ _EXTRA_ARGV: dict[str, list[str]] = {
     # this row from needing `--yes` - and `_FakeStatusStation` answers CV250
     # with an MS decoder type, so CV144 is not a lock and the plan is reached.
     "restore": [str(RESTORE_FIXTURE), "--dry-run"],
+    # The same committed fixture, in its ONLINE form - one file argument, so
+    # this drive still goes through `open_station` and the generic checks
+    # below (the schema string, the epilog, the flag positions) cover the path
+    # an operator actually uses. It writes nothing by construction: `diff`
+    # only ever reads.
+    "diff": [str(RESTORE_FIXTURE)],
 }
 
 
@@ -1185,6 +1193,7 @@ def test_schema_json_prints_one_envelope_with_the_registered_paths_in_tree_order
         "cv write",
         "backup",
         "restore",
+        "diff",
         "schema",
     ]
 
