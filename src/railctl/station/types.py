@@ -230,7 +230,17 @@ PAGE_SELECTOR_CVS: Final[tuple[int, int]] = (31, 32)
 INDEXED_CV_RANGE: Final[range] = range(257, 513)
 CV144: Final[int] = 144  # meaning depends on the decoder family - see module docstring
 DECODER_TYPE_CV: Final[int] = 250
-MS_DECODER_TYPES: Final[frozenset[int]] = frozenset({6, 7, 12})  # MS450, MS990, MS491
+#: The five ZIMO MS decoder types, as the catalog's own CV250 description
+#: names them: 6 = MS450, 7 = MS990, 8 = MS590, 12 = MS491, 14 = MS540 (see
+#: `catalog/zimo.toml`, CV250, and the ZIMO MS manual's decoder table). This
+#: set and that description are two copies of one fact, so
+#: `tests/station/test_types.py` parses the pairs out of the catalog and
+#: refuses any the set does not carry. 8 and 14 were missing here for exactly
+#: that reason, and the cost was not cosmetic: `treats_cv144_as_lock` answered
+#: True on an MS590 or an MS540, which aborts a safe restore and tells the
+#: operator to write CV144 = 0 - destroying the confirmation jingle on a
+#: decoder where CV144 was never a lock.
+MS_DECODER_TYPES: Final[frozenset[int]] = frozenset({6, 7, 8, 12, 14})
 
 EVENT_NAMES: Final[tuple[str, ...]] = (
     # diagnostic events - something the operator may need to act on

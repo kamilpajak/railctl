@@ -10,9 +10,11 @@ docstring in `railctl.station.types`.
 from __future__ import annotations
 
 import dataclasses
+import re
 
 import pytest
 
+from railctl.catalog import load_catalog
 from railctl.errors import CvOutOfRangeError
 from railctl.station.capabilities import Capabilities
 from railctl.station.timing import TIMING, Timing
@@ -176,7 +178,27 @@ def test_the_cv_addressing_constants_match_the_design_spec():
     assert list(INDEXED_CV_RANGE) == list(range(257, 513))
     assert CV144 == 144
     assert DECODER_TYPE_CV == 250
-    assert MS_DECODER_TYPES == frozenset({6, 7, 12})
+    # MS450, MS990, MS590, MS491, MS540 - the catalog's own CV250 list.
+    assert MS_DECODER_TYPES == frozenset({6, 7, 8, 12, 14})
+
+
+def test_every_ms_decoder_type_the_catalog_names_is_in_ms_decoder_types():
+    """The drift guard over the one fact this repo keeps two copies of.
+
+    The catalog's CV250 description names the MS decoders in prose and
+    `MS_DECODER_TYPES` names them as numbers. The two disagreed: 8 (MS590) and
+    14 (MS540) were in the description and missing from the set, so
+    `treats_cv144_as_lock` answered True on two real MS decoders - a restore
+    would have aborted a safe run and told the operator to write CV144 = 0,
+    destroying the confirmation-jingle setting on a decoder where CV144 was
+    never a lock.
+    """
+    desc = load_catalog()[DECODER_TYPE_CV].desc
+    named = {int(number): name for number, name in re.findall(r"(\d+) = (MS\d+)", desc)}
+    # The parse itself is asserted: a description reworded past this regex
+    # would otherwise let an empty set pass as agreement.
+    assert len(named) == len(MS_DECODER_TYPES), desc
+    assert set(named) <= MS_DECODER_TYPES
 
 
 def test_blind_write_cvs_excludes_cv29():
