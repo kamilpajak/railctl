@@ -1,0 +1,108 @@
+{
+  "schema": "railctl/backup/v1",
+  "created_utc": "2026-08-13T09:15:00Z",
+  "tool": "railctl 0.1.0",
+  "note": "the drift-guard fixture: a small, complete, well-formed curated backup",
+  "loco": {
+    "address": 3,
+    "kind": "short"
+  },
+  "catalog": {
+    "family": "zimo-ms-mx",
+    "schema": 1
+  },
+  "set": "curated",
+  "mode": "service",
+  "cv_encoding": "SERVICE_DIRECT",
+  "page": [
+    0,
+    0
+  ],
+  "speed_table_included": false,
+  "sweep_range": null,
+  "link": {
+    "identity": "serial:7010A0001194:3",
+    "protocol": "xpressnet",
+    "protocol_version": "4.0",
+    "command_station_id": 18
+  },
+  "capabilities": {
+    "pom_read": false,
+    "pom_result_channel": null,
+    "pom_echo_zero_based": null,
+    "service_direct_cv": true,
+    "service_ext_cv": null,
+    "z21_cv_opcodes": null
+  },
+  "decoder": {
+    "manufacturer_id": 145,
+    "decoder_version": 5,
+    "decoder_type": 6
+  },
+  "summary": {
+    "requested": 8,
+    "ok": 8,
+    "no_response": 0,
+    "error": 0,
+    "skipped": 0,
+    "complete": true
+  },
+  "cvs": [
+    {
+      "cv": 1,
+      "name": "primary_address",
+      "status": "ok",
+      "value": 3,
+      "source": "catalog"
+    },
+    {
+      "cv": 3,
+      "name": "accel_rate",
+      "status": "ok",
+      "value": 20,
+      "source": "catalog"
+    },
+    {
+      "cv": 4,
+      "name": "decel_rate",
+      "status": "ok",
+      "value": 18,
+      "source": "catalog"
+    },
+    {
+      "cv": 5,
+      "name": "v_max",
+      "status": "ok",
+      "value": 200,
+      "source": "catalog"
+    },
+    {
+      "cv": 8,
+      "name": "manufacturer_id",
+      "status": "ok",
+      "value": 145,
+      "source": "catalog"
+    },
+    {
+      "cv": 28,
+      "name": "railcom_config",
+      "status": "ok",
+      "value": 3,
+      "source": "catalog"
+    },
+    {
+      "cv": 29,
+      "name": "config_flags",
+      "status": "ok",
+      "value": 14,
+      "source": "catalog"
+    },
+    {
+      "cv": 144,
+      "name": "confirm_jingle",
+      "status": "ok",
+      "value": 0,
+      "source": "catalog"
+    }
+  ]
+}

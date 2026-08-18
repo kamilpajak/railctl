@@ -674,6 +674,11 @@ def test_a_read_in_an_exercised_band_emits_no_note(bench_factory, monkeypatch):
     assert bench.events == []
 
 
+#: A CV inside `INDEXED_CV_RANGE`, where the CV31/CV32 pair decides what the
+#: number means and an unselected page is therefore worth a warning.
+INDEXED_CV = 265
+
+
 def test_service_read_emits_page_not_selected_when_a_page_is_given(bench_factory, monkeypatch):
     """`service_read` cannot select a page yet: `select_page` over SERVICE
     routes through `_write_and_confirm`'s SERVICE branch, whose
@@ -684,16 +689,18 @@ def test_service_read_emits_page_not_selected_when_a_page_is_given(bench_factory
     """
     capabilities = make_capabilities(z21_cv_opcodes=True)
     bench = bench_factory(capabilities=capabilities)
-    _script_read_and_clean_exit(bench, cmd_z21_cv_read(8))
+    _script_read_and_clean_exit(bench, cmd_z21_cv_read(INDEXED_CV))
     monkeypatch.setattr(
         bench.station.programmer,
         "await_result",
-        lambda matcher, **kw: CvValue(raw_cv=8, value=1, ident=0x14, z21_form=True),
+        lambda matcher, **kw: CvValue(raw_cv=INDEXED_CV, value=1, ident=0x14, z21_form=True),
     )
 
-    bench.station.programmer.service_read(8, page=(10, 2))
+    bench.station.programmer.service_read(INDEXED_CV, page=(10, 2))
 
-    assert bench.events == [("page.not_selected", {"cv": 8, "page": (10, 2), "mode": "service"})]
+    assert bench.events == [
+        ("page.not_selected", {"cv": INDEXED_CV, "page": (10, 2), "mode": "service"})
+    ]
     # `Station.emit` never validates its own `name` argument (facade.py), so a
     # typo or an unregistered event name would still show up in `bench.events`
     # above and this assertion is the only thing that would catch it: it must
@@ -720,17 +727,43 @@ def test_service_read_emits_nothing_about_pages_when_none_is_given(bench_factory
 def test_cv_read_in_service_mode_with_a_page_still_emits_not_selected(bench_factory, monkeypatch):
     capabilities = make_capabilities(z21_cv_opcodes=True, pom_read=False)
     bench = bench_factory(capabilities=capabilities)
-    _script_read_and_clean_exit(bench, cmd_z21_cv_read(8))
+    _script_read_and_clean_exit(bench, cmd_z21_cv_read(INDEXED_CV))
     monkeypatch.setattr(
         bench.station.programmer,
         "await_result",
-        lambda matcher, **kw: CvValue(raw_cv=8, value=1, ident=0x14, z21_form=True),
+        lambda matcher, **kw: CvValue(raw_cv=INDEXED_CV, value=1, ident=0x14, z21_form=True),
     )
 
-    bench.station.programmer.cv_read(8, mode=ProgMode.SERVICE, page=(10, 2))
+    bench.station.programmer.cv_read(INDEXED_CV, mode=ProgMode.SERVICE, page=(10, 2))
 
-    assert bench.events == [("page.not_selected", {"cv": 8, "page": (10, 2), "mode": "service"})]
+    assert bench.events == [
+        ("page.not_selected", {"cv": INDEXED_CV, "page": (10, 2), "mode": "service"})
+    ]
     assert bench.events[0][0] in EVENT_NAMES
+
+
+def test_a_plain_cv_read_under_a_page_says_nothing_about_pages(bench_factory, monkeypatch):
+    """The other half of the rule, and the reason for it.
+
+    Below CV257 the page argument is ignored by every layer that handles it,
+    so a warning that it was not selected reports a non-event. Measured at the
+    bench on 2026-08-18: `restore` pins each verification read to the file's
+    page - which is what keeps a read-back on the same bank as its write - and
+    a plain CV3 read-back came back decorated with `page.not_selected`, which
+    an operator cannot tell from a page that genuinely did not take.
+    """
+    capabilities = make_capabilities(z21_cv_opcodes=True, pom_read=False)
+    bench = bench_factory(capabilities=capabilities)
+    _script_read_and_clean_exit(bench, cmd_z21_cv_read(3))
+    monkeypatch.setattr(
+        bench.station.programmer,
+        "await_result",
+        lambda matcher, **kw: CvValue(raw_cv=3, value=26, ident=0x14, z21_form=True),
+    )
+
+    bench.station.programmer.cv_read(3, mode=ProgMode.SERVICE, page=(0, 1))
+
+    assert bench.events == []
 
 
 def test_a_real_63_10_reply_drives_paged_cv_value_through_the_unstubbed_loop(bench_factory):

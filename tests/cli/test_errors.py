@@ -94,6 +94,7 @@ def test_error_code_maps_the_documented_names(exc_cls: type[RailctlError], code:
 #: renamed inside a major version, so the two copies disagreeing is the alarm, not the bug.
 PUBLISHED_ERROR_CODES: dict[str, str] = {
     "AbortedError": "aborted",
+    "AddressSetIncompleteError": "address_set_incomplete",
     "AmbiguousPort": "ambiguous_port",
     "BackupFileError": "backup_file",
     "BackupIncompleteError": "backup_incomplete",
@@ -101,6 +102,7 @@ PUBLISHED_ERROR_CODES: dict[str, str] = {
     "ConfirmationRequiredError": "confirmation_required",
     "CvOutOfRangeError": "cv_out_of_range",
     "CvVerifyError": "cv_verify",
+    "DecoderIdentityMismatchError": "decoder_identity_mismatch",
     "DecoderNoAckError": "decoder_no_ack",
     "DecoderNotRespondingError": "decoder_not_responding",
     "FunctionGroupUnreadableError": "function_group_unreadable",
@@ -114,8 +116,10 @@ PUBLISHED_ERROR_CODES: dict[str, str] = {
     "PortNotOpen": "port_not_open",
     "PortNotXpressNet": "port_not_xpressnet",
     "ProgrammingError": "programming",
+    "ProgrammingLockedError": "programming_locked",
     "ProtocolError": "protocol",
     "RailctlError": "railctl",
+    "RestoreFileIncompleteError": "restore_file_incomplete",
     "ServiceEncodingUnknownError": "service_encoding_unknown",
     "ShortCircuitError": "short_circuit",
     "StationBusyError": "station_busy",

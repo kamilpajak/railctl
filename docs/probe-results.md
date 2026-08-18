@@ -1013,3 +1013,75 @@ per-CV session setup and the gap.
 This matters for M11: a `--all` sweep of 1024 CVs at 6 s each is **1 h 42 min**. The >60 s
 confirmation would state it honestly, but the number itself is a tooling choice, not a hardware
 limit.
+
+## M10 acceptance run — PASSED 2026-08-18
+
+Five gated stages against the MS450P22 on the programming track. The tool passed every
+stage; the test FILE's own assertions were wrong twice and had to be corrected, which is
+recorded here because it cost 57 minutes of bench time and produced two real fixes.
+
+| stage | observable | result |
+| --- | --- | --- |
+| 1 | doctor probe | service encodings proven |
+| 2 | a full backup | 77 of 77 ok, `complete: true`, 466 s (identical to 2026-08-13) |
+| 3 | `diff` of an unchanged decoder | `differences: 0`, five rows all `unchanged` |
+| 4 | a hand-changed CV3, found and restored | see below |
+| 5 | offline file-to-file `diff` | `differences: 0` in 4 ms, no link opened |
+
+Stage 4 is the milestone's sentence, and every part of it held:
+
+- CV3 written to 20 by hand, verified.
+- `diff` reported `differences: 1` and named CV3 with `file_value 26, live_value 20`. The
+  other four rows stayed `unchanged`. No CV was miscounted.
+- `restore --dry-run` planned `counts.write: 1` for CV3 and reported `written: 0,
+  verified: 0, stages_completed: []` - **the dry run wrote nothing**.
+- `restore` reported `written: 1, verified: 1, stages_completed: ["A"]`, and an independent
+  `cv read 3` immediately afterwards returned **26**. The value came from the file, through
+  the plan, onto the decoder, and back out through a separate session.
+- The decoder ended the run exactly as it entered it.
+
+### Two defects the bench found that no test had
+
+**A plain CV read-back was decorated with `page.not_selected`.** The M10 fix that pins every
+verification read to the file's page - so a read-back cannot land on a different bank from
+its write - passed the page for EVERY CV, including CV3. `service_read` emitted
+`page.not_selected` for it, and an operator reading that envelope cannot tell it from a page
+that genuinely did not take. Below CV257 the page argument is ignored by every layer that
+handles it, so the warning reported a non-event. The emit is now conditional on the CV being
+inside `INDEXED_CV_RANGE`, and the station tests that pinned the old behaviour were moved
+onto an indexed CV, which is what their own docstrings had always described.
+
+**The success envelope could not say WHICH CVs were written.** `written` and `verified` were
+counts in the result envelope but lists of CV numbers in the failure details - the same names
+carrying different types depending on the ending. After a command that changes a device,
+"which" is the question, and `counts` already answers "how many". Both are lists now.
+
+### The acceptance file's own bug, twice
+
+`differences`, `written` and `verified` were all read as lists when the first two runs were
+written; `differences` was a count and the other two became lists only in this session's fix.
+Both failures aborted the stage AFTER the tool had already done the right thing, so nothing
+was ever at risk - but the second run spent eight minutes re-reading a decoder for want of an
+environment variable, and the milestone's central claim went unasserted through two runs.
+
+The lesson is cheap to state and was expensive to learn: an acceptance assertion is code
+against a contract, and the contract is readable offline - in the command's unit tests, in
+`railctl schema`, or in the envelope builder itself. Guessing its shape from the prose of a
+brief is not the same as reading it.
+
+### The confirmation run — 2026-08-18, 6 min 37 s
+
+Both fixes above were made AFTER the acceptance run that found them, so the envelope they
+produce had never been seen by the hardware. A short re-run with `RAILCTL_M10_FILES` pointing
+at the saved files (stage 2 skipped, 4 passed 1 skipped) settled that:
+
+- `restore` reported `written: [3]`, `verified: [3]`, `stages_completed: ["A"]` - the CV
+  numbers, not a tally. `--dry-run` reported `written: []`, `verified: []`,
+  `stages_completed: []` on the same file and the same decoder.
+- **No `page.not_selected` warning anywhere in the run.** Before the fix it decorated the
+  CV3 read-back of every restore; CV3 needs no page, and now says nothing about one. The
+  warning still fires for an indexed CV, which is what the station tests pin.
+- The acceptance file passed in full for the first time. Its assertions had been wrong twice
+  while the tool was right both times.
+
+CV3 went 26 -> 20 -> 26 again, and the closing `diff` reported zero differences.
