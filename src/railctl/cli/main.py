@@ -22,6 +22,7 @@ from railctl.cli.commands import (
     backup,
     basics,
     cv,
+    diff,
     doctor,
     monitor,
     power,
@@ -185,7 +186,7 @@ def global_options(
 # `tests/cli/test_schema.py` compares that order against `_meta.COMMANDS`. Two
 # tables of contents for one tool is a bug that once shipped, so these calls
 # follow the tuple: doctor, status, version, power, stop, drive, function, monitor,
-# cv read, cv write, backup, schema.
+# cv read, cv write, backup, restore, diff, schema.
 doctor.register(app)
 basics.register(app)
 power.register(app)
@@ -194,6 +195,7 @@ monitor.register(app)
 cv.register(app)
 backup.register(app)
 restore.register(app)
+diff.register(app)
 schema.register(app)
 
 

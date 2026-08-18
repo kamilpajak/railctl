@@ -753,6 +753,80 @@ _RESTORE = CommandMeta(
 )
 
 
+# -- diff - one file against the decoder, or two files against each other -----
+
+DIFF_FILE_ARG = Argument(
+    name="file",
+    help="the railctl/backup/v1 file to compare",
+    type="string",
+)
+#: Optional, and the whole difference between the two forms of this command:
+#: given, the comparison is file-to-file and opens no link at all; omitted, the
+#: decoder on the programming track stands in for it.
+DIFF_OTHER_ARG = Argument(
+    name="file2",
+    help=(
+        "a second railctl/backup/v1 file to compare FILE against; the comparison is then "
+        "offline and never opens a link. Omitted, FILE is compared against the decoder"
+    ),
+    type="string",
+    required=False,
+)
+#: The same three words `restore` uses, because they shape the same plan - the
+#: help text says "compare" rather than "write" because that is all this
+#: command does with the answer.
+DIFF_WITH_ADDRESS_OPT = Option(
+    name="--with-address",
+    help=(
+        "also compare CV17, CV18, CV1 and CV29 whole; needs all four read ok in FILE. "
+        "Without it they are reported as not compared, both values still shown"
+    ),
+    type="boolean",
+    default=False,
+)
+DIFF_MERGE_CV29_OPT = Option(
+    name="--merge-cv29",
+    help=(
+        "compare CV29 with the decoder's own long-address bit standing in for the file's; "
+        "contradicts --with-address, which compares the byte whole"
+    ),
+    type="boolean",
+    default=False,
+)
+DIFF_INCLUDE_SWEEP_OPT = Option(
+    name="--include-sweep",
+    help="also compare rows the curated catalog does not name; no source produces them yet",
+    type="boolean",
+    default=False,
+)
+
+#: `cv read`'s set minus three codes nothing in a diff can reach. 8 is gone
+#: because a diff has no partial ending: a live CV that does not answer is a
+#: row the plan marks "live value not known", which is a reported comparison
+#: and not a half-finished command. 14 is gone because nothing is written, so
+#: nothing is verified - `cv read` publishes it only for the `--page` path that
+#: writes the CV31/CV32 selectors and puts them back, and a diff refuses a
+#: wrong page instead of moving it. 16 is gone for the reason `restore` drops
+#: it: there is no POM path here to raise it (M10 D1).
+DIFF_EXIT_CODES: Final[tuple[int, ...]] = tuple(
+    sorted(set(CV_READ_EXIT_CODES) - {PARTIAL_EXIT_CODE, 14, 16})
+)
+
+_DIFF = CommandMeta(
+    path="diff",
+    help="Compare a railctl/backup/v1 file against the decoder, or against a second file",
+    schema="railctl/diff/v1",
+    # Reads only, on both forms, and the two-file form does not even open a
+    # link. The CV31/CV32 selectors are read and never written, exactly as in
+    # `backup` and `restore`: a diff that moved the index bank would be
+    # comparing the CVs above 256 against registers the file never described.
+    mutates=False,
+    exit_codes=DIFF_EXIT_CODES,
+    arguments=(DIFF_FILE_ARG, DIFF_OTHER_ARG),
+    options=(DIFF_WITH_ADDRESS_OPT, DIFF_MERGE_CV29_OPT, DIFF_INCLUDE_SWEEP_OPT),
+)
+
+
 #: Command-scoped, and deliberately NOT the global `--address` /
 #: RAILCTL_ADDRESS / config default that `drive` and `function` read through
 #: `settings.address`. A user with `address = 3` configured who hits the panic
@@ -800,6 +874,7 @@ COMMANDS: Final[tuple[CommandMeta, ...]] = (
     _CV_WRITE,
     _BACKUP,
     _RESTORE,
+    _DIFF,
     _SCHEMA,
 )
 
@@ -1098,6 +1173,36 @@ _COMMAND_EXIT_MEANINGS: Final[dict[str, dict[int, str]]] = {
             "the decoder sits on a different CV31/CV32 index page than the file was taken "
             "on, so the CVs above 256 would not mean the same thing. A restore never writes "
             "the selectors, so it refuses instead of moving the bank"
+        ),
+    },
+    # 0 is the row this command exists to state out loud. Every other command's
+    # 0 means "nothing went wrong"; this one's also means "the answer is in the
+    # payload, whatever it says", and a caller who assumed diff(1)'s convention
+    # would read a decoder that differs in forty CVs as a clean match.
+    "diff": {
+        0: (
+            "the comparison completed - result.differences says how many CVs differ, and 0 "
+            "of them is not a different exit code. diff deliberately does NOT mirror "
+            "diff(1)'s exit 1 on a difference: every non-zero code in this tool is an "
+            "exception, and inventing one for a successful answer would make this table lie"
+        ),
+        9: (
+            "the comparison never ran. The error.code says which: backup_file (a file is "
+            "unreadable or malformed) or address_set_incomplete (--with-address with "
+            "CV1/CV17/CV18/CV29 not all ok in the file, so there is no address set to "
+            "compare)"
+        ),
+        15: (
+            "a VALUE in the file falls outside the catalog's min/max for its CV. The "
+            "comparison is refused rather than reported, because the shared planner is the "
+            "one that decides it - a file this diff would report on is a file no restore "
+            "could write"
+        ),
+        17: (
+            "the decoder sits on a different CV31/CV32 index page than the file was taken "
+            "on (or the two files were), so the CVs above 256 do not name the same "
+            "registers. A diff never writes the selectors, so it refuses instead of "
+            "comparing rows that mean two different things"
         ),
     },
     # 9 is AbortedError everywhere else, and for `monitor` that IS how a normal run
