@@ -954,7 +954,15 @@ class CvProgrammer:
         is private: a caller that forgets it leaves the station in service
         mode and the layout dead.
         """
-        if page is not None:
+        if page is not None and cv in INDEXED_CV_RANGE:
+            # Only an INDEXED CV cares which page is live: below CV257 the
+            # argument is ignored by every layer that handles it, so warning
+            # that it was not selected reports a non-event. Measured at the
+            # bench on 2026-08-18: a restore passing the file's page to every
+            # verification read - which is what pins a read to the same bank
+            # as its write - decorated a plain CV3 read-back with
+            # `page.not_selected`, and an operator reading that envelope
+            # cannot tell it from a page that genuinely did not take.
             self._station.emit("page.not_selected", {"cv": cv, "page": page, "mode": "service"})
         telegram, encoding, page_index = self.service_read_telegram(cv)
         self._await_session_gap()

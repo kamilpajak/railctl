@@ -31,6 +31,7 @@ identity gate still runs against real serial bytes.
 from __future__ import annotations
 
 import json
+import os
 import sys
 from pathlib import Path
 
@@ -64,8 +65,15 @@ def bench_config(tmp_path_factory):
 
 @pytest.fixture(scope="module")
 def files(tmp_path_factory):
-    """Where the stages leave the full backup and the derived subset."""
-    return tmp_path_factory.mktemp("railctl-m10-files")
+    """Where the stages leave the full backup and the derived subset.
+
+    `RAILCTL_M10_FILES` points the run at a directory that already holds
+    `full.json` and `subset.json`, so a re-run after a fault in the later
+    stages need not pay stage 2's eight minutes again. Stage 2 skips itself
+    when it finds them; nothing else changes.
+    """
+    override = os.environ.get("RAILCTL_M10_FILES")
+    return Path(override) if override else tmp_path_factory.mktemp("railctl-m10-files")
 
 
 @pytest.fixture(autouse=True)
@@ -107,10 +115,23 @@ def _diff(path: Path):
 
 
 def _differences(result) -> list[dict]:
-    """The rows `diff` calls different. A CV that did not answer is NOT one of
-    them - silence is not a measured difference (M10 fix F6)."""
+    """The rows `diff` calls different.
+
+    `differences` in the envelope is a COUNT, not a list - the rows live in
+    `cvs`, and a difference is one whose action is `write`. Returning the rows
+    and cross-checking them against the count makes the two prove each other:
+    a count that disagrees with its own rows is a finding in itself.
+
+    `not_read` is asserted zero separately. A CV that did not answer is not a
+    difference (M10 fix F6) - but on this bench it is not expected either, so
+    it must not pass silently.
+    """
     assert result.exit_code == 0, result.stderr
-    return json.loads(result.stdout)["result"]["differences"]
+    body = json.loads(result.stdout)["result"]
+    rows = [row for row in body["cvs"] if row["action"] == "write"]
+    assert body["differences"] == len(rows), (body["differences"], rows)
+    assert body["not_read"] == 0, f"a CV did not answer: {body}"
+    return rows
 
 
 def test_1_doctor_populates_the_capabilities(bench_config):
@@ -132,6 +153,11 @@ def test_2_a_full_backup_becomes_the_input_and_the_keeper(bench_config, files):
     """Stage 2. The real 77-CV backup: the artifact worth keeping, and the parent
     of the subset the later stages use. Reads only; nothing is written."""
     _require_stage_1(bench_config)
+    if (files / "subset.json").exists():
+        pytest.skip(
+            f"{files} already holds a backup and its subset (RAILCTL_M10_FILES), so this "
+            f"re-run keeps them rather than spending eight minutes reading the same decoder"
+        )
     _gate(
         "STAGE 2 of 5 - a full backup. Reads only, about EIGHT MINUTES with no\n"
         "output until it finishes (77 CVs at 6 s each, measured 2026-08-13).\n"
@@ -237,10 +263,11 @@ def test_4_a_changed_cv_is_found_planned_restored_and_verified(bench_config, fil
             "json",
         )
         assert planned.exit_code == 0, planned.stderr
-        writes = [
-            row for row in json.loads(planned.stdout)["result"]["cvs"] if row["action"] == "write"
-        ]
+        plan = json.loads(planned.stdout)["result"]
+        writes = [row for row in plan["cvs"] if row["action"] == "write"]
         assert [row["cv"] for row in writes] == [CHANGED_CV], writes
+        # A dry run reads and plans; it must have written nothing at all.
+        assert (plan["written"], plan["verified"], plan["stages_completed"]) == ([], [], []), plan
 
         restored = _run(
             "restore",
@@ -254,8 +281,13 @@ def test_4_a_changed_cv_is_found_planned_restored_and_verified(bench_config, fil
         assert restored.exit_code == 0, restored.stderr
         body = json.loads(restored.stdout)["result"]
         assert body["dry_run"] is False
-        assert CHANGED_CV in body["written"], body
-        assert CHANGED_CV in body["verified"], body
+        # `written` and `verified` carry the CV NUMBERS, so the report answers
+        # which CVs changed rather than only how many. Exactly one CV was out
+        # of step, so exactly one must have been written, and the same one
+        # must have read back.
+        assert body["written"] == [CHANGED_CV], body
+        assert body["verified"] == [CHANGED_CV], body
+        assert body["stages_completed"] == ["A"], body
     finally:
         # Only fires when something above failed before `restore` put the value
         # back; a green path writes the same value twice, which is harmless.
@@ -278,7 +310,7 @@ def test_5_two_files_compare_offline(bench_config, files):
     _gate("STAGE 5 of 5 - offline file-to-file diff. Nothing is sent to the station.")
     result = _run("diff", str(subset), str(subset), "--format", "json")
     assert result.exit_code == 0, result.stderr
-    assert json.loads(result.stdout)["result"]["differences"] == []
+    assert json.loads(result.stdout)["result"]["differences"] == 0
     print(
         "\nM10 ACCEPTANCE COMPLETE. Record in docs/probe-results.md: the stages, the CV3\n"
         "values, and that the decoder ended as it started.\n"

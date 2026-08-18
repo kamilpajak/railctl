@@ -408,10 +408,13 @@ def test_a_changed_cv_is_restored_and_verified(monkeypatch, tmp_path):
     row = rows_by_cv(body)[3]
     assert (row["live_value"], row["new_value"], row["action"]) == (5, 20, "write")
     assert Write(cv=3, value=20, mode=ProgMode.SERVICE, verify=False, page=FILE_PAGE) in fake.writes
+    # The envelope names the CV numbers, so the report answers "which", not
+    # only "how many": the rows planned as writes and the CVs actually written
+    # and verified must be the same set.
     assert (
         body["verified"]
         == body["written"]
-        == len([r for r in body["cvs"] if r["action"] == "write"])
+        == [r["cv"] for r in body["cvs"] if r["action"] == "write"]
     )
     assert fake.values[3] == 20
 
@@ -537,7 +540,7 @@ def test_every_curated_cv_above_256_is_written_in_one_run(monkeypatch, tmp_path)
     assert result.exit_code == 0, result.stderr
     assert [w.cv for w in fake.writes] == list(INDEXED_CURATED_CVS)
     body = payload(result)
-    assert body["written"] == body["verified"] == len(INDEXED_CURATED_CVS)
+    assert body["written"] == body["verified"] == list(INDEXED_CURATED_CVS)
 
 
 def test_a_non_indexed_cv_carries_the_page_too_and_is_unaffected_by_it(monkeypatch, tmp_path):
@@ -1133,12 +1136,19 @@ def test_the_ndjson_stream_starts_streams_and_ends_in_a_summary(monkeypatch, tmp
     assert start["writes"] == 4
     assert [line["cv"] for line in lines if line["type"] == "cv"] == [3, 4, 5, 28]
     stages = [line for line in lines if line["type"] == "stage"]
-    assert [(s["stage"], s["written"], s["verified"]) for s in stages] == [("A", 3, 3), ("B", 1, 1)]
+    assert [(s["stage"], s["written"], s["verified"]) for s in stages] == [
+        ("A", 3, 3),
+        ("B", 1, 1),
+    ]  # per-stage tallies stay tallies
     assert all(s["mismatches"] == [] for s in stages)
     summary = lines[-1]
     assert summary["type"] == "summary"
     assert summary["exit_code"] == 0
-    assert (summary["written"], summary["verified"], summary["mismatches"]) == (4, 4, 0)
+    assert (summary["written"], summary["verified"], summary["mismatches"]) == (
+        [3, 4, 5, 28],
+        [3, 4, 5, 28],
+        0,
+    )
 
 
 def test_the_ndjson_stream_of_a_dry_run_carries_the_cvs_it_would_write(monkeypatch, tmp_path):
@@ -1150,7 +1160,7 @@ def test_the_ndjson_stream_of_a_dry_run_carries_the_cvs_it_would_write(monkeypat
     assert lines[0]["dry_run"] is True
     assert [line["cv"] for line in lines if line["type"] == "cv"] == [3, 4, 5, 28]
     assert [line["type"] for line in lines if line["type"] == "stage"] == []
-    assert lines[-1]["written"] == 0
+    assert lines[-1]["written"] == []
     assert fake.writes == []
 
 
@@ -1209,7 +1219,7 @@ def test_an_ndjson_interrupt_mid_run_still_ends_in_a_summary(monkeypatch, tmp_pa
     assert result.exit_code == 9, result.stderr
     lines = ndjson_lines(result.stdout)
     assert lines[-1]["type"] == "summary"
-    assert lines[-1]["written"] == 2
+    assert lines[-1]["written"] == [3, 4]
     assert envelope(result)["code"] == "aborted"
 
 

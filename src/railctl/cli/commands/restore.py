@@ -938,8 +938,14 @@ def build_restore(state: _RestoreRun) -> CommandResult:
         },
         "planned": len(state.rows),
         "counts": counts,
-        "written": len(state.written),
-        "verified": len(state.verified),
+        # The CV NUMBERS, not a tally: after a command that changed a device,
+        # "which" is the question an operator and an agent both ask, and
+        # `counts` already answers "how many". This also makes the success
+        # envelope and the failure details carry one shape for one name -
+        # they disagreed until 2026-08-18, and the acceptance run's own
+        # assertions were written against the wrong one twice.
+        "written": [row.num for row in state.written],
+        "verified": [row.num for row in state.verified],
         "stages_completed": list(state.stages_completed),
         "cvs": [row_json(row) for row in state.rows],
     }
@@ -1037,8 +1043,8 @@ def _summary_fields(state: _RestoreRun) -> dict[str, object]:
     return {
         "planned": len(state.rows),
         **counts_for(state.rows),
-        "written": len(state.written),
-        "verified": len(state.verified),
+        "written": [row.num for row in state.written],
+        "verified": [row.num for row in state.verified],
         "mismatches": len(state.mismatches),
     }
 
