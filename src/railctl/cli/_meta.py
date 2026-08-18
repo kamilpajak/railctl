@@ -818,8 +818,10 @@ _DIFF = CommandMeta(
     schema="railctl/diff/v1",
     # Reads only, on both forms, and the two-file form does not even open a
     # link. The CV31/CV32 selectors are read and never written, exactly as in
-    # `backup` and `restore`: a diff that moved the index bank would be
-    # comparing the CVs above 256 against registers the file never described.
+    # `backup` - and unlike `restore`, which selects the file's page because a
+    # write above CV256 is refused without one. A diff that moved the index
+    # bank would be comparing the CVs above 256 against registers the file
+    # never described.
     mutates=False,
     exit_codes=DIFF_EXIT_CODES,
     arguments=(DIFF_FILE_ARG, DIFF_OTHER_ARG),

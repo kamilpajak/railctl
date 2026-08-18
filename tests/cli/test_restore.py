@@ -37,6 +37,7 @@ from railctl.cli.main import app
 from railctl.errors import (
     DecoderNoAckError,
     DecoderNotRespondingError,
+    IndexPageRequiredError,
     LinkTimeout,
     ProtocolError,
     ServiceEncodingUnknownError,
@@ -46,8 +47,11 @@ from railctl.errors import (
     TransportError,
 )
 from railctl.station import (
+    INDEXED_CV_RANGE,
+    PAGE_SELECTOR_CVS,
     Capabilities,
     CvEncoding,
+    CvPage,
     CvReadOutcome,
     CvResult,
     ProgMode,
@@ -77,6 +81,20 @@ LIVE_BEFORE = {3: 5}
 
 #: What a CV nobody named answers.
 DEFAULT_LIVE = 0
+
+#: The CV31/CV32 index page the fixture file is taken on, and therefore the
+#: one the decoder must already sit on for a restore to run at all.
+FILE_PAGE = (0, 0)
+
+#: A second page, used by the tests about the CVs above 256. It is not the
+#: (0, 0) default, so a write that carried no page at all - or carried a
+#: hard-coded default - cannot pass those assertions by coincidence.
+INDEX_PAGE = (16, 1)
+
+#: The curated CVs above 256 in the shipped catalog, every one of them
+#: restorable and behind the CV31/CV32 index page. A restore that does not
+#: pass a page cannot write a single one of them.
+INDEXED_CURATED_CVS = (265, 266, 273, 274, 275, 276, 277, 287, 288, 313, 314, 395, 396, 397)
 
 
 @pytest.fixture(autouse=True)
@@ -125,7 +143,7 @@ def backup_file(tmp_path: Path, **overrides: object) -> Path:
         "set_name": "curated",
         "mode": "service",
         "cv_encoding": "SERVICE_DIRECT",
-        "page": (0, 0),
+        "page": FILE_PAGE,
         "speed_table_included": False,
         "sweep_range": None,
         "link": {
@@ -164,6 +182,10 @@ class Write:
     value: int
     mode: ProgMode
     verify: bool
+    #: The index page the write named. `None` is what a caller that passed no
+    #: `page=` looks like from here, and on a CV above 256 that is the bug
+    #: `_require_page` below turns into the station's own refusal.
+    page: CvPage | None = None
 
 
 class FakeRestoreStation:
@@ -205,6 +227,9 @@ class FakeRestoreStation:
         self.emit_events = emit_events or []
         self.on_event: object | None = None
         self.reads: list[int] = []
+        #: Every singleton read as (cv, page), so a test can pin the page a
+        #: verification read-back was made on and not only that it happened.
+        self.read_pages: list[tuple[int, CvPage | None]] = []
         self.batches: list[list[int]] = []
         self.writes: list[Write] = []
 
@@ -219,8 +244,24 @@ class FakeRestoreStation:
             elapsed=0.01,
         )
 
+    def _require_page(self, cv: int, page: CvPage | None) -> None:
+        """The station's own rule, mirrored so these tests can see it.
+
+        `station/programming.py::_require_page` refuses an indexed CV that
+        arrives with no page, having sent nothing. A fake that quietly
+        accepted one would let every test about the CVs above 256 pass
+        against a command that cannot write a single one of them on real
+        hardware.
+        """
+        if cv in INDEXED_CV_RANGE and page is None:
+            raise IndexPageRequiredError(f"CV{cv} is behind a ZIMO index page (CV31/CV32)", cv=cv)
+
     def cv_read(self, cv, *, address=None, mode=ProgMode.SERVICE, page=None):
         self.reads.append(cv)
+        # Service READS ignore the page on this station and answer on the live
+        # bank, which is why the real `service_read` never calls
+        # `_require_page` - so this records the argument and refuses nothing.
+        self.read_pages.append((cv, page))
         error = self.read_errors.get(cv)
         if error is not None:
             raise error
@@ -242,7 +283,8 @@ class FakeRestoreStation:
     def cv_write(self, cv, value, *, address=None, mode=ProgMode.SERVICE, page=None, verify=True):
         if self.interrupt_on_write == cv:
             raise KeyboardInterrupt
-        self.writes.append(Write(cv=cv, value=value, mode=mode, verify=verify))
+        self._require_page(cv, page)
+        self.writes.append(Write(cv=cv, value=value, mode=mode, verify=verify, page=page))
         error = self.write_errors.get(cv)
         if error is not None:
             raise error
@@ -357,7 +399,7 @@ def test_a_changed_cv_is_restored_and_verified(monkeypatch, tmp_path):
     body = payload(result)
     row = rows_by_cv(body)[3]
     assert (row["live_value"], row["new_value"], row["action"]) == (5, 20, "write")
-    assert Write(cv=3, value=20, mode=ProgMode.SERVICE, verify=False) in fake.writes
+    assert Write(cv=3, value=20, mode=ProgMode.SERVICE, verify=False, page=FILE_PAGE) in fake.writes
     assert (
         body["verified"]
         == body["written"]
@@ -434,6 +476,94 @@ def test_a_write_that_takes_on_the_retry_is_verified_and_not_a_mismatch(monkeypa
     assert fake.values[3] == 20
 
 
+# -- the CVs above 256 ---------------------------------------------------------
+
+
+def indexed_records(*cvs: int) -> tuple[CvRecord, ...]:
+    """One `ok` row per CV, each holding a value the fake decoder does not,
+    so every one of them is planned as a write. The values stay inside the
+    catalog's 0..255 for these CVs."""
+    return tuple(record(cv, (cv % 200) + 1, name=f"indexed_{cv}") for cv in cvs)
+
+
+def indexed_file(tmp_path: Path, *cvs: int) -> Path:
+    return backup_file(tmp_path, page=INDEX_PAGE, cvs=indexed_records(*cvs))
+
+
+def on_index_page(**kwargs: object) -> FakeRestoreStation:
+    """A fake decoder already sitting on `INDEX_PAGE`, which is what
+    precondition 5 requires before a restore of these CVs may run at all."""
+    values = {31: INDEX_PAGE[0], 32: INDEX_PAGE[1], **(kwargs.pop("values", None) or {})}
+    return FakeRestoreStation(values=values, **kwargs)  # type: ignore[arg-type]
+
+
+def test_an_indexed_cv_is_written_on_the_page_the_file_names(monkeypatch, tmp_path):
+    """The write carries the file's page, and it is the file's - not (0, 0),
+    and not nothing. Without it the station refuses every CV above 256."""
+    path = indexed_file(tmp_path, 265)
+    fake = install(monkeypatch, on_index_page())
+    result = invoke(path, "--yes")
+    assert result.exit_code == 0, result.stderr
+    assert [(w.cv, w.page) for w in fake.writes] == [(265, INDEX_PAGE)]
+
+
+def test_the_verification_read_back_is_pinned_to_the_same_page_as_the_write(monkeypatch, tmp_path):
+    """Service reads ignore the page today (they answer on the live bank),
+    but a verification that is not pinned to the bank its write went to is
+    only accidentally right - and issue #39 may make reads honour it."""
+    path = indexed_file(tmp_path, 265)
+    fake = install(monkeypatch, on_index_page())
+    result = invoke(path, "--yes")
+    assert result.exit_code == 0, result.stderr
+    assert (265, INDEX_PAGE) in fake.read_pages
+
+
+def test_every_curated_cv_above_256_is_written_in_one_run(monkeypatch, tmp_path):
+    """The shipped catalog has fourteen restorable CVs above 256 and a bench
+    backup carries a value for all of them. Before the page was passed, the
+    first of them ended the run part-way through stage A - after the
+    lower-numbered writes had gone out and before anything verified them."""
+    path = indexed_file(tmp_path, *INDEXED_CURATED_CVS)
+    fake = install(monkeypatch, on_index_page())
+    result = invoke(path, "--yes")
+    assert result.exit_code == 0, result.stderr
+    assert [w.cv for w in fake.writes] == list(INDEXED_CURATED_CVS)
+    body = payload(result)
+    assert body["written"] == body["verified"] == len(INDEXED_CURATED_CVS)
+
+
+def test_a_non_indexed_cv_carries_the_page_too_and_is_unaffected_by_it(monkeypatch, tmp_path):
+    """`ensure_page` returns early below CV257, so the page is ignored there -
+    which is why it is passed unconditionally rather than behind a branch on
+    the CV number that would be one more thing to get wrong."""
+    path = backup_file(tmp_path)
+    fake = install(monkeypatch, FakeRestoreStation())
+    result = invoke(path, "--yes")
+    assert result.exit_code == 0, result.stderr
+    assert {w.page for w in fake.writes} == {FILE_PAGE}
+
+
+def test_a_dry_run_selects_no_page_and_writes_no_selector(monkeypatch, tmp_path):
+    """A real restore now writes CV31/CV32 as part of selecting the page. A
+    dry run must not: it only reads, and service reads never select."""
+
+    class NoSelectionStation(FakeRestoreStation):
+        def select_page(self, page, **kwargs):
+            raise AssertionError("a dry run must select no page")
+
+        def cv_write(self, cv, value, **kwargs):
+            if cv in PAGE_SELECTOR_CVS:
+                raise AssertionError(f"a dry run must not write CV{cv}")
+            raise AssertionError(f"a dry run must not write CV{cv} either")
+
+    path = indexed_file(tmp_path, *INDEXED_CURATED_CVS)
+    fake = install(monkeypatch, NoSelectionStation(values={31: INDEX_PAGE[0], 32: INDEX_PAGE[1]}))
+    result = invoke(path, "--dry-run")
+    assert result.exit_code == 0, result.stderr
+    assert payload(result)["counts"]["write"] == len(INDEXED_CURATED_CVS)
+    assert fake.writes == []
+
+
 # -- CV29 ----------------------------------------------------------------------
 
 
@@ -446,7 +576,10 @@ def test_merge_cv29_writes_the_masked_byte_and_verifies_against_it(monkeypatch, 
     assert result.exit_code == 0, result.stderr
     merged = 14 | 0b0010_0000
     assert rows_by_cv(payload(result))[29]["new_value"] == merged
-    assert Write(cv=29, value=merged, mode=ProgMode.SERVICE, verify=False) in fake.writes
+    assert (
+        Write(cv=29, value=merged, mode=ProgMode.SERVICE, verify=False, page=FILE_PAGE)
+        in fake.writes
+    )
     # Verification compared against the merged byte, not the file's 14. Written
     # exactly once: a read-back checked against the file value would have found
     # 46 where it wanted 14, retried, and then called the merge a mismatch.
@@ -657,7 +790,9 @@ def test_the_same_live_cv144_is_no_precondition_on_an_ms_decoder(monkeypatch, tm
     fake = install(monkeypatch, FakeRestoreStation(values={144: 1}))
     result = invoke(path, "--yes")
     assert result.exit_code == 0, result.stderr
-    assert Write(cv=144, value=0, mode=ProgMode.SERVICE, verify=False) in fake.writes
+    assert (
+        Write(cv=144, value=0, mode=ProgMode.SERVICE, verify=False, page=FILE_PAGE) in fake.writes
+    )
 
 
 def test_a_value_the_catalog_refuses_aborts_before_any_write(monkeypatch, tmp_path):

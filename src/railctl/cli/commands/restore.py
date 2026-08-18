@@ -31,9 +31,24 @@ Four properties are load-bearing here rather than emergent:
   gate. A file with no serial bytes is a legitimate hole and degrades to a
   warning naming what did match; an identity CV that cannot be READ aborts
   rather than guesses;
-* **`--dry-run` writes nothing at all**, not even the CV31/CV32 selectors -
-  which nothing here writes in any case. It still runs the gate, because a
-  dry run that skipped it would print a plan for the wrong locomotive;
+* **a real restore DOES write CV31/CV32, and this is the one command that
+  does.** Every write goes out with the file's `page`, because on the service
+  path a write to a CV in 257..512 is refused outright without one, and
+  selecting a page is itself a pair of decoder writes. That is deliberate and
+  design-sanctioned ("Restore uses the same grouping ... while the page is
+  still selected"), and it is exactly what `backup` refuses to do - the
+  difference is precondition 5: live CV31/CV32 must already equal the file's
+  pair before anything is written, so the selection writes the two values the
+  decoder is already holding and moves no bank. Reads are the asymmetric half:
+  a service READ answers on the live bank and ignores the page, which is why
+  `backup` can read CV265 without ever selecting anything. The verification
+  read-backs carry the page all the same - a verify that is not pinned to the
+  bank its write went to would only be accidentally right;
+* **`--dry-run` writes nothing at all**, not even the CV31/CV32 selectors. It
+  only reads, and a service read selects nothing; a test installs a fake that
+  fails the run if `select_page` or a selector write is ever reached. It still
+  runs the gate, because a dry run that skipped it would print a plan for the
+  wrong locomotive;
 * **nothing is ever rolled back.** A partial rollback can leave a state worse
   than the observed one, and the file plus the mismatch table already say
   which CVs disagree. Every failed ending says so and names the recovery:
@@ -379,15 +394,22 @@ def serial_token(serial: Iterable[int]) -> str:
     return ".".join(str(byte) for byte in serial)
 
 
-def _read_identity(station: Station, cv: int) -> int:
+def _read_identity(station: Station, cv: int, *, page: CvPage | None = None) -> int:
     """One live CV, or the station's own error with placement guidance.
 
     An identity CV that cannot be READ aborts the run rather than being
     guessed at - a gate that passes when the instrument is broken is the
     failure this whole project is organised against.
+
+    `page` is `None` for every read that runs before the page is known - the
+    identity CVs, the CV31/CV32 pair itself, CV144 - and the file's page for
+    the verification read-backs. A service read ignores it today (see the
+    module docstring on the read/write asymmetry), but a read-back that is
+    not pinned to the bank its write went to would only be accidentally
+    right, and issue #39 may make reads honour it.
     """
     try:
-        return station.cv_read(cv, address=None, mode=ProgMode.SERVICE).value
+        return station.cv_read(cv, address=None, mode=ProgMode.SERVICE, page=page).value
     except RailctlError as exc:
         raise _with_guidance(exc, mode=ProgMode.SERVICE) from None
 
@@ -570,8 +592,9 @@ class _RestoreRun:
         if self._on_start is not None:
             self._on_start(self)
         if self.plan.invocation.dry_run:
-            # No writes at all - not the CVs, not the CV31/CV32 selectors,
-            # which nothing in this command writes in any case.
+            # No writes at all - not the CVs, and not the CV31/CV32
+            # selectors a real run writes to select the file's page: this
+            # path only reads, and a service read selects nothing.
             for row in self.writes:
                 self._emit(row)
             return
@@ -584,10 +607,13 @@ class _RestoreRun:
     def _require_page(self, station: Station) -> None:
         """Live CV31/CV32 must equal the pair the file was taken on.
 
-        No write is performed to reach that state (design C7 precondition 5):
-        selecting a page is itself a decoder write, and a restore that
-        silently moved the index bank would write every CV above 256 into a
-        different set of registers than the ones it read.
+        No write is performed to REACH that state (design C7 precondition 5):
+        a restore that silently moved the index bank would write every CV
+        above 256 into a different set of registers than the ones it read.
+        What the stages then do write is the same pair the decoder is already
+        holding - the station selects the page before each indexed write, and
+        this check is what makes that selection a no-op in decoder terms
+        rather than a bank change nobody asked for.
         """
         live = tuple(_read_identity(station, cv) for cv in PAGE_SELECTOR_CVS)
         recorded = tuple(self.plan.document.page)
@@ -595,8 +621,8 @@ class _RestoreRun:
             raise IndexPageRequiredError(
                 f"the decoder sits on CV page CV31={live[0]} CV32={live[1]} and the file was "
                 f"taken on CV31={recorded[0]} CV32={recorded[1]}; the curated CVs above 256 "
-                f"do not name the same registers on the two banks, and a restore never "
-                f"writes the selectors",
+                f"do not name the same registers on the two banks, and a restore never MOVES "
+                f"the bank - it writes only the page the decoder already holds",
                 hint=(
                     "put the decoder back on the page the file names, or back it up again "
                     "on the bank it is on now"
@@ -694,7 +720,22 @@ class _RestoreRun:
         # `verify=False`: this command verifies the whole stage against the
         # INTENDED value, with one retry, and reports one table. The
         # station's own read-back raises on the first CV instead.
-        station.cv_write(row.num, row.new_value, address=None, mode=ProgMode.SERVICE, verify=False)
+        #
+        # `page=self.page` unconditionally, never behind a test on the CV
+        # number: below CV257 `ensure_page` returns before it looks at the
+        # argument, and above it a write with no page is refused outright by
+        # `IndexPageRequiredError` - which is what used to end a restore
+        # part-way through stage A on the fourteen curated CVs above 256.
+        # `_require_page` has already run, so `self.page` is the file's pair
+        # and the decoder is already holding it.
+        station.cv_write(
+            row.num,
+            row.new_value,
+            address=None,
+            mode=ProgMode.SERVICE,
+            page=self.page,
+            verify=False,
+        )
 
     def _verify(self, station: Station, rows: Sequence[PlannedWrite]) -> list[Mismatch]:
         """Re-read every CV this stage wrote, compare against `new_value`.
@@ -709,10 +750,10 @@ class _RestoreRun:
         """
         mismatches: list[Mismatch] = []
         for row in rows:
-            read = _read_identity(station, row.num)
+            read = _read_identity(station, row.num, page=self.page)
             if read != row.new_value:
                 self._write(station, row)
-                read = _read_identity(station, row.num)
+                read = _read_identity(station, row.num, page=self.page)
             if read == row.new_value:
                 self.verified.append(row)
             else:
