@@ -25,7 +25,7 @@ All notable changes to this project are documented in this file. The format foll
 
 - Reading several CVs in service mode - `railctl backup`, `railctl diff`, `railctl
   restore`'s pre-write read of the live values, and `railctl cv read` with more than one
-  CV - now shares one programming session between groups of up to 16 CVs instead of
+  CV - now shares one programming session between groups of up to 8 CVs instead of
   opening one per CV. A CV cost 6.05 s measured 2026-08-13, and about half of that was
   the mandatory wait between two sessions, which is now paid once per group. Progress is
   still reported per CV, so a Ctrl-C keeps every CV that had already answered. A short
