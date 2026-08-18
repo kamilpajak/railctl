@@ -1271,14 +1271,14 @@ def test_cv_read_many_in_service_mode_pays_the_session_gap_once_for_the_group(
 
 
 def test_cv_read_many_opens_one_session_per_group_of_service_batch_size(bench_factory, monkeypatch):
-    """Seventeen specs open exactly two sessions: sixteen CVs, then one.
+    """Nine specs open exactly two sessions: eight CVs, then one.
 
     The group is bounded because a session holds the station in service mode:
     an interrupt, a short circuit or a station reset costs at most one group's
     progress. Both sessions are scripted in full, so a third one - or a group
-    that ran long and read CV number 17 inside the first - fails the test.
+    that ran long and read CV number 9 inside the first - fails the test.
 
-    Seventeen and sixteen are written out rather than computed from
+    Nine and eight are written out rather than computed from
     `SERVICE_BATCH_SIZE`, and the constant is asserted against the literal
     here. A test that builds its fixture out of the constant it is pinning
     adapts to any value the constant is given and so cannot catch a change to
@@ -1286,11 +1286,11 @@ def test_cv_read_many_opens_one_session_per_group_of_service_batch_size(bench_fa
     setting the constant to 1 left this test green while seven of its
     neighbours went red.
     """
-    assert SERVICE_BATCH_SIZE == 16
+    assert SERVICE_BATCH_SIZE == 8
     bench = _service_bench(bench_factory)
-    cvs = list(range(101, 118))
-    _script_one_session(bench, cvs[:16])
-    _script_one_session(bench, cvs[16:])
+    cvs = list(range(101, 110))
+    _script_one_session(bench, cvs[:8])
+    _script_one_session(bench, cvs[8:])
     _answer_every_read(bench, monkeypatch)
 
     outcomes = bench.station.programmer.cv_read_many(
@@ -1505,9 +1505,62 @@ def test_a_session_that_will_not_close_on_the_last_group_reports_the_failure(
         [CvSpec(cv=7), CvSpec(cv=8)], mode=ProgMode.SERVICE
     )
 
-    assert "service.session_close_failed" in bench.event_names()
+    payload = next(load for name, load in bench.events if name == "service.session_close_failed")
+    # The GROUP, never one CV. A group that met a batch-ending error partway
+    # through reported its own tail as not attempted, so naming "the CV it
+    # failed after" would put a CV nobody read at the scene.
+    assert payload["group"] == [7, 8]
+    assert payload["not_attempted"] == 0
     assert [outcome.result.value for outcome in outcomes] == [7, 8]
     assert bench.transport.script_pending == []
+
+
+def test_each_group_after_the_first_pays_one_session_gap_and_no_more(bench_factory, monkeypatch):
+    """Nine CVs in two groups owe exactly ONE gap between them.
+
+    The single-group test above proves the gap is not paid per CV; this one
+    proves it is still paid per session once there is more than one session.
+    A group boundary that skipped it would send the second session's first
+    read inside the measured danger window (0.0 to 1.5 s all failed, issue
+    #22), and one that paid it twice would give back a third of the saving.
+    """
+    bench = _service_bench(bench_factory)
+    cvs = list(range(101, 110))
+    _script_one_session(bench, cvs[:8])
+    _script_one_session(bench, cvs[8:])
+    _answer_every_read(bench, monkeypatch)
+
+    start = bench.clock.monotonic()
+    bench.station.programmer.cv_read_many([CvSpec(cv=cv) for cv in cvs], mode=ProgMode.SERVICE)
+    elapsed = bench.clock.monotonic() - start
+
+    assert elapsed >= TIMING.service_session_gap
+    assert elapsed < 2 * TIMING.service_session_gap
+
+
+def test_more_outcomes_than_cvs_is_named_rather_than_raised_as_stop_iteration(
+    bench_factory, monkeypatch
+):
+    """The two counts disagreeing says which two, not `StopIteration`.
+
+    `service_read_many` returns exactly one outcome per CV it was given, so
+    this cannot happen while both halves agree. It is pinned because the
+    failure it replaces is a bare `StopIteration` raised from inside a
+    callback - an exception that names nothing and points nowhere.
+    """
+    bench = _service_bench(bench_factory)
+    programmer = bench.station.programmer
+    monkeypatch.setattr(
+        programmer,
+        "service_read_many",
+        lambda cvs, *, on_result=None: [
+            on_result(CvReadOutcome(spec=CvSpec(cv=cv), result=None, error=None))
+            for cv in [*cvs, 999]
+        ],
+    )
+
+    with pytest.raises(RuntimeError, match="more outcomes than the 1 CVs"):
+        programmer.cv_read_many([CvSpec(cv=7)], mode=ProgMode.SERVICE)
 
 
 def test_a_spec_that_carries_a_page_keeps_the_per_cv_path(bench_factory, monkeypatch):

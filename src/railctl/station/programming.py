@@ -153,10 +153,17 @@ BATCH_ENDING_ERRORS: Final[tuple[type[RailctlError], ...]] = (
 #: all answered); everything above it is this project's choice, not a
 #: measurement, which is why the number lives here with that caveat rather
 #: than being spelled inline. Bounded rather than unbounded because a session
-#: holds the station in service mode: at ~3 s per read a chunk of 16 keeps
-#: one session under a minute, so an operator's Ctrl-C, a short circuit or a
+#: holds the station in service mode: at ~3 s per read a group of 8 keeps one
+#: session under half a minute, so an operator's Ctrl-C, a short circuit or a
 #: station reset costs at most that much progress.
-SERVICE_BATCH_SIZE: Final[int] = 16
+#:
+#: Eight rather than sixteen because doubling the group buys almost nothing
+#: and doubles the unproven part. The gap is 3 s per SESSION: a 77 CV backup
+#: pays it ten times at 8 (30 s) and five times at 16 (15 s), against ~235 s
+#: of reading either way. Fifteen seconds is not worth holding an untested
+#: 48 s session and risking 16 CVs of progress instead of 8. Raise it once a
+#: bench run shows a long session answering to the last CV.
+SERVICE_BATCH_SIZE: Final[int] = 8
 _REGISTER_COLLISION_MAX: Final[int] = 8  # registers 1..8 collide with CV1..8
 
 
@@ -1382,11 +1389,17 @@ class CvProgrammer:
                     # Same rule as `cli/deps.py::close_after`: the values the
                     # run measured survive, and the close failure rides beside
                     # them as a warning.
+                    # The GROUP is named, not one CV. "The read after which it
+                    # failed" would be a guess: a group that met a
+                    # batch-ending error partway through reported its own
+                    # tail as not attempted, so its last CV was never on the
+                    # wire and naming it would put a CV nobody read at the
+                    # scene of the failure.
                     self._station.emit(
                         "service.session_close_failed",
                         {
                             "reason": str(exc),
-                            "after_cv": chunk[-1].cv,
+                            "group": [chunk[0].cv, chunk[-1].cv],
                             "not_attempted": len(pending),
                         },
                     )
@@ -1417,7 +1430,18 @@ class CvProgrammer:
         remaining = iter(chunk)
 
         def deliver(outcome: CvReadOutcome) -> None:
-            report(CvReadOutcome(spec=next(remaining), result=outcome.result, error=outcome.error))
+            spec = next(remaining, None)
+            if spec is None:
+                # `service_read_many` returns exactly one outcome per CV it
+                # was given, so this is unreachable while both halves agree.
+                # It is spelled out because the alternative is a bare
+                # `StopIteration` raised from inside a callback, which says
+                # nothing about which two counts disagreed.
+                raise RuntimeError(
+                    f"service_read_many reported more outcomes than the {len(chunk)} "
+                    f"CVs it was given"
+                )
+            report(CvReadOutcome(spec=spec, result=outcome.result, error=outcome.error))
 
         outcomes = self.service_read_many([spec.cv for spec in chunk], on_result=deliver)
         return any(isinstance(outcome.error, BATCH_ENDING_ERRORS) for outcome in outcomes)
