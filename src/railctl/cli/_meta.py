@@ -1189,10 +1189,11 @@ _COMMAND_EXIT_MEANINGS: Final[dict[str, dict[int, str]]] = {
             "exception, and inventing one for a successful answer would make this table lie"
         ),
         9: (
-            "the comparison never ran. The error.code says which: backup_file (a file is "
-            "unreadable or malformed) or address_set_incomplete (--with-address with "
+            "no comparison was reported. The error.code says which: backup_file (a file is "
+            "unreadable or malformed), address_set_incomplete (--with-address with "
             "CV1/CV17/CV18/CV29 not all ok in the file, so there is no address set to "
-            "compare)"
+            "compare), or aborted (Ctrl-C - the online form reads every curated CV at about "
+            "6 s each, so an interrupt is a normal way for this command to end)"
         ),
         15: (
             "a VALUE in the file falls outside the catalog's min/max for its CV. The "

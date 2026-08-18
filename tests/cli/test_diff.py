@@ -30,6 +30,7 @@ from railctl.cli.commands.diff import (
     SOURCE_DECODER,
     SOURCE_FILE,
     WARNING_NOT_COMPARED,
+    WARNING_NOT_READ,
     offline_capabilities,
 )
 from railctl.cli.main import app
@@ -433,16 +434,45 @@ def test_silence_on_the_selectors_carries_the_placement_guidance(monkeypatch, tm
     assert envelope(result)["hint"] == SILENCE_GUIDANCE
 
 
-def test_a_live_cv_that_does_not_answer_is_a_difference_not_a_match(monkeypatch, tmp_path):
+def test_a_live_cv_that_does_not_answer_is_neither_a_match_nor_a_difference(monkeypatch, tmp_path):
+    """Silence is not a difference. The row is still a planned write - a
+    restore cannot rule the write out as unnecessary - but a diff may not
+    count "nobody could read this" as "this differs", and it says so under
+    its own heading instead."""
     install(
         monkeypatch,
         FakeDiffStation(batch_errors={4: DecoderNotRespondingError("no answer", cv=4)}),
     )
     result = invoke(str(file_a(tmp_path)))
     assert result.exit_code == 0, result.stderr
-    row = rows_by_cv(payload(result))[4]
-    assert row["live_value"] is None
-    assert row["action"] == "write"
+    body = payload(result)
+    row = rows_by_cv(body)[4]
+    assert (row["live_value"], row["action"]) == (None, "write")
+    # Four rows the planner calls `write`; one of them answered nothing.
+    assert (body["differences"], body["not_read"]) == (3, 1)
+
+
+def test_the_unread_rows_are_counted_and_warned_about(monkeypatch, tmp_path):
+    """A headline "3 differ" over a CV nobody could read is the same misread
+    the not-compared warning exists to stop, one row further along."""
+    install(
+        monkeypatch,
+        FakeDiffStation(batch_errors={4: DecoderNotRespondingError("no answer", cv=4)}),
+    )
+    result = invoke(str(file_a(tmp_path)))
+    warnings = json.loads(result.stdout)["warnings"]
+    warning = next(w for w in warnings if w["name"] == WARNING_NOT_READ)
+    assert warning["details"]["cvs"] == [4]
+
+
+def test_the_human_rendering_counts_an_unread_row_separately(monkeypatch, tmp_path):
+    install(
+        monkeypatch,
+        FakeDiffStation(batch_errors={4: DecoderNotRespondingError("no answer", cv=4)}),
+    )
+    result = runner.invoke(app, ["diff", str(file_a(tmp_path))])
+    assert result.exit_code == 0, result.stderr
+    assert "3 differ, 1 unchanged, 1 not read, 4 not compared" in result.stdout
 
 
 def test_the_programming_track_notice_goes_to_stderr(monkeypatch, tmp_path):
@@ -665,6 +695,7 @@ def test_the_json_envelope_carries_the_documented_keys(monkeypatch, tmp_path):
         "page",
         "options",
         "differences",
+        "not_read",
         "counts",
         "cvs",
     }
@@ -677,7 +708,9 @@ def test_the_counts_and_the_rows_describe_the_same_table(monkeypatch, tmp_path):
     body = payload(invoke(str(file_a(tmp_path))))
     counts = body["counts"]
     assert sum(counts.values()) == len(body["cvs"])
-    assert counts["write"] == body["differences"]
+    # The planner's `write` word splits in two here: what differs, and what
+    # could not be read to say either way.
+    assert counts["write"] == body["differences"] + body["not_read"]
 
 
 def test_the_human_rendering_names_both_sides_and_the_totals(monkeypatch, tmp_path):
@@ -687,7 +720,7 @@ def test_the_human_rendering_names_both_sides_and_the_totals(monkeypatch, tmp_pa
     assert result.exit_code == 0, result.stderr
     assert f"{path} against the decoder on the programming track" in result.stdout
     assert "CV3 accel_rate: 5 -> 20 (stage A)" in result.stdout
-    assert "4 differ, 1 unchanged, 4 not compared" in result.stdout
+    assert "4 differ, 1 unchanged, 0 not read, 4 not compared" in result.stdout
 
 
 def test_the_human_rendering_of_the_offline_form_names_the_second_file(monkeypatch, tmp_path):
@@ -710,7 +743,7 @@ def test_ndjson_starts_with_start_and_ends_with_summary(monkeypatch, tmp_path):
     assert [line["type"] for line in lines[1:-1]] == ["cv"] * (len(lines) - 2)
     assert lines[-1]["type"] == "summary"
     assert lines[-1]["exit_code"] == 0
-    assert lines[-1]["differences"] == 4
+    assert (lines[-1]["differences"], lines[-1]["not_read"]) == (4, 0)
 
 
 def test_ndjson_streams_the_offline_form_without_a_link(monkeypatch, tmp_path):
@@ -756,6 +789,18 @@ def test_a_buffered_ctrl_c_is_the_shared_aborted_ending(monkeypatch, tmp_path):
     result = invoke(str(file_a(tmp_path)))
     assert result.exit_code == 9
     assert envelope(result)["code"] == "aborted"
+    # The reachability half: a code a command can leave with is a code its
+    # row publishes, or a caller lands in their unknown-code arm.
+    assert result.exit_code in command_meta("diff").exit_codes
+
+
+def test_the_exit_code_table_names_the_aborted_ending(monkeypatch, tmp_path):
+    """Ctrl-C is a normal way to end an online diff - the live pass costs
+    about 6 s per CV - so `aborted` belongs in the list of error codes exit 9
+    can carry, next to backup_file and address_set_incomplete."""
+    from railctl.cli._meta import _COMMAND_EXIT_MEANINGS
+
+    assert "aborted" in _COMMAND_EXIT_MEANINGS["diff"][9]
 
 
 # -- one planner, two commands --------------------------------------------------

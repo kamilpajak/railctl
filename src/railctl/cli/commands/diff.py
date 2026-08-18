@@ -13,9 +13,10 @@ to disagree about a CV while both look right on their own.
 It deliberately does NOT mirror `diff(1)`'s exit 1 on a difference: every
 non-zero code in this tool is an exception, and inventing an exception for "the
 answer is yes" would make the exit table lie. The answer is `result.differences`
-in the payload, and a caller branches on that.
+in the payload - beside `result.not_read`, which says how much of the decoder
+never answered - and a caller branches on those.
 
-Three more properties are load-bearing here rather than emergent:
+Four more properties are load-bearing here rather than emergent:
 
 * **the two-file form opens no link.** Not "does not usually" - the station is
   never constructed on that path, and `tests/cli/test_diff.py` installs a
@@ -29,6 +30,13 @@ Three more properties are load-bearing here rather than emergent:
   comparing them across a page boundary would report differences that are only
   a change of subject. The same check runs offline between the two files'
   recorded pages;
+* **a CV that did not answer is not a difference.** `plan_restore` calls it a
+  write, and for a restore that is right - a write cannot be ruled out
+  unnecessary against a value nobody read. A diff is asked a different
+  question, so those rows are counted under `not_read` and warned about
+  separately. Counting them as differences would report silence as a measured
+  disagreement, which is the same mistake as recording a capability as absent
+  because nothing answered;
 * **the identity gate does not run here.** It is `restore`'s, and it exists to
   keep a CV set out of the wrong locomotive - a question only a write can get
   wrong. A read compares whatever is on the track and says what it found, and
@@ -131,6 +139,7 @@ SOURCE_FILE: Final[str] = "file"
 NOT_COMPARED_ACTIONS: Final[tuple[str, ...]] = ("skip", "unreadable")
 
 WARNING_NOT_COMPARED: Final[str] = "diff.not_compared"
+WARNING_NOT_READ: Final[str] = "diff.not_read"
 
 #: What an interrupted ndjson run exits with, read off the class exactly as
 #: `commands/backup.py` and `commands/restore.py` do, so this file and
@@ -269,22 +278,43 @@ class DiffResult:
         return differences_in(self.rows)
 
     @property
+    def not_read(self) -> int:
+        return len(unread_in(self.rows))
+
+    @property
     def not_compared(self) -> int:
         return sum(1 for row in self.rows if row.action in NOT_COMPARED_ACTIONS)
 
 
+def unread_in(rows: Iterable[PlannedWrite]) -> list[int]:
+    """The CVs the planner would write and nothing could read, ascending in
+    row order.
+
+    `plan_restore` calls these `write` and is right to: a restore cannot rule
+    out a write it has nothing to compare against. A diff is asked a different
+    question, and for it silence is not an answer - which is this project's
+    founding rule, one layer up from a capability: `null` is not `false`, and
+    "no reply" is not "differs".
+    """
+    return [row.num for row in rows if row.action == ACTION_WRITE and row.live_value is None]
+
+
 def differences_in(rows: Iterable[PlannedWrite]) -> int:
-    """How many CVs do not hold the file's value.
+    """How many CVs answered, and answered with something other than the file's
+    value.
 
     Read off the planner's own verdict rather than re-derived from
     `file_value != live_value`: `write` is exactly the word `plan_restore` uses
-    for "what is there is not what the file says" - including "and nothing
-    could read what is there", which is not a match either - and a second test
-    here would be the second comparator this module exists without. On a merged
-    CV29 the two would already disagree, because the file's long-address bit is
+    for "what is there is not what the file says", and a second test here would
+    be the second comparator this module exists without. On a merged CV29 the
+    two would already disagree, because the file's long-address bit is
     deliberately not part of the question.
+
+    The one place this command departs from that verdict is the row nothing
+    could read. `plan_restore` calls it a write and this counts it under
+    `not_read` instead - see `unread_in`.
     """
-    return sum(1 for row in rows if row.action == ACTION_WRITE)
+    return sum(1 for row in rows if row.action == ACTION_WRITE and row.live_value is not None)
 
 
 def offline_live(document: BackupDocument) -> dict[int, int | None]:
@@ -440,6 +470,7 @@ def build_diff(diff: DiffResult) -> CommandResult:
             "include_sweep": invocation.include_sweep,
         },
         "differences": diff.differences,
+        "not_read": diff.not_read,
         "counts": counts,
         "cvs": [row_json(row) for row in diff.rows],
     }
@@ -453,8 +484,16 @@ def build_diff(diff: DiffResult) -> CommandResult:
         result.say(row_line(row))
     result.say(
         f"{diff.differences} differ, {counts['unchanged']} unchanged, "
-        f"{diff.not_compared} not compared"
+        f"{diff.not_read} not read, {diff.not_compared} not compared"
     )
+    if diff.not_read:
+        result.warn(
+            WARNING_NOT_READ,
+            f"{diff.not_read} CV(s) did not answer, so this file and the decoder were not "
+            f"compared on them at all; they are not counted as differences, because "
+            f"silence is not a value that disagrees with anything",
+            cvs=unread_in(diff.rows),
+        )
     if diff.not_compared:
         result.warn(
             WARNING_NOT_COMPARED,
@@ -503,7 +542,11 @@ def _summary_fields(rows: Iterable[PlannedWrite]) -> dict[str, object]:
     far enough to produce a row, because `rows` is then still the empty tuple
     the run started with."""
     planned = list(rows)
-    return {"differences": differences_in(planned), **counts_for(planned)}
+    return {
+        "differences": differences_in(planned),
+        "not_read": len(unread_in(planned)),
+        **counts_for(planned),
+    }
 
 
 def _run_ndjson(settings: Settings, output: OutputContext, invocation: _Invocation) -> NoReturn:
