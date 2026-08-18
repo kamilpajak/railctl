@@ -1271,17 +1271,26 @@ def test_cv_read_many_in_service_mode_pays_the_session_gap_once_for_the_group(
 
 
 def test_cv_read_many_opens_one_session_per_group_of_service_batch_size(bench_factory, monkeypatch):
-    """`SERVICE_BATCH_SIZE` + 1 specs open exactly two sessions.
+    """Seventeen specs open exactly two sessions: sixteen CVs, then one.
 
     The group is bounded because a session holds the station in service mode:
     an interrupt, a short circuit or a station reset costs at most one group's
     progress. Both sessions are scripted in full, so a third one - or a group
     that ran long and read CV number 17 inside the first - fails the test.
+
+    Seventeen and sixteen are written out rather than computed from
+    `SERVICE_BATCH_SIZE`, and the constant is asserted against the literal
+    here. A test that builds its fixture out of the constant it is pinning
+    adapts to any value the constant is given and so cannot catch a change to
+    it - which is exactly what a mutation run found on 2026-08-18, when
+    setting the constant to 1 left this test green while seven of its
+    neighbours went red.
     """
+    assert SERVICE_BATCH_SIZE == 16
     bench = _service_bench(bench_factory)
-    cvs = list(range(101, 101 + SERVICE_BATCH_SIZE + 1))
-    _script_one_session(bench, cvs[:SERVICE_BATCH_SIZE])
-    _script_one_session(bench, cvs[SERVICE_BATCH_SIZE:])
+    cvs = list(range(101, 118))
+    _script_one_session(bench, cvs[:16])
+    _script_one_session(bench, cvs[16:])
     _answer_every_read(bench, monkeypatch)
 
     outcomes = bench.station.programmer.cv_read_many(
