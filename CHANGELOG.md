@@ -24,12 +24,17 @@ All notable changes to this project are documented in this file. The format foll
 ### Changed
 
 - Reading several CVs in service mode - `railctl backup`, `railctl diff`, `railctl
-  restore`'s verification pass - now shares one programming session between groups of
-  up to 16 CVs instead of opening one per CV. A CV cost 6.05 s measured 2026-08-13, and
-  about half of that was the mandatory wait between two sessions, which is now paid once
-  per group. Progress is still reported per CV, so a Ctrl-C keeps every CV that had
-  already answered. A short circuit, a busy station or a dead link still ends the run,
-  and the CVs after it are reported as never attempted rather than as failed. (#38)
+  restore`'s pre-write read of the live values, and `railctl cv read` with more than one
+  CV - now shares one programming session between groups of up to 16 CVs instead of
+  opening one per CV. A CV cost 6.05 s measured 2026-08-13, and about half of that was
+  the mandatory wait between two sessions, which is now paid once per group. Progress is
+  still reported per CV, so a Ctrl-C keeps every CV that had already answered. A short
+  circuit, a busy station or a dead link still ends the run, and the CVs after it are
+  reported as never attempted rather than as failed. A read that carries a page - which
+  is every read `railctl restore`'s verification pass does - keeps one session per CV,
+  because a page can only be selected outside the shared session. A group that answered
+  in full and then could not leave service mode keeps its values and reports the new
+  `service.session_close_failed` warning. (#38)
 
 ### Fixed
 
