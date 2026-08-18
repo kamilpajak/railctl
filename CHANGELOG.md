@@ -21,6 +21,16 @@ All notable changes to this project are documented in this file. The format foll
 - The doctor's report now says what the run left the layout doing - whether it energised
   the track, whether the layout is held, and which locomotive was sent speed 0.
 
+### Changed
+
+- Reading several CVs in service mode - `railctl backup`, `railctl diff`, `railctl
+  restore`'s verification pass - now shares one programming session between groups of
+  up to 16 CVs instead of opening one per CV. A CV cost 6.05 s measured 2026-08-13, and
+  about half of that was the mandatory wait between two sessions, which is now paid once
+  per group. Progress is still reported per CV, so a Ctrl-C keeps every CV that had
+  already answered. A short circuit, a busy station or a dead link still ends the run,
+  and the CVs after it are reported as never attempted rather than as failed. (#38)
+
 ### Fixed
 
 - `doctor --power-on` no longer leaves the layout free to move. It energises, holds the

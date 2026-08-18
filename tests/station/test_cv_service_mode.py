@@ -18,6 +18,7 @@ from railctl.errors import (
     DecoderNoAckError,
     DecoderNotRespondingError,
     LinkTimeout,
+    PomReadUnsupportedError,
     ServiceEncodingUnknownError,
     ShortCircuitError,
     StationBusyError,
@@ -25,13 +26,14 @@ from railctl.errors import (
 )
 from railctl.station.capabilities import Capabilities
 from railctl.station.programming import (
+    SERVICE_BATCH_SIZE,
     SERVICE_ENCODING_ORDER,
     UNEXERCISED_BANDS,
     CvProgrammer,
     TimedOut,
 )
 from railctl.station.timing import TIMING
-from railctl.station.types import EVENT_NAMES, ProgMode
+from railctl.station.types import EVENT_NAMES, CvReadOutcome, CvResult, CvSpec, ProgMode
 from railctl.xbus.codec import encode
 from railctl.xbus.commands import (
     cmd_emergency_stop_all,
@@ -1133,3 +1135,425 @@ def test_an_unreachable_cv_still_suggests_pom_while_pom_remains_possible(bench_f
     with pytest.raises(CvOutOfRangeError) as caught:
         bench.station.programmer.service_read_telegram(265)
     assert "use `--mode pom`" in caught.value.hint
+
+
+# -- cv_read_many over service mode: one session per group (issue #38) ---------
+
+
+def _service_bench(bench_factory):
+    """A bench whose programmer already KNOWS its session history.
+
+    A fresh programmer does not - it cannot know when the previous CLI
+    invocation's session closed - so `cv_read_many` reads the first spec on
+    its own through `service_read`, which carries the `61 13` retry. That
+    branch has its own test below; every other test here is about the
+    grouping, so the flag is set the way a programmer that has already closed
+    a session in this process would have it.
+    """
+    bench = bench_factory(capabilities=make_capabilities(z21_cv_opcodes=True))
+    bench.station.programmer._session_history_unknown = False
+    return bench
+
+
+def _script_one_session(bench, cvs) -> None:
+    """One whole service-mode session: the power-before status check, one read
+    telegram per CV, and `exit_service_mode`'s resume-operations exchange and
+    status check (service mode already left, track already powered, so no
+    second attempt and no power-off).
+
+    A further session is deliberately NOT scripted - `FakeTransport` raises on
+    the first unscripted request, so one opened by mistake fails the test
+    where it happens, naming the telegram.
+    """
+    bench.expect(STATUS_REQUEST, reply=STATUS_POWER_ON)
+    for cv in cvs:
+        bench.expect(cmd_z21_cv_read(cv), reply=ACK)
+    bench.expect(cmd_track_power_on(), reply=ACK)
+    bench.expect(STATUS_REQUEST, reply=STATUS_POWER_ON)
+
+
+def _cv_result(*, cv: int, value: int) -> CvResult:
+    """What a stubbed `cv_read` hands back on the per-CV path, where the tests
+    below care about WHICH reads happened, not about the values."""
+    return CvResult(
+        cv=cv,
+        value=value,
+        mode=ProgMode.SERVICE,
+        encoding=CvEncoding.Z21_16BIT,
+        operation="read",
+        verified=None,
+        elapsed=0.0,
+    )
+
+
+def _answer_every_read(bench, monkeypatch) -> None:
+    """Every read answers with its own CV number as the value. Stubbed for the
+    same reason the tests above stub it: these are about session boundaries,
+    not about polling."""
+    monkeypatch.setattr(
+        bench.station.programmer,
+        "await_result",
+        lambda matcher, **kwargs: CvValue(
+            raw_cv=matcher.cv, value=matcher.cv, ident=0x14, z21_form=True
+        ),
+    )
+
+
+def test_cv_read_many_in_service_mode_opens_one_session_for_the_whole_group(
+    bench_factory, monkeypatch
+):
+    """Three specs, one session - not one session per spec.
+
+    This is issue #38's whole point: `cv_read_many` used to loop over
+    `cv_read`, and in service mode each of those opened and closed its own
+    session. Exactly one resume-operations exchange is scripted, so a second
+    session fails the test where it happens.
+    """
+    bench = _service_bench(bench_factory)
+    _script_one_session(bench, (7, 8, 250))
+    _answer_every_read(bench, monkeypatch)
+
+    outcomes = bench.station.programmer.cv_read_many(
+        [CvSpec(cv=250), CvSpec(cv=7), CvSpec(cv=8)], mode=ProgMode.SERVICE
+    )
+
+    assert [outcome.spec.cv for outcome in outcomes] == [7, 8, 250]
+    assert [outcome.result.value for outcome in outcomes] == [7, 8, 250]
+    assert bench.transport.script_pending == []
+
+
+def test_cv_read_many_in_service_mode_keeps_the_caller_s_spec_on_every_outcome(
+    bench_factory, monkeypatch
+):
+    """The outcome carries the spec the CALLER passed, name included.
+
+    `service_read_many` knows CV numbers only, so it reports a bare
+    `CvSpec(cv=...)`. A backup row is written under the catalog slug that
+    lives on the caller's spec, so an outcome that came back with the bare
+    spec would lose the name the file is keyed by.
+    """
+    bench = _service_bench(bench_factory)
+    _script_one_session(bench, (7, 8))
+    _answer_every_read(bench, monkeypatch)
+
+    outcomes = bench.station.programmer.cv_read_many(
+        [CvSpec(cv=7, name="accel"), CvSpec(cv=8, name="reset")], mode=ProgMode.SERVICE
+    )
+
+    assert [outcome.spec.name for outcome in outcomes] == ["accel", "reset"]
+
+
+def test_cv_read_many_in_service_mode_pays_the_session_gap_once_for_the_group(
+    bench_factory, monkeypatch
+):
+    """The saving, on the clock: three CVs through `cv_read_many` owe ONE
+    `service_session_gap`, not one per CV.
+
+    Measured 2026-08-13 (issue #38): a backup cost 6.05 s per CV, about half
+    of it this gap, waited out because every CV opened its own session. The
+    fake clock is the instrument, exactly as in
+    `test_a_second_service_session_waits_out_the_gap`.
+    """
+    bench = bench_factory(capabilities=make_capabilities(z21_cv_opcodes=True))
+    _script_read_and_clean_exit(bench, cmd_z21_cv_read(8))
+    _script_one_session(bench, (7, 8, 250))
+    _answer_every_read(bench, monkeypatch)
+
+    bench.station.programmer.service_read(8)
+    after_first = bench.clock.monotonic()
+    bench.station.programmer.cv_read_many(
+        [CvSpec(cv=7), CvSpec(cv=8), CvSpec(cv=250)], mode=ProgMode.SERVICE
+    )
+    elapsed = bench.clock.monotonic() - after_first
+
+    assert elapsed >= TIMING.service_session_gap
+    assert elapsed < 2 * TIMING.service_session_gap
+
+
+def test_cv_read_many_opens_one_session_per_group_of_service_batch_size(bench_factory, monkeypatch):
+    """`SERVICE_BATCH_SIZE` + 1 specs open exactly two sessions.
+
+    The group is bounded because a session holds the station in service mode:
+    an interrupt, a short circuit or a station reset costs at most one group's
+    progress. Both sessions are scripted in full, so a third one - or a group
+    that ran long and read CV number 17 inside the first - fails the test.
+    """
+    bench = _service_bench(bench_factory)
+    cvs = list(range(101, 101 + SERVICE_BATCH_SIZE + 1))
+    _script_one_session(bench, cvs[:SERVICE_BATCH_SIZE])
+    _script_one_session(bench, cvs[SERVICE_BATCH_SIZE:])
+    _answer_every_read(bench, monkeypatch)
+
+    outcomes = bench.station.programmer.cv_read_many(
+        [CvSpec(cv=cv) for cv in cvs], mode=ProgMode.SERVICE
+    )
+
+    assert [outcome.spec.cv for outcome in outcomes] == cvs
+    assert bench.sent.count(cmd_track_power_on()) == 2
+    assert bench.transport.script_pending == []
+
+
+def test_cv_read_many_reports_progress_per_cv_from_inside_the_open_session(
+    bench_factory, monkeypatch
+):
+    """One `on_progress` call per spec, in sorted order, numbered across the
+    whole call - and every one of them BEFORE the session closes.
+
+    `cli/commands/backup.py` builds a Ctrl-C partial file out of these
+    callbacks alone, because the returned list dies with the interrupt. A
+    callback delivered per group instead of per CV would lose up to a whole
+    group of CVs that had already answered, and one delivered after the return
+    would lose all of them. The proof of the timing is the resume-operations
+    telegram: it is the last thing a session sends, so a callback that has not
+    seen it yet ran inside the session.
+    """
+    bench = _service_bench(bench_factory)
+    _script_one_session(bench, (7, 8, 250))
+    _answer_every_read(bench, monkeypatch)
+    progress: list[tuple[int, int, int, bool]] = []
+
+    def record(update: tuple[int, int, CvReadOutcome]) -> None:
+        index, total, outcome = update
+        progress.append((index, total, outcome.spec.cv, cmd_track_power_on() in bench.sent))
+
+    bench.station.programmer.cv_read_many(
+        [CvSpec(cv=250), CvSpec(cv=7), CvSpec(cv=8)], mode=ProgMode.SERVICE, on_progress=record
+    )
+
+    assert progress == [(0, 3, 7, False), (1, 3, 8, False), (2, 3, 250, False)]
+
+
+def test_one_failing_cv_does_not_end_the_batched_read_or_close_the_session(
+    bench_factory, monkeypatch
+):
+    """A decoder that does not answer one CV is that CV's news, not the
+    group's.
+
+    The same rule `service_read_many` already applies inside one session, now
+    reached through `cv_read_many`: the failure is recorded as that CV's error
+    and the reads after it continue in the SAME session. One exit is
+    scripted, so a failure that closed the session fails the test.
+    """
+    bench = _service_bench(bench_factory)
+    _script_one_session(bench, (7, 8, 250))
+    replies = {
+        7: CvValue(raw_cv=7, value=5, ident=0x14, z21_form=True),
+        8: NoAck(),
+        250: CvValue(raw_cv=250, value=6, ident=0x14, z21_form=True),
+    }
+    monkeypatch.setattr(
+        bench.station.programmer, "await_result", lambda matcher, **kwargs: replies[matcher.cv]
+    )
+
+    outcomes = bench.station.programmer.cv_read_many(
+        [CvSpec(cv=7), CvSpec(cv=8), CvSpec(cv=250)], mode=ProgMode.SERVICE
+    )
+
+    assert isinstance(outcomes[1].error, DecoderNoAckError)
+    assert [outcome.result is not None for outcome in outcomes] == [True, False, True]
+    assert bench.transport.script_pending == []
+
+
+def test_a_short_circuit_in_the_first_group_leaves_every_later_cv_unattempted(
+    bench_factory, monkeypatch
+):
+    """A batch-ending error stops the whole call, across groups.
+
+    A shorted programming track cannot clear itself by opening the next
+    session, so the CV that met it carries the error and every CV after it -
+    the rest of its own group and all of the group that was never opened -
+    comes back `result is None and error is None`. Not attempted is a
+    different fact from failed: `backup/mapping.py::status_for` branches on
+    exactly that, and copying the short circuit onto them would claim
+    seventeen shorts where the station reported one.
+    """
+    bench = _service_bench(bench_factory)
+    cvs = list(range(101, 101 + SERVICE_BATCH_SIZE + 1))
+    bench.expect(STATUS_REQUEST, reply=STATUS_POWER_ON)
+    bench.expect(cmd_z21_cv_read(cvs[0]), reply=ACK)
+    bench.expect(cmd_track_power_on(), reply=ACK)
+    bench.expect(STATUS_REQUEST, reply=STATUS_POWER_ON)
+    monkeypatch.setattr(
+        bench.station.programmer, "await_result", lambda matcher, **kwargs: ShortCircuit()
+    )
+    progress: list[CvReadOutcome] = []
+
+    outcomes = bench.station.programmer.cv_read_many(
+        [CvSpec(cv=cv) for cv in cvs],
+        mode=ProgMode.SERVICE,
+        on_progress=lambda update: progress.append(update[2]),
+    )
+
+    assert isinstance(outcomes[0].error, ShortCircuitError)
+    assert [(o.spec.cv, o.result, o.error) for o in outcomes[1:]] == [
+        (cv, None, None) for cv in cvs[1:]
+    ]
+    assert [outcome.spec.cv for outcome in progress] == cvs
+    assert bench.sent.count(cmd_track_power_on()) == 1
+    assert bench.transport.script_pending == []
+
+
+def test_a_spec_that_carries_a_page_keeps_the_per_cv_path(bench_factory, monkeypatch):
+    """Paging still reads CV31/CV32 first, selects, and restores.
+
+    Service mode cannot select a page at all - `service_read` only emits
+    `page.not_selected` - so the selection a paged spec needs happens in
+    `cv_read_many`'s per-CV loop and nowhere else. `service_read_many` fails
+    the test if it is reached: the batch must not quietly read a paged spec
+    off whatever page the decoder happened to have selected.
+    """
+    bench = bench_factory(capabilities=make_capabilities(z21_cv_opcodes=True))
+    programmer = bench.station.programmer
+    calls: list[tuple[object, ...]] = []
+    monkeypatch.setattr(
+        programmer,
+        "service_read_many",
+        lambda cvs, *, on_result=None: pytest.fail("the paged batch must not be grouped"),
+    )
+    monkeypatch.setattr(
+        programmer,
+        "select_page",
+        lambda page, *, address, mode, force: calls.append(("select", page, force)),
+    )
+    monkeypatch.setattr(
+        programmer,
+        "cv_read",
+        lambda cv, *, address, mode, page=None: (
+            calls.append(("read", cv)),
+            _cv_result(cv=cv, value=7 if cv == 31 else 3),
+        )[1],
+    )
+
+    programmer.cv_read_many([CvSpec(cv=265, page=(10, 2))], mode=ProgMode.SERVICE)
+
+    assert calls == [
+        ("read", 31),
+        ("read", 32),
+        ("select", (10, 2), True),
+        ("read", 265),
+        ("select", (7, 3), True),
+    ]
+
+
+def test_pom_mode_still_reads_one_cv_at_a_time(bench_factory, monkeypatch):
+    """The grouping is service mode's alone.
+
+    POM has no session and no session gap; there is nothing to save and
+    `service_read_many` sends service-mode telegrams, which is the wrong
+    track. `resolve_mode` returning POM must keep the per-CV loop.
+    """
+    bench = bench_factory(capabilities=make_capabilities(pom_read=True))
+    programmer = bench.station.programmer
+    read: list[int] = []
+    monkeypatch.setattr(
+        programmer,
+        "service_read_many",
+        lambda cvs, *, on_result=None: pytest.fail("POM must not open a service session"),
+    )
+    monkeypatch.setattr(
+        programmer,
+        "cv_read",
+        lambda cv, *, address, mode, page=None: (read.append(cv), _cv_result(cv=cv, value=1))[1],
+    )
+
+    programmer.cv_read_many([CvSpec(cv=8), CvSpec(cv=7)], address=3, mode=ProgMode.POM)
+
+    assert read == [7, 8]
+
+
+def test_an_unresolvable_mode_is_still_reported_once_per_spec(bench_factory, monkeypatch):
+    """A `resolve_mode` failure must not escape `cv_read_many`.
+
+    POM measured unsupported with no service encoding proven leaves AUTO with
+    nowhere to go, and `resolve_mode` raises. That happened inside the per-CV
+    loop before this change, so every spec came back with that error as its
+    outcome; deciding the path up front must not turn it into an exception the
+    caller never had to handle.
+    """
+    bench = bench_factory(capabilities=make_capabilities(pom_read=False))
+    monkeypatch.setattr(
+        bench.station.programmer,
+        "service_read_many",
+        lambda cvs, *, on_result=None: pytest.fail("no mode was resolved"),
+    )
+
+    outcomes = bench.station.programmer.cv_read_many([CvSpec(cv=7), CvSpec(cv=8)])
+
+    assert [isinstance(outcome.error, PomReadUnsupportedError) for outcome in outcomes] == [
+        True,
+        True,
+    ]
+    assert bench.sent == []
+
+
+def test_the_first_cv_of_an_invocation_is_read_alone_so_the_gap_retry_still_covers_it(
+    bench_factory, monkeypatch
+):
+    """With the session history unknown, spec one goes through `service_read`.
+
+    A fresh programmer cannot know when the previous CLI invocation's session
+    closed, and a session opened too soon fails wholesale with `61 13` on
+    every CV in it - `service_read` carries the one retry that separates that
+    artefact from a decoder that really did not answer, and
+    `service_read_many` does not. Retrying a whole GROUP instead would re-run
+    reads the first attempt had already reported through `on_progress`, so a
+    CV would arrive twice with two different outcomes.
+
+    Three sessions are scripted: the first attempt that answers `61 13`, its
+    retry, and the one group holding the remaining two CVs.
+    """
+    bench = bench_factory(capabilities=make_capabilities(z21_cv_opcodes=True))
+    _script_read_and_clean_exit(bench, cmd_z21_cv_read(7))
+    _script_read_and_clean_exit(bench, cmd_z21_cv_read(7))
+    _script_one_session(bench, (8, 250))
+    answers = iter([NoAck()])
+    monkeypatch.setattr(
+        bench.station.programmer,
+        "await_result",
+        lambda matcher, **kwargs: next(
+            answers, CvValue(raw_cv=matcher.cv, value=matcher.cv, ident=0x14, z21_form=True)
+        ),
+    )
+
+    outcomes = bench.station.programmer.cv_read_many(
+        [CvSpec(cv=7), CvSpec(cv=8), CvSpec(cv=250)], mode=ProgMode.SERVICE
+    )
+
+    assert [outcome.spec.cv for outcome in outcomes] == [7, 8, 250]
+    assert [outcome.result.value for outcome in outcomes] == [7, 8, 250]
+    assert "service.session_retried" in bench.event_names()
+    assert bench.transport.script_pending == []
+
+
+def test_service_read_many_hands_every_outcome_to_on_result_in_order(bench_factory, monkeypatch):
+    """`on_result` fires once per element of the returned list, in list order,
+    the not-attempted tail included.
+
+    That is what lets `cv_read_many` report progress per CV while the session
+    is still open. A tail delivered only in the return value would be missing
+    from a Ctrl-C partial file, and a caller collecting incrementally would
+    see a shorter list than the one the batch returns.
+    """
+    bench = _service_bench(bench_factory)
+    bench.expect(STATUS_REQUEST, reply=STATUS_POWER_ON)
+    for cv in (7, 8):
+        bench.expect(cmd_z21_cv_read(cv), reply=ACK)
+    bench.expect(cmd_track_power_on(), reply=ACK)
+    bench.expect(STATUS_REQUEST, reply=STATUS_POWER_ON)
+    replies = {
+        7: CvValue(raw_cv=7, value=5, ident=0x14, z21_form=True),
+        8: ShortCircuit(),
+    }
+    monkeypatch.setattr(
+        bench.station.programmer, "await_result", lambda matcher, **kwargs: replies[matcher.cv]
+    )
+    seen: list[CvReadOutcome] = []
+
+    outcomes = bench.station.programmer.service_read_many([7, 8, 250], on_result=seen.append)
+
+    assert seen == outcomes
+    assert [(o.spec.cv, o.result is None, o.error is None) for o in outcomes] == [
+        (7, False, True),
+        (8, True, False),
+        (250, True, True),
+    ]

@@ -88,6 +88,7 @@ if TYPE_CHECKING:
     from railctl.station.facade import Station
 
 __all__ = [
+    "SERVICE_BATCH_SIZE",
     "SERVICE_ENCODING_ORDER",
     "UNEXERCISED_BANDS",
     "CvMatcher",
@@ -147,6 +148,15 @@ BATCH_ENDING_ERRORS: Final[tuple[type[RailctlError], ...]] = (
     LinkTimeout,
     TransportError,
 )
+#: How many CVs share one service-mode session. Four is the largest number
+#: PROVEN on the bench (issue #22, 2026-08-07: four reads inside one session
+#: all answered); everything above it is this project's choice, not a
+#: measurement, which is why the number lives here with that caveat rather
+#: than being spelled inline. Bounded rather than unbounded because a session
+#: holds the station in service mode: at ~3 s per read a chunk of 16 keeps
+#: one session under a minute, so an operator's Ctrl-C, a short circuit or a
+#: station reset costs at most that much progress.
+SERVICE_BATCH_SIZE: Final[int] = 16
 _REGISTER_COLLISION_MAX: Final[int] = 8  # registers 1..8 collide with CV1..8
 
 
@@ -881,7 +891,12 @@ class CvProgrammer:
 
         return self._retry_once_for_unknown_gap(attempt)
 
-    def service_read_many(self, cvs: Sequence[int]) -> list[CvReadOutcome]:
+    def service_read_many(
+        self,
+        cvs: Sequence[int],
+        *,
+        on_result: Callable[[CvReadOutcome], None] | None = None,
+    ) -> list[CvReadOutcome]:
         """Read several CVs inside ONE service-mode session.
 
         Not a convenience wrapper around `service_read`: the session count is
@@ -910,6 +925,16 @@ class CvProgrammer:
         CVs below 256, and `service_read` cannot honour a page in service
         mode anyway - it only emits `page.not_selected`. Adding a parameter
         that could not be acted on would promise more than this can do.
+
+        `on_result` is handed each outcome as it is produced, in list order,
+        exactly once per element of the returned list - the not-attempted tail
+        after a batch-ending error included - and always from INSIDE the open
+        session, never after the list is built. `cv_read_many` needs that
+        timing, not the finished list: its own `on_progress` is the only
+        record a Ctrl-C leaves behind (`cli/commands/backup.py`, `_Collection`),
+        so an outcome that arrived only in the return value would be lost with
+        the interrupt, and one delivered per chunk would lose up to
+        `SERVICE_BATCH_SIZE` CVs that had already answered.
         """
         if not cvs:
             # No session at all rather than an empty one: opening and closing
@@ -918,13 +943,19 @@ class CvProgrammer:
             return []
         before = self._station.status()
         outcomes: list[CvReadOutcome] = []
+
+        def record(outcome: CvReadOutcome) -> None:
+            outcomes.append(outcome)
+            if on_result is not None:
+                on_result(outcome)
+
         try:
             for cv in cvs:
                 spec = CvSpec(cv=cv)
                 try:
                     result = self._read_in_open_session(cv)
                 except BATCH_ENDING_ERRORS as exc:
-                    outcomes.append(CvReadOutcome(spec=spec, result=None, error=exc))
+                    record(CvReadOutcome(spec=spec, result=None, error=exc))
                     # The rest are reported as NOT ATTEMPTED - both fields
                     # None - which is what `CvReadOutcome`'s own docstring
                     # reserves that combination for. Copying the batch-ending
@@ -932,15 +963,13 @@ class CvProgrammer:
                     # the station reported one, and dropping them from the
                     # list would leave a caller unable to tell a CV that was
                     # never tried from one it forgot to ask about.
-                    outcomes.extend(
-                        CvReadOutcome(spec=CvSpec(cv=skipped), result=None, error=None)
-                        for skipped in cvs[len(outcomes) :]
-                    )
+                    for skipped in cvs[len(outcomes) :]:
+                        record(CvReadOutcome(spec=CvSpec(cv=skipped), result=None, error=None))
                     break
                 except RailctlError as exc:
-                    outcomes.append(CvReadOutcome(spec=spec, result=None, error=exc))
+                    record(CvReadOutcome(spec=spec, result=None, error=exc))
                 else:
-                    outcomes.append(CvReadOutcome(spec=spec, result=result, error=None))
+                    record(CvReadOutcome(spec=spec, result=result, error=None))
         finally:
             self.exit_service_mode(
                 restore_power=before.track_power, restore_hold=before.emergency_stop
@@ -1146,6 +1175,39 @@ class CvProgrammer:
         # `Callable[[int, int, CvReadOutcome], None]`.
         on_progress: Callable[[tuple[int, int, CvReadOutcome]], None] | None = None,
     ) -> list[CvReadOutcome]:
+        """Read every spec, in sorted order, one outcome per spec.
+
+        Two paths. In service mode with no page anywhere in the batch, the
+        specs are read in groups of at most `SERVICE_BATCH_SIZE`, one session
+        per group: a service read costs 6.05 s per CV measured at the bench
+        2026-08-13 (issue #38, docs/probe-results.md, "A backup costs 6 s per
+        CV, and half of it is the session gap"), and about 3.0 s of that is
+        `Timing.service_session_gap`, waited out only because every CV opened
+        its own session. `_await_session_gap` charges that gap once per
+        session, so a group of 16 pays it once instead of 16 times. The M11
+        `--all` sweep reads up to 1024 CVs, which is 1 h 42 min at one session
+        per CV.
+
+        Everything else keeps the per-CV path, and a spec that carries a page
+        always does: page handling lives here (CV31/CV32 read before the first
+        selection, `select_page` at the head of each group, the found pair
+        re-selected in the `finally`), and `service_read` cannot select a page
+        in service mode at all - it only emits `page.not_selected`. See
+        `_service_batch_applies`.
+
+        The batched path applies `BATCH_ENDING_ERRORS` across the whole call,
+        not only within one session: the CV that met the error carries it and
+        every CV after it comes back not attempted (both fields `None`).
+        Opening a fresh session for a shorted track or a busy station only
+        buries the fault under copies of its own consequences. The per-CV path
+        keeps reading, as it always has, because each of its reads opens its
+        own session anyway.
+
+        `on_progress` fires once per spec, in sorted order, WHILE the batch is
+        still running, on both paths - `cli/commands/backup.py` builds its
+        Ctrl-C partial file out of those callbacks alone, because the returned
+        list dies with the interrupt.
+        """
         for spec in specs:
             if spec.cv in PAGE_SELECTOR_CVS:
                 raise ValueError(
@@ -1154,6 +1216,8 @@ class CvProgrammer:
                     f"payload"
                 )
         ordered = sorted(specs, key=lambda spec: (spec.page or (0, 0), spec.cv))
+        if self._service_batch_applies(ordered, mode=mode):
+            return self._read_specs_in_service_sessions(ordered, on_progress=on_progress)
         # Leave-as-found: a batch that will select a page writes CV31/CV32,
         # and a read's job is to leave the decoder as it found it. The pair is
         # read BEFORE the first selection - CV31/CV32 are plain 1-255 CVs,
@@ -1196,6 +1260,125 @@ class CvProgrammer:
                 # and reporting the batch as if it were would be the lie.
                 self.select_page(found_page, address=address, mode=mode, force=True)
         return outcomes
+
+    def _service_batch_applies(self, ordered: Sequence[CvSpec], *, mode: ProgMode) -> bool:
+        """Whether `cv_read_many` may read `ordered` as service-mode groups.
+
+        Every spec must carry `page is None`, and the reason is not that a
+        paged batch would be hard: `service_read` cannot select a page in
+        service mode at all, it only emits `page.not_selected`, so the
+        selection a paged spec needs happens in `cv_read_many`'s own per-CV
+        loop and nowhere else. Backup (`cli/commands/backup.py`) and diff
+        (`cli/commands/diff.py`) both build `CvSpec(cv=..., name=...)` with no
+        page, so the batched path already covers every caller whose 6 s per CV
+        was measured; teaching the batch to page would add a second selection
+        path that no caller exercises.
+
+        A `resolve_mode` failure is not decided here. It falls through to the
+        per-CV path, where the same call raises inside the loop and is
+        reported as one error outcome per spec, exactly as it was before this
+        batching existed.
+        """
+        if not ordered:
+            return False
+        if any(spec.page is not None for spec in ordered):
+            return False
+        try:
+            resolved = resolve_mode(mode, self._station.capabilities, operation="read")
+        except RailctlError:
+            return False
+        return resolved is ProgMode.SERVICE
+
+    def _read_specs_in_service_sessions(
+        self,
+        ordered: Sequence[CvSpec],
+        *,
+        on_progress: Callable[[tuple[int, int, CvReadOutcome]], None] | None,
+    ) -> list[CvReadOutcome]:
+        """`cv_read_many`'s batched path: one session per group of at most
+        `SERVICE_BATCH_SIZE` CVs, instead of one session per CV.
+
+        Measured 2026-08-13 (issue #38): `railctl backup` cost 6.05 s per CV,
+        about 3.0 s of it the decoder read and about 3.0 s
+        `Timing.service_session_gap`. The gap is owed once per SESSION, so
+        grouping the reads is what removes it.
+        """
+        total = len(ordered)
+        outcomes: list[CvReadOutcome] = []
+
+        def report(outcome: CvReadOutcome) -> None:
+            # `index` counts across the whole call, not per chunk, and the
+            # callback goes out here rather than from a loop over the finished
+            # list: a Ctrl-C takes the return value with it, and the rows of a
+            # partial backup file come from these callbacks alone.
+            outcomes.append(outcome)
+            if on_progress is not None:
+                on_progress((len(outcomes) - 1, total, outcome))
+
+        pending = list(ordered)
+        aborted = False
+        if self._session_history_unknown:
+            # The first read of an invocation goes through `service_read`,
+            # which carries `_retry_once_for_unknown_gap`: this instance cannot
+            # know when the PREVIOUS invocation's session closed, and a session
+            # opened too soon fails wholesale with `61 13` on every CV in it.
+            # Retrying a whole chunk instead would re-run reads the first
+            # attempt had already reported through `on_progress`, so the same
+            # CV would arrive twice with two different outcomes - the retry
+            # stays where it is already one CV wide, and the group follows it.
+            first = pending.pop(0)
+            try:
+                result = self.service_read(first.cv)
+            except BATCH_ENDING_ERRORS as exc:
+                report(CvReadOutcome(spec=first, result=None, error=exc))
+                aborted = True
+            except RailctlError as exc:
+                report(CvReadOutcome(spec=first, result=None, error=exc))
+            else:
+                report(CvReadOutcome(spec=first, result=result, error=None))
+        while not aborted and pending:
+            chunk, pending = pending[:SERVICE_BATCH_SIZE], pending[SERVICE_BATCH_SIZE:]
+            try:
+                aborted = self._read_chunk_in_one_session(chunk, report)
+            except RailctlError as exc:
+                # Only the session close can raise out of `_read_chunk_in_one_session`
+                # - every read inside it becomes an outcome. A session that did
+                # not close cleanly is a reason to open no further one, and the
+                # first spec still without an outcome carries the error, the
+                # same shape a batch-ending error has inside a chunk. When
+                # every spec already has one, the reads all answered and only
+                # the close failed; the per-CV path threw that CV's VALUE away
+                # to report the same thing, which is the worse of the two.
+                aborted = True
+                if len(outcomes) < total:
+                    report(CvReadOutcome(spec=ordered[len(outcomes)], result=None, error=exc))
+        # Whatever is left after an abort was never attempted - both fields
+        # None, never a copy of the error that stopped the run.
+        for skipped in ordered[len(outcomes) :]:
+            report(CvReadOutcome(spec=skipped, result=None, error=None))
+        return outcomes
+
+    def _read_chunk_in_one_session(
+        self, chunk: Sequence[CvSpec], report: Callable[[CvReadOutcome], None]
+    ) -> bool:
+        """Read one group inside one session; say whether the batch ended.
+
+        `service_read_many` reports each outcome against the bare
+        `CvSpec(cv=...)` it was handed, while the caller's spec also carries
+        the name a backup row is written under, so each outcome is re-tagged
+        with the spec it came from, in order, as it arrives.
+
+        A not-attempted outcome (`result` and `error` both `None`) in the
+        returned list means `service_read_many` met a `BATCH_ENDING_ERRORS`
+        member; the caller stops instead of opening the next session.
+        """
+        remaining = iter(chunk)
+
+        def deliver(outcome: CvReadOutcome) -> None:
+            report(CvReadOutcome(spec=next(remaining), result=outcome.result, error=outcome.error))
+
+        outcomes = self.service_read_many([spec.cv for spec in chunk], on_result=deliver)
+        return any(outcome.result is None and outcome.error is None for outcome in outcomes)
 
     def _learn_result_channel(
         self, context: Literal["pom", "service"], channel: ResultChannelSeen
