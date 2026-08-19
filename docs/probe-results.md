@@ -1255,3 +1255,41 @@ definitive test is still a known value written over POM and read back over the Z
 
 **Control, below the boundary:** JMRI gives CV134 `Asymmetrical DCC Threshold` a default
 of 106, and the sweep read 106.
+
+## CV100 does not acknowledge, reproducibly — SETTLED 2026-08-19
+
+Four runs against the MS450P22 on the programming track, immediately after the sweep
+first found it.
+
+| run | command | CV99 | CV100 | CV101 |
+| --- | --- | --- | --- | --- |
+| 1-3 | `cv read 99-101 --mode service` | ok, 0 | **61 13** | ok, 0 |
+| 4 | `cv read 100 --mode service` | - | **61 13** | - |
+
+Runs 1 to 3 read all three CVs **inside one service-mode session**, which is what makes
+them worth more than three separate reads: the neighbours answering in the same session
+rules out the session, the gap, the wheel contact and the track. The silence belongs to
+CV100 and to nothing else around it. Run 4 removes the last variable - CV100 was second
+in the group each time - by reading it alone: same `61 13`, after the session-gap retry
+had already run.
+
+So the answer is stable and CV-specific. It is not a transient, and the sweep's single
+hole was not a flake.
+
+**Why**, from JMRI's ZIMO definition rather than from this bench (see the documentary
+subsection above): CV100 is `Current asymmetry voltage`, read-only, "the asymmetry the
+decoder measures right now, in tenths of a volt". A service-mode read is a sequence of
+verifications the decoder answers with current pulses, and it can only succeed if the
+value holds still throughout; a live measurement has no reason to, and on the programming
+track there is no asymmetry to measure at all. That mechanism is consistent with
+everything measured here and is not itself proven here - what is proven is that CV100
+never answers and its neighbours always do.
+
+**What the tool does with it is already right.** `no_response` in a backup, exit 10 as a
+single read. The decoder genuinely did not acknowledge; recording anything else would
+invent a value.
+
+One wart, worth its own issue: the `61 13` hint says to check the wheel contact and warns
+about the 750 mA programming output. In run 1 to 3 two other CVs answered in that same
+session, so contact and current cannot be the cause, and the advice sends an operator to
+look at the track for a decoder that is talking to them.
