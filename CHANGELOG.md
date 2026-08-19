@@ -4,6 +4,24 @@ All notable changes to this project are documented in this file. The format foll
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) and the project uses
 [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+### Fixed
+
+- `railctl cv read --page` no longer contradicts itself. It asks the operator to approve
+  writing CV31/CV32, performs that selection, and then used to report `page.not_selected`
+  for the very read the selection was made for. The warning now fires only when nothing
+  selected the page it names - a page named for a read that no selection backs. (#39)
+- The `61 13` hint no longer sends the operator to the track when the decoder has already
+  answered. A CV that fails inside a service session where another CV answered cannot be
+  a contact or a programming-current problem, and the hint now says so instead of
+  suggesting the wheels be checked. The original advice is kept for the case it was
+  written for: the first failure of a session, where nothing has been proven yet. (#46)
+- One selected CV31/CV32 page is now recorded under one key on the programming track.
+  `PageKey` always documented that service mode is addressed by track and carries no
+  locomotive address, but nothing enforced it and the callers disagreed, so the same
+  physical selection could land under two keys and neither path saw the other's record.
+
 ## [0.1.0] - 2026-08-19
 
 First release. `railctl` drives a YaMoRC YD7010 command station over XpressNet on a USB

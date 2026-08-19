@@ -134,6 +134,42 @@ SERVICE_ENCODING_ORDER: Final[tuple[tuple[str, CvEncoding], ...]] = (
     ("service_ext_cv", CvEncoding.SERVICE_EXT),
 )
 UNEXERCISED_BANDS: Final[frozenset[int]] = frozenset({2, 3})  # 63 16 / 63 17, never answered here
+
+
+def no_ack_hint(*, answered_in_session: bool) -> str:
+    """What to tell an operator whose CV answered `61 13`.
+
+    Two situations wear the same reply. When nothing has answered, the track
+    is the first thing to check - the M8 acceptance proved a `61 13` can also
+    be the tool's own timing, which is why the retry is named as already
+    spent (`_retry_once_for_unknown_gap`). But when another CV answered inside
+    THIS open session, the decoder is demonstrably in contact and drawing
+    acknowledgement current, so sending the operator to look at the wheels
+    describes something the run has already disproved (issue #46). Measured
+    2026-08-19: `cv read 99-101` returned CV99 and CV101 and refused CV100,
+    four times over, and the advice was to check the contact.
+
+    The scope is one SESSION, not one invocation, and deliberately so. Inside
+    an open session the contact and the programming current are shared by
+    every read in it. Across sessions they are not the only thing that
+    changes: a decoder that answers and then stops answering when the session
+    is reopened is the measured behaviour issue #22 is about, so an earlier
+    session's success is not evidence about this one.
+    """
+    if answered_in_session:
+        return (
+            "another CV answered inside this same service session, so the wheel contact "
+            "and the programming current are not the cause - this CV did not acknowledge. "
+            "Some CVs hold a live measurement rather than a stored value and never "
+            "acknowledge a read"
+        )
+    return (
+        "decoder did not acknowledge, and the session-gap retry already ran - "
+        "check the wheels are making contact with the programming track; sound "
+        "decoders can also fail on a 750 mA programming output"
+    )
+
+
 # Conditions no later CV in a shared service-mode session can survive.
 #
 # The first two cannot clear themselves by trying the next CV: a shorted track
@@ -329,6 +365,11 @@ class CvProgrammer:
         # crosses invocations"). This flag tells the two apart; see
         # `_retry_once_for_unknown_gap`.
         self._session_history_unknown = True
+        # Whether any CV has answered inside the service session that is open
+        # right now. Cleared when the session closes, because that is the
+        # scope over which the wheel contact and the programming current are
+        # one shared fact - see `no_ack_hint`.
+        self._session_answered = False
 
     def _retry_once_for_unknown_gap(self, attempt: Callable[[], _T]) -> _T:
         """Run `attempt`; on a first-session `61 13` with unknown history, retry once.
@@ -541,15 +582,11 @@ class CvProgrammer:
             # verify. And it names the wheel contact FIRST, because the M8 acceptance
             # proved a 61 13 can be the tool's own timing - now retried automatically
             # before this error is ever raised (see _retry_once_for_unknown_gap).
-            no_ack_hint = (
-                "decoder did not acknowledge, and the session-gap retry already ran - "
-                "check the wheels are making contact with the programming track; sound "
-                "decoders can also fail on a 750 mA programming output"
-            )
+            hint = no_ack_hint(answered_in_session=self._session_answered)
             if isinstance(outcome, NoAck):
                 raise DecoderNoAckError(
                     f"CV{cv} service-mode write: decoder did not acknowledge",
-                    hint=no_ack_hint,
+                    hint=hint,
                     cv=cv,
                 )
             if isinstance(outcome, (ShortCircuit, TrackShortCircuit)):
@@ -562,7 +599,7 @@ class CvProgrammer:
                 if outcome.saw_no_ack:
                     raise DecoderNoAckError(
                         f"CV{cv} service-mode write: decoder did not acknowledge",
-                        hint=no_ack_hint,
+                        hint=hint,
                         cv=cv,
                     )
                 raise DecoderNotRespondingError(
@@ -645,6 +682,45 @@ class CvProgrammer:
         self._require_page(cv, page)  # raises when `page` is None; never returns in that case
         self.select_page(page, address=address, mode=mode, force=False)  # type: ignore[arg-type]
 
+    def _page_key(self, address: int | None, mode: ProgMode) -> PageKey:
+        """`PageKey`'s own rule, enforced instead of assumed.
+
+        Service mode addresses the TRACK, so one selection is the track's and
+        the address that came along for the ride names nothing. `PageKey` says
+        as much - "the track as a whole (service mode, where `address` is
+        always `None`)" - but nothing used to make it true, and the callers
+        disagreed: `cv_write` passed `None`, while `cv_read_many` passed the
+        resolved default address. The same physical selection then landed
+        under two keys, so a lookup made by one path could not see what the
+        other had recorded.
+        """
+        return PageKey(address=None if mode is ProgMode.SERVICE else address, mode=mode)
+
+    def service_page_is_live(self, page: CvPage) -> bool:
+        """Whether THIS programmer selected `page` on the programming track
+        recently enough to still count it as selected - the same cache and the
+        same TTL `select_page` consults before deciding it need not write the
+        selectors again.
+
+        A record of what WE did, never a claim about what the decoder now
+        holds. JMRI makes the second kind of claim and treats it as a
+        heuristic: `MultiIndexProgrammerFacade`'s `skipDupIndexWrite` reuses a
+        selection only for immediately sequential operations, within
+        `maxDelay = 1000` ms, and its own docstring says it "might not work
+        for some decoders". Our ten seconds would be far too loose for that
+        question. It is the right window for this one, which is only ever
+        "did we select it".
+
+        Service mode only, and the signature says so: the cache key carries no
+        address there, so a POM caller passing one would silently look up the
+        wrong entry.
+        """
+        cached = self._pages.get(self._page_key(None, ProgMode.SERVICE))
+        if cached is None:
+            return False
+        selected, at = cached
+        return selected == page and (self._station.now() - at) < self._station.timing.page_cache_ttl
+
     def select_page(
         self,
         page: CvPage,
@@ -654,7 +730,7 @@ class CvProgrammer:
         force: bool = False,
     ) -> None:
         resolved_mode = resolve_mode(mode, self._station.capabilities, operation="write")
-        key = PageKey(address=address, mode=resolved_mode)
+        key = self._page_key(address, resolved_mode)
         cached = self._pages.get(key)
         now = self._station.now()
         if (
@@ -845,6 +921,7 @@ class CvProgrammer:
                     cmd_track_power_off(), timeout=self._station.timing.li_ack_programming
                 )
         finally:
+            self._session_answered = False
             self._last_session_end = self._station.now()
             # From here on this instance KNOWS its history: the clock above is
             # authoritative and `_await_session_gap` owns the timing.
@@ -995,7 +1072,7 @@ class CvProgrammer:
         is private: a caller that forgets it leaves the station in service
         mode and the layout dead.
         """
-        if page is not None and cv in INDEXED_CV_RANGE:
+        if page is not None and cv in INDEXED_CV_RANGE and not self.service_page_is_live(page):
             # Only an INDEXED CV cares which page is live: below CV257 the
             # argument is ignored by every layer that handles it, so warning
             # that it was not selected reports a non-event. Measured at the
@@ -1004,6 +1081,14 @@ class CvProgrammer:
             # as its write - decorated a plain CV3 read-back with
             # `page.not_selected`, and an operator reading that envelope
             # cannot tell it from a page that genuinely did not take.
+            #
+            # It also stays quiet when the selection is OURS. `cv read --page`
+            # asks the operator to approve a write of CV31/CV32, and
+            # `cv_read_many` then performs exactly that selection before this
+            # read - so warning here told the operator the write they had just
+            # approved had not happened (issue #39). The warning belongs to
+            # the case it was written for: a page named for a read that
+            # nothing selected.
             self._station.emit("page.not_selected", {"cv": cv, "page": page, "mode": "service"})
         telegram, encoding, page_index = self.service_read_telegram(cv)
         self._await_session_gap()
@@ -1035,7 +1120,11 @@ class CvProgrammer:
             ready_means_done=False,
             context="service",
         )
-        return self._finish_service_read(cv, encoding, page_index, outcome, start)
+        result = self._finish_service_read(cv, encoding, page_index, outcome, start)
+        # Reached only when the read produced a value: `_finish_service_read`
+        # raises for every other outcome.
+        self._session_answered = True
+        return result
 
     def _finish_service_read(
         self,
@@ -1045,12 +1134,8 @@ class CvProgrammer:
         outcome: object,
         start: float,
     ) -> CvResult:
-        # Same wording as the write path's hint, for the same measured reasons.
-        no_ack_hint = (
-            "decoder did not acknowledge, and the session-gap retry already ran - "
-            "check the wheels are making contact with the programming track; sound "
-            "decoders can also fail on a 750 mA programming output"
-        )
+        # The write path composes the same hint, from the same function.
+        hint = no_ack_hint(answered_in_session=self._session_answered)
         if isinstance(outcome, CvValue):
             if encoding is CvEncoding.SERVICE_EXT and page_index in UNEXERCISED_BANDS:
                 self._station.emit("cv.unexercised_band", {"cv": cv, "page": page_index})
@@ -1092,7 +1177,7 @@ class CvProgrammer:
         if isinstance(outcome, NoAck):
             raise DecoderNoAckError(
                 f"CV{cv}: no acknowledgement from the decoder (61 13)",
-                hint=no_ack_hint,
+                hint=hint,
                 cv=cv,
             )
         if isinstance(outcome, ShortCircuit):
@@ -1106,7 +1191,7 @@ class CvProgrammer:
             if outcome.saw_no_ack:
                 raise DecoderNoAckError(
                     f"CV{cv}: no acknowledgement from the decoder (61 13)",
-                    hint=no_ack_hint,
+                    hint=hint,
                     cv=cv,
                 )
             raise DecoderNotRespondingError(

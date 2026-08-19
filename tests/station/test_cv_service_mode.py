@@ -681,6 +681,109 @@ def test_a_read_in_an_exercised_band_emits_no_note(bench_factory, monkeypatch):
 INDEXED_CV = 265
 
 
+def test_a_paged_read_says_nothing_when_this_programmer_selected_that_page(
+    bench_factory, monkeypatch
+):
+    """The warning is about a page nobody selected, not about every paged read.
+
+    `cv read --page` asks the operator to approve WRITING CV31/CV32, and
+    `cv_read_many` then performs exactly that selection before the read. The
+    envelope used to carry `page.not_selected` anyway, so the operator
+    approved a write and was then told it had not happened (issue #39). The
+    selection is recorded in the page cache; consulting it is what tells the
+    two situations apart.
+    """
+    bench = bench_factory(capabilities=make_capabilities(z21_cv_opcodes=True))
+    programmer = bench.station.programmer
+    # What `select_page` leaves behind, without scripting the writes: this
+    # test is about what the READ reports, not about how the page got there.
+    programmer._pages[programmer._page_key(None, ProgMode.SERVICE)] = (
+        (10, 2),
+        bench.clock.monotonic(),
+    )
+    _script_read_and_clean_exit(bench, cmd_z21_cv_read(INDEXED_CV))
+    monkeypatch.setattr(
+        programmer,
+        "await_result",
+        lambda matcher, **kw: CvValue(raw_cv=INDEXED_CV, value=1, ident=0x14, z21_form=True),
+    )
+
+    programmer.service_read(INDEXED_CV, page=(10, 2))
+
+    assert bench.events == []
+
+
+def test_a_paged_read_still_warns_when_a_different_page_is_the_live_one(bench_factory, monkeypatch):
+    """Selecting page 10:2 says nothing about a read that names 145:0.
+
+    The suppression is keyed on the page, not on the mere fact that something
+    was selected once - otherwise one selection would silence every later
+    read whatever bank it asked for.
+    """
+    bench = bench_factory(capabilities=make_capabilities(z21_cv_opcodes=True))
+    programmer = bench.station.programmer
+    programmer._pages[programmer._page_key(None, ProgMode.SERVICE)] = (
+        (10, 2),
+        bench.clock.monotonic(),
+    )
+    _script_read_and_clean_exit(bench, cmd_z21_cv_read(INDEXED_CV))
+    monkeypatch.setattr(
+        programmer,
+        "await_result",
+        lambda matcher, **kw: CvValue(raw_cv=INDEXED_CV, value=1, ident=0x14, z21_form=True),
+    )
+
+    programmer.service_read(INDEXED_CV, page=(145, 0))
+
+    assert bench.events == [
+        ("page.not_selected", {"cv": INDEXED_CV, "page": (145, 0), "mode": "service"})
+    ]
+
+
+def test_a_selection_older_than_the_cache_ttl_no_longer_counts_as_selected(
+    bench_factory, monkeypatch
+):
+    """The same window `select_page` uses to decide it need not write again.
+
+    JMRI reuses a live index selection only for immediately sequential
+    operations and for at most a second (`MultiIndexProgrammerFacade`,
+    `maxDelay`), calling even that a heuristic. Ten seconds is far too loose
+    for a claim about the DECODER - it is the right window for this claim,
+    which is only about what this programmer did.
+    """
+    bench = bench_factory(capabilities=make_capabilities(z21_cv_opcodes=True))
+    programmer = bench.station.programmer
+    stale = bench.clock.monotonic() - TIMING.page_cache_ttl - 1
+    programmer._pages[programmer._page_key(None, ProgMode.SERVICE)] = ((10, 2), stale)
+    _script_read_and_clean_exit(bench, cmd_z21_cv_read(INDEXED_CV))
+    monkeypatch.setattr(
+        programmer,
+        "await_result",
+        lambda matcher, **kw: CvValue(raw_cv=INDEXED_CV, value=1, ident=0x14, z21_form=True),
+    )
+
+    programmer.service_read(INDEXED_CV, page=(10, 2))
+
+    assert bench.events == [
+        ("page.not_selected", {"cv": INDEXED_CV, "page": (10, 2), "mode": "service"})
+    ]
+
+
+def test_a_service_page_key_ignores_the_address_it_was_handed(bench_factory):
+    """Service mode addresses the TRACK, so one selection is the track's.
+
+    `PageKey` said so in its docstring and nothing enforced it: `cv_write`
+    passed `None` while `cv_read_many` passed the resolved default address, so
+    the same physical selection landed under two keys and neither path could
+    see the other's record.
+    """
+    programmer = bench_factory().station.programmer
+
+    assert programmer._page_key(3, ProgMode.SERVICE) == programmer._page_key(None, ProgMode.SERVICE)
+    # POM is addressed per locomotive, so there the address is the key.
+    assert programmer._page_key(3, ProgMode.POM) != programmer._page_key(None, ProgMode.POM)
+
+
 def test_service_read_emits_page_not_selected_when_a_page_is_given(bench_factory, monkeypatch):
     """`service_read` cannot select a page yet: `select_page` over SERVICE
     routes through `_write_and_confirm`'s SERVICE branch, whose
@@ -854,6 +957,79 @@ def test_station_cv_read_delegates_to_the_programmer(bench, monkeypatch):
         "mode": ProgMode.SERVICE,
         "page": (1, 2),
     }
+
+
+def test_a_failure_after_a_success_in_the_same_session_does_not_blame_the_track(
+    bench_factory, monkeypatch
+):
+    """CV7 answers, CV8 does not, both inside one session.
+
+    The wheel contact and the programming current are shared by every read in
+    an open session, so a CV that answered a moment ago in that same session
+    has already disproved them. Measured 2026-08-19: `cv read 99-101` returned
+    CV99 and CV101 and refused CV100, four times over, and the hint told the
+    operator to go and check the wheels (issue #46).
+    """
+    bench = bench_factory(capabilities=make_capabilities(z21_cv_opcodes=True))
+    bench.expect(STATUS_REQUEST, reply=STATUS_POWER_ON)
+    for cv in (7, 8):
+        bench.expect(cmd_z21_cv_read(cv), reply=ACK)
+    bench.expect(cmd_track_power_on(), reply=ACK)
+    bench.expect(STATUS_REQUEST, reply=STATUS_POWER_ON)
+    answers = {7: CvValue(raw_cv=7, value=5, ident=0x14, z21_form=True), 8: NoAck()}
+    monkeypatch.setattr(
+        bench.station.programmer, "await_result", lambda matcher, **kw: answers[matcher.cv]
+    )
+
+    outcomes = bench.station.programmer.service_read_many([7, 8])
+
+    hint = outcomes[1].error.hint
+    assert "another CV answered inside this same service session" in hint
+    # The advice itself is what must be gone, not the word.
+    assert "check the wheels are making contact" not in hint
+
+
+def test_the_first_failure_of_a_session_still_sends_the_operator_to_the_track(
+    bench_factory, monkeypatch
+):
+    """Nothing has answered, so the track IS the thing to check.
+
+    The contact advice is not being removed, it is being kept for the case it
+    was written for. `service_read` on its own is exactly that case.
+    """
+    # A programmer that knows its history, so the `61 13` is the answer rather
+    # than a candidate for the first-session retry.
+    bench = _service_bench(bench_factory)
+    _script_read_and_clean_exit(bench, cmd_z21_cv_read(8))
+    monkeypatch.setattr(bench.station.programmer, "await_result", lambda matcher, **kw: NoAck())
+
+    with pytest.raises(DecoderNoAckError) as caught:
+        bench.station.programmer.service_read(8)
+
+    assert "check the wheels are making contact" in (caught.value.hint or "")
+
+
+def test_a_session_that_answered_does_not_vouch_for_the_next_one(bench_factory, monkeypatch):
+    """The evidence is scoped to one open session, not to the invocation.
+
+    Across sessions the contact is not the only thing that could have changed:
+    a decoder that answers and then stops answering when the session is
+    reopened is the measured behaviour of issue #22. So the second session
+    starts with nothing proven and gets the track advice back.
+    """
+    bench = bench_factory(capabilities=make_capabilities(z21_cv_opcodes=True))
+    _script_read_and_clean_exit(bench, cmd_z21_cv_read(7))
+    _script_read_and_clean_exit(bench, cmd_z21_cv_read(8))
+    answers = {7: CvValue(raw_cv=7, value=5, ident=0x14, z21_form=True), 8: NoAck()}
+    monkeypatch.setattr(
+        bench.station.programmer, "await_result", lambda matcher, **kw: answers[matcher.cv]
+    )
+
+    bench.station.programmer.service_read(7)
+    with pytest.raises(DecoderNoAckError) as caught:
+        bench.station.programmer.service_read(8)
+
+    assert "check the wheels are making contact" in (caught.value.hint or "")
 
 
 def test_service_read_many_opens_one_session_for_every_cv(bench_factory, monkeypatch):
