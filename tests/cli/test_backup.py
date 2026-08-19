@@ -793,13 +793,12 @@ def test_the_incomplete_report_stops_naming_holes_but_never_stops_counting_them(
     does the file - which is why the cap is on the prose alone.
     """
     out = tmp_path / "many.json"
-    silent = CURATED[:INCOMPLETE_LIST_MAX + 1]
+    silent = CURATED[: INCOMPLETE_LIST_MAX + 1]
     _install(
         monkeypatch,
         FakeBackupStation(
             read_errors={
-                cv: DecoderNotRespondingError("no answer after 3 attempts", cv=cv)
-                for cv in silent
+                cv: DecoderNotRespondingError("no answer after 3 attempts", cv=cv) for cv in silent
             }
         ),
     )
