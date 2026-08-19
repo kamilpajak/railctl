@@ -107,7 +107,30 @@ def sweep_bound(mode: ProgMode, capabilities: Capabilities) -> int:
         f"a sweep needs a proven service-mode encoding and this command station has none "
         f"({state}); the bound would be a guess, and a guessed bound decides how many "
         f"CVs get read",
-        hint="run `railctl doctor` to probe the service-mode encodings",
+        hint=_no_bound_hint(unprobed, capabilities),
+    )
+
+
+def _no_bound_hint(unprobed: list[str], capabilities: Capabilities) -> str:
+    """The remedy that can actually change the answer, which depends on WHY
+    nothing is proven - the same split `_service_encoding_for` makes in
+    `station/programming.py`.
+
+    A probe is the remedy only while something is still unprobed. When all
+    three encodings are a measured `False` the probe has already returned its
+    verdict - each `False` comes from a `61 82` rejection doctor recorded -
+    and sending the operator back to `railctl doctor` names a cause that does
+    not exist. What is left is the main track, which sweeps to
+    `MAX_CV_DIRECT` and needs no service-mode encoding at all; that is only
+    worth suggesting while `pom_read` is not itself a measured no.
+    """
+    if unprobed:
+        return "run `railctl doctor` to probe the service-mode encodings"
+    if capabilities.pom_read is not False:
+        return f"sweep the main track instead with `--mode pom`, which reaches CV1..{MAX_CV_DIRECT}"
+    return (
+        "this command station rejected every service-mode opcode (61 82) and POM reading "
+        "is a measured no, so there is no channel left for a sweep to use"
     )
 
 

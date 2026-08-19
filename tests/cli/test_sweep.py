@@ -83,6 +83,42 @@ def test_a_measured_no_falls_through_to_the_next_proven_encoding():
     assert bound == MAX_CV_DIRECT
 
 
+def test_three_measured_noes_send_the_operator_to_pom_and_not_to_the_probe():
+    # Each `False` here is a `61 82` the doctor already recorded, so the probe
+    # has answered and re-running it cannot change the bound. Naming it as the
+    # remedy names a cause that does not exist; the remedy that does exist is
+    # the main track, which sweeps to 255 without any service-mode encoding.
+    rejected = caps(z21_cv_opcodes=False, service_ext_cv=False, service_direct_cv=False)
+    with pytest.raises(ServiceEncodingUnknownError) as caught:
+        sweep_bound(ProgMode.SERVICE, rejected)
+    hint = caught.value.hint or ""
+    assert "railctl doctor" not in hint
+    assert "--mode pom" in hint
+    # The message body still reports the measured state it always did.
+    assert "rejected:" in str(caught.value)
+
+
+def test_one_unprobed_encoding_still_earns_the_probe_hint():
+    # The split is "is anything still unprobed", not "were any rejected": one
+    # `61 82` beside two never-tried encodings leaves a probe worth running.
+    with pytest.raises(ServiceEncodingUnknownError) as caught:
+        sweep_bound(ProgMode.SERVICE, caps(z21_cv_opcodes=False))
+    assert "railctl doctor" in (caught.value.hint or "")
+
+
+def test_pom_is_not_offered_when_pom_reading_is_itself_a_measured_no():
+    # Sending the operator to `--mode pom` on a station that answered nothing
+    # to a POM read is the same defect one step further on.
+    nothing_left = caps(
+        z21_cv_opcodes=False, service_ext_cv=False, service_direct_cv=False, pom_read=False
+    )
+    with pytest.raises(ServiceEncodingUnknownError) as caught:
+        sweep_bound(ProgMode.SERVICE, nothing_left)
+    hint = caught.value.hint or ""
+    assert "--mode pom" not in hint
+    assert "railctl doctor" not in hint
+
+
 def test_pom_stops_at_255_even_when_the_wide_service_opcodes_are_proven():
     # POM's bound is not about opcodes at all: CV256 and up sit behind the
     # CV31/CV32 index page, and a backup never writes those selectors.
