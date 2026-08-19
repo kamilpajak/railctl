@@ -158,11 +158,13 @@ def checked_enum(
     """A positional enum, validated HERE and refused through OUR envelope.
 
     `typer_argument` attaches no Click-level check, for the same reason
-    `typer_option` attaches no `callback=`: a `typer.BadParameter` exits through
-    Click's own usage box and never emits `railctl/error/v1`. That leaves the
-    check to the command body, and `power sideways` was silently running `power
-    off` until someone noticed - the enum was published metadata that nothing
-    enforced.
+    `typer_option` attaches no `callback=`: since issue #30 a `typer.BadParameter`
+    does reach `railctl/error/v1`, but through `parse_failure_report`, whose
+    `details` name the Click class and nothing else - not the argument, not the
+    allowed values, not what was typed, and with no runnable retry. That leaves
+    the check to the command body, and `power sideways` was silently running
+    `power off` until someone noticed - the enum was published metadata that
+    nothing enforced.
 
     `allowed` is passed in from the `Argument` row's own `enum` tuple, never
     retyped, so the list a caller reads out of `railctl schema` is the list this

@@ -391,8 +391,9 @@ _FUNCTION = CommandMeta(
 _POWER_STATES: Final[tuple[str, ...]] = ("on", "off", "resume")
 #: `enum` here is published metadata that `power_cmd` enforces in its own body.
 #: `typer_argument` attaches no Click-level check, for the same reason
-#: `typer_option` attaches no `callback=`: a `typer.BadParameter` exits through
-#: Click's own usage box and never emits the `railctl/error/v1` envelope.
+#: `typer_option` attaches no `callback=`: a `typer.BadParameter` is answered by
+#: the PARSE-failure envelope, whose `details` name the Click class and nothing
+#: else - not the argument, not the allowed values, not what was typed.
 POWER_STATE_ARG = Argument(
     name="state", help=_one_of(_POWER_STATES), type="enum", enum=_POWER_STATES
 )
@@ -953,13 +954,17 @@ def typer_option(option: Option) -> Any:
     """The one place a `typer.Option` is built, from one metadata row.
 
     No `callback=`. An `enum` row is published metadata that `deps.check_choice`
-    enforces on the resolved value, NOT a Click-level check: a callback raising
-    `typer.BadParameter` is handled by Click itself, which prints its own usage
-    text and exits - so `railctl --color allways version` would stop publishing
-    the `railctl/error/v1` envelope with `"code": "usage"` that Task 8 pinned,
-    and would start taking the route issue #30 already tracks as a gap. Both
-    positions of the flag are validated instead, in `build_settings` and
-    `merge_settings`, which is what makes them fail identically.
+    enforces on the resolved value, NOT a Click-level check. The fix for issue
+    #30 changed what a Click-level refusal looks like but not this rule: a
+    callback raising `typer.BadParameter` now does reach `railctl/error/v1` with
+    `"code": "usage"`, because `main()` catches the vendored `UsageError` - it
+    just reaches it through `parse_failure_report`, which is a different answer
+    from the one `deps.check_choice` gives. That builder writes
+    `details = {"parse_error": ..., "command": ...}` and one `--help` argv array,
+    where a `UsageProblem` carries the argument, the allowed values, the value
+    that was typed and a suggestion that RUNS. Both positions of the flag are
+    validated instead, in `build_settings` and `merge_settings`, which is what
+    makes them fail identically.
 
     No `envvar=` either, for the same reason one layer down. `Option.env` is
     published metadata - the manifest names RAILCTL_TARGET, RAILCTL_ADDRESS,
@@ -967,11 +972,15 @@ def typer_option(option: Option) -> Any:
     is the single place that READS those variables, at the environment level of
     `pick()`, below the CLI flag. Handing the same name to Click makes Click
     read and type-cast it first, before any railctl code runs, which costs two
-    measured behaviours: `RAILCTL_ADDRESS=abc railctl schema` exits through
-    Click's own rich usage box with no `railctl/error/v1` envelope on stderr at
-    all, and `RAILCTL_FORMAT=human railctl --json status` is refused as a
-    `--json`/`--format` conflict even though no `--format` was typed, because
-    the environment value arrived in the slot a typed flag occupies.
+    behaviours. `RAILCTL_ADDRESS=abc railctl schema` is then refused by the
+    parser instead of by `build_settings`, so the environment level stops being
+    railctl's to describe - measured before issue #30 it left Click's own rich
+    usage box on stderr and no envelope at all; since that fix it would be the
+    parse-failure envelope, which is the same loss of `details` the paragraph
+    above describes. And `RAILCTL_FORMAT=human railctl --json status` is refused
+    as a `--json`/`--format` conflict even though no `--format` was typed,
+    because the environment value arrived in the slot a typed flag occupies -
+    that one issue #30 did not touch.
     """
     spelled = (
         f"{option.name}/--no-{option.name.removeprefix('--')}" if option.negatable else option.name
