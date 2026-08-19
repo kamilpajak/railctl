@@ -220,6 +220,40 @@ def test_a_sub_group_answers_with_its_own_level_by_being_a_parse_context_typer(m
     assert payload["suggestions"] == [["railctl", "sub", "--help"]]
 
 
+def test_a_parents_positional_does_not_leak_into_the_suggested_argv(monkeypatch, capsys):
+    """The level is read off the context chain, not off Click's usage line.
+
+    `ctx.command_path` looks like a command path and is not one: it interpolates the
+    usage pieces of every parent's parameters. A group declaring a positional therefore
+    renders as `railctl sub {layout} read`, and splitting that publishes
+    `["railctl", "sub", "{layout}", "read", "--help"]` - argv nothing can run, under a
+    `details` key called `command` that names no command.
+
+    No group in railctl declares a positional today, so this asserts on a throwaway app
+    shaped like one that does. That is the point: `command_path` would keep returning a
+    plausible string on the day someone adds one, and without this test the suggestion
+    would quietly stop being runnable.
+    """
+    parent = ParseContextTyper()
+    child = ParseContextTyper()
+
+    @child.callback()
+    def child_options(layout: str = typer.Argument(...)) -> None:
+        return None
+
+    @child.command("read")
+    def read(mode: str = typer.Option("auto")) -> None:
+        return None
+
+    parent.add_typer(child, name="sub")
+    monkeypatch.setattr(cli_main, "app", parent)
+
+    assert _exit_code(monkeypatch, ["sub", "yard", "read", "--mode"]) == USAGE_EXIT_CODE
+    payload = _envelope(capsys)
+    assert payload["details"]["command"] == "railctl sub read"
+    assert payload["suggestions"] == [["railctl", "sub", "read", "--help"]]
+
+
 # -- details -----------------------------------------------------------------
 
 

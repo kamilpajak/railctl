@@ -294,6 +294,13 @@ def main() -> None:
         # app ran to completion, and `outcome` is what `typer.core._main` handed back: the
         # int a `typer.Exit` carried, or the command's own return value (`None`) for a run
         # that never raised one.
+        #
+        # `isinstance(True, int)` is True, so a command RETURNING `True` would exit 1 while
+        # reporting success. No command can: every one of them ends in `_errors.run()`,
+        # whose only non-raising path renders the result and then raises
+        # `typer.Exit(result.exit_code)`. A future command that returns a value instead of
+        # going through `run()` breaks that, which is why the assumption is written down
+        # here rather than left to be re-derived.
         raise SystemExit(outcome if isinstance(outcome, int) else 0)
 
 
