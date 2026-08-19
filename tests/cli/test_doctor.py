@@ -306,6 +306,39 @@ def test_a_hold_this_run_found_and_could_not_put_back_is_the_loudest_ending():
     assert any("stored speed" in line for line in result.lines)
 
 
+def test_a_hold_this_run_applied_itself_is_never_called_one_it_found():
+    """The third run, and the one `_hold_lead` used to have no words for. D13's own
+    precondition refuses unless the layout is live and NOTHING is holding it, so a
+    hold present at the end of such a run is one the run applied. "This run released
+    the hold it found on the layout" sends the operator looking for somebody else's
+    hold that was never there.
+    """
+    report = _powered_on_report(
+        energised=False, track_power=True, held=False, must_leave_held=True, hold_applied=True
+    )
+    result = build_doctor(report, saved_to=None)
+    assert [w.name for w in result.warnings] == ["hold_not_confirmed"]
+    assert "applied a hold of its own to a layout it found free" in result.warnings[0].message
+    assert "released the hold it found" not in result.warnings[0].message
+    assert result.exit_code == PARTIAL_EXIT_CODE
+
+
+def test_a_run_that_stopped_the_whole_layout_and_released_it_again_says_so():
+    """`doctor --measure-status-bits` on a live, free layout, everything confirmed.
+    Nothing is left held and nothing is owed, so there is no hazard and no warning -
+    but the run sent `80 80` to every locomotive on the layout and then the one
+    telegram measured to start a locomotive with a speed stored, and the two lines
+    this branch used to print said the run changed nothing.
+    """
+    report = _powered_on_report(energised=False, track_power=True, held=False, hold_applied=True)
+    result = build_doctor(report, saved_to=None)
+    assert "  this run did not change the track power" in result.lines
+    assert "  the track was already live before this run started" in result.lines
+    assert any("emergency stop of its own and released it again" in line for line in result.lines)
+    assert result.warnings == []
+    assert result.exit_code == 0
+
+
 def test_a_live_layout_this_run_neither_energised_nor_held_gets_no_hazard_line():
     """The ordinary diagnostic on somebody else's running layout. It reports what it
     READ - the old text never mentioned the track power at all - and it does not warn:

@@ -15,6 +15,11 @@ All notable changes to this project are documented in this file. The format foll
   one the attached station actually uses and records it as a capability. The flag is opt-in
   because the measurement holds the whole layout for one telegram and then releases it. No
   reading changes on a station that has not been measured. (#13)
+- The `doctor` envelope's `layout` block gains `hold_applied`: whether the run sent an
+  emergency stop of its own, so a hold present at the end can be told apart from one the run
+  found already there. The human report now says when a run stopped the whole layout and
+  released it again, and the "hold not confirmed" warning no longer tells the operator that
+  such a run released a hold it found - the hold was its own. (#13)
 
 ### Fixed
 
