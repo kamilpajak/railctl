@@ -2091,3 +2091,26 @@ def test_d13_publishes_a_held_layout_when_the_release_after_an_interrupt_does_no
     assert progress.layout.held is True
     assert progress.layout.must_leave_held is True
     assert progress.layout.hold_applied is True
+
+
+def test_d13_reports_the_held_layout_when_even_the_release_is_interrupted(doctor_bench):
+    """A second `KeyboardInterrupt`, on the release itself. Nothing this check can
+    do will get the layout back, and the one thing left is to say so: the held
+    window is recorded on `_ProbeProgress` as it OPENS, before the stop telegram,
+    so an ending that never reaches any `return` still publishes a layout that may
+    be standing rather than D3's `held=False`.
+    """
+    responder = doctor_bench.transport.on_write
+
+    def interrupt_everything_after_the_stop(framed: bytes, transport: FakeTransport) -> None:
+        if cmd_emergency_stop_all() in doctor_bench.sent:
+            raise KeyboardInterrupt
+        responder(framed, transport)
+
+    doctor_bench.transport.on_write = interrupt_everything_after_the_stop
+    progress = _ProbeProgress()
+    with pytest.raises(KeyboardInterrupt):
+        _check_d13(doctor_bench.station, progress, LAYOUT_UNTOUCHED)
+    assert progress.layout.held is None
+    assert progress.layout.must_leave_held is True
+    assert progress.layout.hold_applied is True
