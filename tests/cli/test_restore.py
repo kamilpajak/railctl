@@ -238,6 +238,7 @@ class FakeRestoreStation:
         #: Every singleton read as (cv, page), so a test can pin the page a
         #: verification read-back was made on and not only that it happened.
         self.read_pages: list[tuple[int, CvPage | None]] = []
+        self.read_page_selected: list[tuple[int, bool]] = []
         self.batches: list[list[int]] = []
         self.writes: list[Write] = []
 
@@ -264,8 +265,9 @@ class FakeRestoreStation:
         if cv in INDEXED_CV_RANGE and page is None:
             raise IndexPageRequiredError(f"CV{cv} is behind a ZIMO index page (CV31/CV32)", cv=cv)
 
-    def cv_read(self, cv, *, address=None, mode=ProgMode.SERVICE, page=None):
+    def cv_read(self, cv, *, address=None, mode=ProgMode.SERVICE, page=None, page_selected=False):
         self.reads.append(cv)
+        self.read_page_selected.append((cv, page_selected))
         # Service READS ignore the page on this station and answer on the live
         # bank, which is why the real `service_read` never calls
         # `_require_page` - so this records the argument and refuses nothing.
@@ -527,6 +529,26 @@ def test_the_verification_read_back_is_pinned_to_the_same_page_as_the_write(monk
     result = invoke(path, "--yes")
     assert result.exit_code == 0, result.stderr
     assert (265, INDEX_PAGE) in fake.read_pages
+
+
+def test_the_verification_read_back_owns_the_page_it_names(monkeypatch, tmp_path):
+    """A read-back must not report the page as unselected: the write it is
+    checking selected it, one call earlier.
+
+    Same shape as issue #39 one command over. `_verify` reads every written CV
+    back with the file's page, and for the fourteen curated CVs above 256 the
+    station would have decorated each read-back with `page.not_selected` - an
+    operator being told the selection did not happen, in the run that made it.
+    """
+    path = indexed_file(tmp_path, 265)
+    fake = install(monkeypatch, on_index_page())
+
+    result = invoke(path, "--yes")
+
+    assert result.exit_code == 0, result.stderr
+    assert (265, True) in fake.read_page_selected
+    # The identity reads name no page and claim no selection.
+    assert (8, False) in fake.read_page_selected
 
 
 def test_every_curated_cv_above_256_is_written_in_one_run(monkeypatch, tmp_path):

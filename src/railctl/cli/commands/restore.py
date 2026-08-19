@@ -412,7 +412,9 @@ def serial_token(serial: Iterable[int]) -> str:
     return ".".join(str(byte) for byte in serial)
 
 
-def _read_identity(station: Station, cv: int, *, page: CvPage | None = None) -> int:
+def _read_identity(
+    station: Station, cv: int, *, page: CvPage | None = None, page_selected: bool = False
+) -> int:
     """One live CV, or the station's own error with placement guidance.
 
     An identity CV that cannot be READ aborts the run rather than being
@@ -424,10 +426,19 @@ def _read_identity(station: Station, cv: int, *, page: CvPage | None = None) -> 
     the verification read-backs. A service read ignores it today (see the
     module docstring on the read/write asymmetry), but a read-back that is
     not pinned to the bank its write went to would only be accidentally
-    right, and issue #39 may make reads honour it.
+    right, and a later change may make reads honour it.
+
+    `page_selected` says who put the decoder on that page. A verification
+    read-back follows a write that went through `ensure_page`, so for an
+    indexed CV the selection is that write's - and saying so is what keeps
+    `page.not_selected` off an envelope where the page WAS selected (issue
+    #39, which had the same shape in `cv read --page`). It stays `False` for
+    the identity reads, which name no page and would not warn anyway.
     """
     try:
-        return station.cv_read(cv, address=None, mode=ProgMode.SERVICE, page=page).value
+        return station.cv_read(
+            cv, address=None, mode=ProgMode.SERVICE, page=page, page_selected=page_selected
+        ).value
     except RailctlError as exc:
         raise _with_guidance(exc, mode=ProgMode.SERVICE) from None
 
@@ -775,10 +786,10 @@ class _RestoreRun:
         """
         mismatches: list[Mismatch] = []
         for row in rows:
-            read = _read_identity(station, row.num, page=self.page)
+            read = _read_identity(station, row.num, page=self.page, page_selected=True)
             if read != row.new_value:
                 self._write(station, row)
-                read = _read_identity(station, row.num, page=self.page)
+                read = _read_identity(station, row.num, page=self.page, page_selected=True)
             if read == row.new_value:
                 self.verified.append(row)
             else:
