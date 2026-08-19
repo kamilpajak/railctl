@@ -18,6 +18,7 @@ from typing import Final, NoReturn, TextIO
 
 import typer
 
+from railctl.cli._click_errors import ClickUsageError
 from railctl.cli.config import VERBOSE_ENV
 from railctl.cli.render import render, render_error
 from railctl.cli.result import (
@@ -218,6 +219,74 @@ def usage_report(exc: BaseException) -> ErrorReport:
         details=dict(details) if isinstance(details, dict) else {},
         suggestions=_argv_arrays(getattr(exc, "suggestions", None)),
         hint=getattr(exc, "hint", None),
+    )
+
+
+def _refused_level(exc: ClickUsageError) -> list[str]:
+    """The argv naming the level that refused the invocation: `["railctl", "cv", "read"]`.
+
+    Walks the context chain reading `info_name`, rather than splitting
+    `ctx.command_path`. `command_path` is Click's USAGE line, not a command path: it
+    splices in the usage pieces of every parent's parameters, so a GROUP declaring a
+    positional argument turns the runnable `railctl sub read --help` into `railctl sub
+    {layout} read --help` - a suggestion nothing can run, published under a `details`
+    key called `command` that names no command.
+
+    Measured on a throwaway app built exactly that way; no group in railctl declares a
+    positional today, so nothing answers wrongly right now. This reads the chain instead
+    because the day one does, `command_path` would go on returning a plausible string and
+    no test would go red - the project's CLI rules turn on `suggestions` being argv a
+    caller can execute, and that is not a promise to keep by remembering.
+
+    An empty list means the failure happened before any context existed, which the caller
+    answers with the root's own help.
+    """
+    ctx = getattr(exc, "ctx", None)
+    level: list[str] = []
+    while ctx is not None:
+        if ctx.info_name is not None:
+            level.append(ctx.info_name)
+        ctx = ctx.parent
+    level.reverse()
+    return level
+
+
+def parse_failure_report(exc: ClickUsageError) -> ErrorReport:
+    """The exit-2 report for an invocation Click's parser refused, before any command ran.
+
+    Separate from `usage_report` rather than folded into it, because none of the three
+    fields that matter is read the same way off a Click exception as off a `ValueError`:
+
+    - the message is `format_message()`, not `str(exc)`. For a `BadParameter` the raw
+      string is `'abc' is not a valid int.` and only `format_message()` says WHICH option
+      was being parsed - a sentence that names no option is a sentence a caller cannot act
+      on. It is also Click's own wording, so nothing here re-phrases a parse failure.
+    - `suggestions` is the help for the level that actually failed, read off the context
+      chain by `_refused_level`. This is Click's own `Try 'railctl cv read --help'` line as
+      the runnable argv array the project's CLI rules require; the root's help does not
+      list a subcommand's options, so answering with `railctl --help` for a failure inside
+      `cv read` sends the operator to the wrong page.
+    - `details` records the Click class, which is the one machine-readable fact
+      distinguishing an unknown option from a missing argument now that both publish the
+      same `usage` code. The code and the exit code stay exactly `usage_report`'s, because
+      a malformed invocation is a malformed invocation however it was detected.
+
+    `exc.ctx` is `None` for a failure raised before any context exists; the root's own help
+    is the only honest answer there.
+    """
+    level = _refused_level(exc)
+    details: dict[str, object] = {"parse_error": type(exc).__name__}
+    if level:
+        details["command"] = " ".join(level)
+    argv = level or ["railctl"]
+    return ErrorReport(
+        code=USAGE_CODE,
+        message=exc.format_message(),
+        retryable=False,
+        exit_code=USAGE_EXIT_CODE,
+        details=details,
+        suggestions=[[*argv, "--help"]],
+        hint=None,
     )
 
 
