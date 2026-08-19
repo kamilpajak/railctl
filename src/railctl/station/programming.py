@@ -696,31 +696,6 @@ class CvProgrammer:
         """
         return PageKey(address=None if mode is ProgMode.SERVICE else address, mode=mode)
 
-    def service_page_is_live(self, page: CvPage) -> bool:
-        """Whether THIS programmer selected `page` on the programming track
-        recently enough to still count it as selected - the same cache and the
-        same TTL `select_page` consults before deciding it need not write the
-        selectors again.
-
-        A record of what WE did, never a claim about what the decoder now
-        holds. JMRI makes the second kind of claim and treats it as a
-        heuristic: `MultiIndexProgrammerFacade`'s `skipDupIndexWrite` reuses a
-        selection only for immediately sequential operations, within
-        `maxDelay = 1000` ms, and its own docstring says it "might not work
-        for some decoders". Our ten seconds would be far too loose for that
-        question. It is the right window for this one, which is only ever
-        "did we select it".
-
-        Service mode only, and the signature says so: the cache key carries no
-        address there, so a POM caller passing one would silently look up the
-        wrong entry.
-        """
-        cached = self._pages.get(self._page_key(None, ProgMode.SERVICE))
-        if cached is None:
-            return False
-        selected, at = cached
-        return selected == page and (self._station.now() - at) < self._station.timing.page_cache_ttl
-
     def select_page(
         self,
         page: CvPage,
@@ -928,7 +903,9 @@ class CvProgrammer:
             self._session_history_unknown = False
             self._station.invalidate_caches()
 
-    def service_read(self, cv: int, *, page: CvPage | None = None) -> CvResult:
+    def service_read(
+        self, cv: int, *, page: CvPage | None = None, page_selected: bool = False
+    ) -> CvResult:
         """Read one CV over the programming track in service mode.
 
         Service mode is addressed by TRACK, not by locomotive: there is no
@@ -967,7 +944,7 @@ class CvProgrammer:
         def attempt() -> CvResult:
             before = self._station.status()
             try:
-                return self._read_in_open_session(cv, page=page)
+                return self._read_in_open_session(cv, page=page, page_selected=page_selected)
             finally:
                 self.exit_service_mode(
                     restore_power=before.track_power, restore_hold=before.emergency_stop
@@ -1065,14 +1042,16 @@ class CvProgrammer:
             )
         return outcomes
 
-    def _read_in_open_session(self, cv: int, *, page: CvPage | None = None) -> CvResult:
+    def _read_in_open_session(
+        self, cv: int, *, page: CvPage | None = None, page_selected: bool = False
+    ) -> CvResult:
         """One service-mode read, WITHOUT opening or closing the session.
 
         Every caller is responsible for `exit_service_mode`, which is why this
         is private: a caller that forgets it leaves the station in service
         mode and the layout dead.
         """
-        if page is not None and cv in INDEXED_CV_RANGE and not self.service_page_is_live(page):
+        if page is not None and cv in INDEXED_CV_RANGE and not page_selected:
             # Only an INDEXED CV cares which page is live: below CV257 the
             # argument is ignored by every layer that handles it, so warning
             # that it was not selected reports a non-event. Measured at the
@@ -1082,13 +1061,20 @@ class CvProgrammer:
             # `page.not_selected`, and an operator reading that envelope
             # cannot tell it from a page that genuinely did not take.
             #
-            # It also stays quiet when the selection is OURS. `cv read --page`
-            # asks the operator to approve a write of CV31/CV32, and
-            # `cv_read_many` then performs exactly that selection before this
-            # read - so warning here told the operator the write they had just
-            # approved had not happened (issue #39). The warning belongs to
-            # the case it was written for: a page named for a read that
-            # nothing selected.
+            # It also stays quiet when the caller says it OWNS the selection.
+            # `cv read --page` asks the operator to approve a write of
+            # CV31/CV32, `cv_read_many` performs exactly that selection, and
+            # this warning then told the operator the write they had just
+            # approved had not happened (issue #39).
+            #
+            # `page_selected` is a fact the CALLER states, not one this method
+            # can look up. The page cache is the obvious candidate and it does
+            # not work: every service read ends its session, and
+            # `exit_service_mode` clears that cache, so a cache check
+            # suppressed the warning for the first CV of a group and let it
+            # fire for every one after it. What is left is the case the
+            # warning was written for - a page named for a read that nothing
+            # selected.
             self._station.emit("page.not_selected", {"cv": cv, "page": page, "mode": "service"})
         telegram, encoding, page_index = self.service_read_telegram(cv)
         self._await_session_gap()
@@ -1209,6 +1195,7 @@ class CvProgrammer:
         address: int | None = None,
         mode: ProgMode = ProgMode.AUTO,
         page: CvPage | None = None,
+        page_selected: bool = False,
     ) -> CvResult:
         """Read one CV, choosing POM or service mode through `resolve_mode`.
 
@@ -1229,7 +1216,7 @@ class CvProgrammer:
             if resolved_mode is ProgMode.POM:
                 self._require_page(cv, page)
                 return self.pom_read(cv, address=address, page=page)
-            return self.service_read(cv, page=page)
+            return self.service_read(cv, page=page, page_selected=page_selected)
         except RailctlError:
             self.invalidate_pages()
             raise
@@ -1347,7 +1334,20 @@ class CvProgrammer:
                         if spec.page is not None:
                             self.select_page(spec.page, address=address, mode=mode, force=True)
                         current_page = spec.page
-                    result = self.cv_read(spec.cv, address=address, mode=mode, page=spec.page)
+                    result = self.cv_read(
+                        spec.cv,
+                        address=address,
+                        mode=mode,
+                        page=spec.page,
+                        # This loop selected it, one branch above, and keeps it
+                        # selected for the whole group. The page cache cannot
+                        # answer this: every read ends its session, and
+                        # `exit_service_mode` clears the cache, so only the
+                        # FIRST read of a group would ever find a record there
+                        # (checked, 2026-08-19). The caller that did the
+                        # selecting is the one that knows.
+                        page_selected=spec.page is not None,
+                    )
                     outcome = CvReadOutcome(spec=spec, result=result, error=None)
                 except RailctlError as exc:
                     outcome = CvReadOutcome(spec=spec, result=None, error=exc)

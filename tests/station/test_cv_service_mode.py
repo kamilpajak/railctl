@@ -681,92 +681,80 @@ def test_a_read_in_an_exercised_band_emits_no_note(bench_factory, monkeypatch):
 INDEXED_CV = 265
 
 
-def test_a_paged_read_says_nothing_when_this_programmer_selected_that_page(
-    bench_factory, monkeypatch
-):
+def test_a_paged_read_says_nothing_when_the_caller_owns_the_selection(bench_factory, monkeypatch):
     """The warning is about a page nobody selected, not about every paged read.
 
     `cv read --page` asks the operator to approve WRITING CV31/CV32, and
     `cv_read_many` then performs exactly that selection before the read. The
     envelope used to carry `page.not_selected` anyway, so the operator
-    approved a write and was then told it had not happened (issue #39). The
-    selection is recorded in the page cache; consulting it is what tells the
-    two situations apart.
+    approved a write and was then told it had not happened (issue #39).
     """
-    bench = bench_factory(capabilities=make_capabilities(z21_cv_opcodes=True))
-    programmer = bench.station.programmer
-    # What `select_page` leaves behind, without scripting the writes: this
-    # test is about what the READ reports, not about how the page got there.
-    programmer._pages[programmer._page_key(None, ProgMode.SERVICE)] = (
-        (10, 2),
-        bench.clock.monotonic(),
-    )
+    bench = _service_bench(bench_factory)
     _script_read_and_clean_exit(bench, cmd_z21_cv_read(INDEXED_CV))
     monkeypatch.setattr(
-        programmer,
+        bench.station.programmer,
         "await_result",
         lambda matcher, **kw: CvValue(raw_cv=INDEXED_CV, value=1, ident=0x14, z21_form=True),
     )
 
-    programmer.service_read(INDEXED_CV, page=(10, 2))
+    bench.station.programmer.service_read(INDEXED_CV, page=(10, 2), page_selected=True)
 
     assert bench.events == []
 
 
-def test_a_paged_read_still_warns_when_a_different_page_is_the_live_one(bench_factory, monkeypatch):
-    """Selecting page 10:2 says nothing about a read that names 145:0.
+def test_every_cv_of_a_paged_group_is_quiet_not_only_the_first(bench_factory, monkeypatch):
+    """Two CVs on one page, one selection, no warnings.
 
-    The suppression is keyed on the page, not on the mere fact that something
-    was selected once - otherwise one selection would silence every later
-    read whatever bank it asked for.
+    This is why the fact comes from the caller rather than from the page
+    cache. Every service read ends its session and `exit_service_mode` clears
+    that cache, so a cache-based check silenced the FIRST read of a group and
+    warned on every one after it - which is the same contradiction one CV
+    further along.
     """
-    bench = bench_factory(capabilities=make_capabilities(z21_cv_opcodes=True))
-    programmer = bench.station.programmer
-    programmer._pages[programmer._page_key(None, ProgMode.SERVICE)] = (
-        (10, 2),
-        bench.clock.monotonic(),
-    )
+    bench = _service_bench(bench_factory)
     _script_read_and_clean_exit(bench, cmd_z21_cv_read(INDEXED_CV))
+    _script_read_and_clean_exit(bench, cmd_z21_cv_read(INDEXED_CV + 1))
+    monkeypatch.setattr(
+        bench.station.programmer,
+        "await_result",
+        lambda matcher, **kw: CvValue(raw_cv=matcher.cv, value=1, ident=0x14, z21_form=True),
+    )
+
+    for cv in (INDEXED_CV, INDEXED_CV + 1):
+        bench.station.programmer.service_read(cv, page=(10, 2), page_selected=True)
+
+    assert bench.events == []
+
+
+def test_a_real_paged_batch_warns_about_nothing_end_to_end(bench_factory, monkeypatch):
+    """The whole chain from issue #39, with the real read path underneath.
+
+    `cv read 265,266 --page 10:2` asks the operator to approve writing
+    CV31/CV32, `cv_read_many` reads the cursor pair, selects, reads both CVs
+    and puts the pair back. Not one of those reads may claim the page was not
+    selected. Only `select_page` is stubbed - scripting its writes would say
+    nothing about the reads, which are what used to warn.
+    """
+    bench = _service_bench(bench_factory)
+    programmer = bench.station.programmer
+    monkeypatch.setattr(programmer, "select_page", lambda page, *, address, mode, force: None)
+    for cv in (31, 32, INDEXED_CV, INDEXED_CV + 1):
+        _script_read_and_clean_exit(bench, cmd_z21_cv_read(cv))
     monkeypatch.setattr(
         programmer,
         "await_result",
-        lambda matcher, **kw: CvValue(raw_cv=INDEXED_CV, value=1, ident=0x14, z21_form=True),
+        lambda matcher, **kw: CvValue(raw_cv=matcher.cv, value=1, ident=0x14, z21_form=True),
     )
 
-    programmer.service_read(INDEXED_CV, page=(145, 0))
-
-    assert bench.events == [
-        ("page.not_selected", {"cv": INDEXED_CV, "page": (145, 0), "mode": "service"})
-    ]
-
-
-def test_a_selection_older_than_the_cache_ttl_no_longer_counts_as_selected(
-    bench_factory, monkeypatch
-):
-    """The same window `select_page` uses to decide it need not write again.
-
-    JMRI reuses a live index selection only for immediately sequential
-    operations and for at most a second (`MultiIndexProgrammerFacade`,
-    `maxDelay`), calling even that a heuristic. Ten seconds is far too loose
-    for a claim about the DECODER - it is the right window for this claim,
-    which is only about what this programmer did.
-    """
-    bench = bench_factory(capabilities=make_capabilities(z21_cv_opcodes=True))
-    programmer = bench.station.programmer
-    stale = bench.clock.monotonic() - TIMING.page_cache_ttl - 1
-    programmer._pages[programmer._page_key(None, ProgMode.SERVICE)] = ((10, 2), stale)
-    _script_read_and_clean_exit(bench, cmd_z21_cv_read(INDEXED_CV))
-    monkeypatch.setattr(
-        programmer,
-        "await_result",
-        lambda matcher, **kw: CvValue(raw_cv=INDEXED_CV, value=1, ident=0x14, z21_form=True),
+    outcomes = programmer.cv_read_many(
+        [CvSpec(cv=INDEXED_CV, page=(10, 2)), CvSpec(cv=INDEXED_CV + 1, page=(10, 2))],
+        mode=ProgMode.SERVICE,
     )
 
-    programmer.service_read(INDEXED_CV, page=(10, 2))
-
-    assert bench.events == [
-        ("page.not_selected", {"cv": INDEXED_CV, "page": (10, 2), "mode": "service"})
-    ]
+    assert [outcome.spec.cv for outcome in outcomes] == [INDEXED_CV, INDEXED_CV + 1]
+    assert all(outcome.result is not None for outcome in outcomes)
+    assert bench.events == []
+    assert bench.transport.script_pending == []
 
 
 def test_a_service_page_key_ignores_the_address_it_was_handed(bench_factory):
@@ -933,7 +921,7 @@ def test_cv_read_uses_service_mode_when_the_resolved_mode_is_service(bench_facto
     monkeypatch.setattr(
         bench.station.programmer,
         "service_read",
-        lambda cv, *, page=None: "SERVICE-RESULT",
+        lambda cv, *, page=None, page_selected=False: "SERVICE-RESULT",
     )
 
     assert bench.station.programmer.cv_read(8) == "SERVICE-RESULT"
@@ -942,7 +930,7 @@ def test_cv_read_uses_service_mode_when_the_resolved_mode_is_service(bench_facto
 def test_station_cv_read_delegates_to_the_programmer(bench, monkeypatch):
     recorded: dict[str, object] = {}
 
-    def fake_cv_read(self, cv, *, address=None, mode=ProgMode.AUTO, page=None):
+    def fake_cv_read(self, cv, *, address=None, mode=ProgMode.AUTO, page=None, page_selected=False):
         recorded.update(cv=cv, address=address, mode=mode, page=page)
         return "DELEGATED"
 
@@ -1764,7 +1752,7 @@ def test_a_spec_that_carries_a_page_keeps_the_per_cv_path(bench_factory, monkeyp
     monkeypatch.setattr(
         programmer,
         "cv_read",
-        lambda cv, *, address, mode, page=None: (
+        lambda cv, *, address, mode, page=None, page_selected=False: (
             calls.append(("read", cv)),
             _cv_result(cv=cv, value=7 if cv == 31 else 3),
         )[1],
@@ -1799,7 +1787,10 @@ def test_pom_mode_still_reads_one_cv_at_a_time(bench_factory, monkeypatch):
     monkeypatch.setattr(
         programmer,
         "cv_read",
-        lambda cv, *, address, mode, page=None: (read.append(cv), _cv_result(cv=cv, value=1))[1],
+        lambda cv, *, address, mode, page=None, page_selected=False: (
+            read.append(cv),
+            _cv_result(cv=cv, value=1),
+        )[1],
     )
 
     programmer.cv_read_many([CvSpec(cv=8), CvSpec(cv=7)], address=3, mode=ProgMode.POM)
