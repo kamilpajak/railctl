@@ -258,6 +258,9 @@ EVENT_NAMES: Final[tuple[str, ...]] = (
     "loco.emergency_stop",
     "service.entered",
     "service.session_retried",
+    # every CV of a group answered, but the session would not close: the
+    # values are kept and the fault is reported beside them
+    "service.session_close_failed",
     "reply.unknown",
 )
 

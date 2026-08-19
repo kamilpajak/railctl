@@ -1085,3 +1085,57 @@ at the saved files (stage 2 skipped, 4 passed 1 skipped) settled that:
   while the tool was right both times.
 
 CV3 went 26 -> 20 -> 26 again, and the closing `diff` reported zero differences.
+
+## Grouped service reads — issue #38 acceptance PASSED 2026-08-19
+
+Three gated stages against the MS450P22 on the programming track, ten minutes end to end.
+Reading eight CVs inside one service-mode session instead of one session per CV.
+
+| stage | observable | result |
+| --- | --- | --- |
+| 1 | doctor probe | service encodings proven, decoder family `ms` |
+| 2 | a full curated backup, timed | 77 of 77 ok, `complete: true`, **185 s** |
+| 3 | the same backup as NDJSON | 79 lines, contiguous, 0 events, no silent CV |
+
+**2.40 s per CV, down from 6.05 s.** The same 77 CVs, 466 s before and 185 s after, on the
+same bench and the same decoder — 2.5 times faster.
+
+**The file did not change.** Stage 2 compares its output against
+`~/railctl-backups/loco-0003-curated.json`, the keeper backup taken on 2026-08-13 before this
+change, ignoring only `created_utc` and `note`. Every other field matched, including all 77
+values, all 77 statuses, the capabilities block and the encoding. This is the assertion worth
+the bench time: a faster backup that reads something else is not a faster backup, and no unit
+test can tell those apart.
+
+### The rhythm is visible in the stream, and it is exactly eight
+
+`elapsed_ms` in the NDJSON run separates into two populations with nothing in between:
+
+| position in the group | `elapsed_ms` |
+| --- | --- |
+| first CV of a session | 2947 – 3063 |
+| every other CV | 1481 – 1788 |
+
+The expensive reads land at sequence 10, 18, 26, 34, 42, 50, 58, 66 and 74 — every eighth
+line, without exception, which is `SERVICE_BATCH_SIZE`. Sequences 1 to 3 (CV31, CV32, CV29) are
+also ~3.0 s because `backup` reads them as singletons before it can plan, and sequence 4 opens
+the identity group.
+
+So **a service read costs about 1.7 s and the session costs about 1.3 s on top of it**. The
+2026-08-13 note above modelled the 6.05 s as "3.0 s read plus 3.0 s gap"; the `elapsed_ms` of
+3.0 s it read that from was the read WITH its session, not the read alone. The corrected split
+is what the two populations show directly.
+
+### A session of eight answered to its last CV
+
+Two full backups, 77 CVs each, and not one hole: `no_response: 0`, `error: 0`, and no
+`service.session_close_failed` event. Before this run, four CVs in one session was the largest
+number this hardware had ever been asked for (issue #22). Eight is now measured. Sixteen is
+still a guess, and raising the group would save about 10 s on a 77 CV backup — not worth
+another unproven session length without a reason.
+
+### What this means for M11
+
+A 1024 CV sweep at 1.86 s per CV (the in-group rate) is about **32 minutes**, against the
+1 h 42 min the per-CV path would have cost. The >60 s confirmation still fires, and now it
+quotes a number an operator can wait out.
