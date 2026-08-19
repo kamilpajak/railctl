@@ -1211,3 +1211,47 @@ part of the run.
 All 77 CVs from `~/railctl-backups/loco-0003-curated.json` appear in the sweep with the same
 name and the same value. The wider net changed nothing about what the known CVs say, which
 is what tells a working sweep from one reading off by an index.
+
+### What JMRI says about the sweep — 2026-08-19, documentary, not measured
+
+Everything in this subsection comes from reading JMRI's source and decoder definitions
+(`~/Developer/Personal/reference/JMRI`), not from this bench. It is recorded here because
+it bears directly on the two open questions the sweep raised, but it is a second opinion
+from a document, and this file's authority is measurement.
+
+**CV100 is a live measurement, which is why it does not answer.** `xml/decoders/zimo/
+CV7-CV102_MS-MN-FS.xml`, included by the MS450's definition, has CV100 as `Current
+asymmetry voltage`, `readOnly="yes"`, "the asymmetry the decoder measures right now, in
+tenths of a volt. Read on the main to set the ABC threshold in CV #134." A service-mode
+read verifies a value with acknowledgement pulses and can only succeed if the value holds
+still; a CV holding whatever the decoder is measuring at that instant has no reason to,
+and on the programming track there is no asymmetry to measure at all. The `61 13` is the
+honest answer, not a fault. Prediction, unverified: it fails identically on every attempt.
+
+**The high CVs decompose correctly under JMRI's definitions.** Three checks, in
+increasing order of what they rule out:
+
+1. `Z21XNetMessage.getZ21ReadDirectCVMsg` builds the identical telegram to
+   `cmd_z21_cv_read`, offset and 16-bit split included.
+2. `Z21XNetProgrammer.message` rebuilds the echoed CV from both bytes and discards a
+   reply that does not match, exactly as `CvMatcher` does. Its `getCanRead` returns true
+   for any CV in direct mode - "z21 allows us to specify the CV in 16 bits."
+3. The values themselves land where the definitions say. CV508-512 (Swiss Dimming 1-5,
+   low three bits mode and high five bits brightness) all read 248 = mode `normal`,
+   brightness 31 of 31. CV516/519/522/525 are the F2-F5 sound samples and hold sample
+   numbers. **CV746, 749, 752, 755, 758 and 761 are flag bytes whose only documented bits
+   are 3 (`Stand`) and 6 (`Drive`), and every one of them read 8 or 72** - those two bits
+   and nothing else, six times over. CV527 does the same one block earlier.
+
+The third check is the one that tests addressing rather than encoding: a read landing on
+the wrong CV would have to preserve a three-CV repeating structure and still put only
+documented bits in only the flag positions.
+
+What this does NOT establish: that a CV which answered `0` is implemented at all. About
+500 of them read `0`, and an unimplemented CV returning `0` is indistinguishable from one
+holding `0`. `HIGHEST_EXERCISED_CV` stays at 511 and `backup --all` keeps warning. The
+definitive test is still a known value written over POM and read back over the Z21 opcode
+(issue #43).
+
+**Control, below the boundary:** JMRI gives CV134 `Asymmetrical DCC Threshold` a default
+of 106, and the sweep read 106.
