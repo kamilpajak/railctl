@@ -16,7 +16,14 @@ from typing import NoReturn
 import typer
 from typer.core import TyperGroup
 
-from railctl.cli._errors import OutputContext, _internal_report, report_for, usage_report
+from railctl.cli._click_errors import ClickException, ClickUsageError
+from railctl.cli._errors import (
+    OutputContext,
+    _internal_report,
+    parse_failure_report,
+    report_for,
+    usage_report,
+)
 from railctl.cli._meta import GLOBAL_OPTIONS, TREE_ORDER, root_epilog, typer_option
 from railctl.cli.commands import (
     backup,
@@ -34,7 +41,7 @@ from railctl.cli.config import VERBOSE_ENV, Config, config_path, load_config
 from railctl.cli.deps import Settings, build_settings, configure_logging, context_for
 from railctl.cli.render import render_error
 from railctl.cli.result import ErrorReport
-from railctl.errors import RailctlError
+from railctl.errors import AbortedError, RailctlError
 
 
 class _TreeOrderGroup(TyperGroup):
@@ -200,14 +207,26 @@ schema.register(app)
 
 
 def main() -> None:
-    """Process entry point. Catches only what can be raised BEFORE a command's
-    own `run()` gets a chance to: a bad `config.toml`, or an invalid global
-    option (an out-of-range --address, a --json/--format conflict). Once a
-    command body starts, `run()` (Task 8) already converts its failures to
-    `typer.Exit`, which Typer's own dispatch handles without reaching here.
-    Resolution is deferred to the first `ctx.obj` read (see `CliContext`), so
-    those two now leave the command function rather than the callback - still
-    before its `run()` starts, and still handled here.
+    """Process entry point. Catches everything that can happen BEFORE a command's own
+    `run()` gets a chance to: an invocation Click's parser refuses, a bad `config.toml`,
+    or an invalid global option (an out-of-range --address, a --json/--format conflict).
+    Once a command body starts, `run()` (Task 8) already converts its failures to
+    `typer.Exit`. Resolution is deferred to the first `ctx.obj` read (see `CliContext`), so
+    the config and global-option failures leave the command function rather than the
+    callback - still before its `run()` starts, and still handled here.
+
+    `standalone_mode=False` is what makes the parse failures reachable at all. In the
+    default mode Typer handles a `UsageError` itself: it prints a Rich box - escape codes
+    included, even when stderr is a file - and calls `sys.exit()` on its own, so
+    `railctl --json bogus` ended in prose no script could parse and with no `code` to
+    branch on. Turning it off hands both the exception and the exit code to this function.
+
+    Owning the exit code is the load-bearing half of that switch. `typer.core._main`
+    RETURNS `typer.Exit`'s code as an int in this mode rather than raising it, and every
+    command in this tool signals its exit code by raising `typer.Exit` from `run()` - so a
+    `main()` that dropped the return value would turn a sweep that must exit 9 and a failed
+    `cv read` into exit 0. Anything that is not an int (a command's own `None`) is success.
+    There is deliberately no `except typer.Exit` branch: in this mode it never reaches one.
 
     The final `except Exception` is the safety net for everything else that can go
     wrong while resolving global options - an unreadable `config.toml` raising
@@ -221,7 +240,22 @@ def main() -> None:
     which of them is the real one.
     """
     try:
-        app()
+        outcome = app(standalone_mode=False)
+    except ClickUsageError as exc:
+        # Unknown command, unknown option, bad value, missing argument, and the bare
+        # `railctl` with no verb at all - one class covers every way the parser can refuse
+        # an invocation, which is why this is caught before `ClickException` below.
+        _fail(parse_failure_report(exc))
+    except ClickException as exc:
+        # A Click exception that is NOT a usage error. This tool raises none of its own, so
+        # reaching here means something unexpected came out of the parser - a bug, reported
+        # as one, rather than an invocation the operator can fix.
+        _fail(_internal_report(exc, _entry_output(), verbose=_verbosity_in(sys.argv)))
+    except typer.Abort:
+        # The operator stopped the run. Deliberately the same envelope `run()` publishes for
+        # a KeyboardInterrupt inside a command body, with the same wording: one event must
+        # not answer differently depending on how far the invocation had got.
+        _fail(report_for(AbortedError("interrupted by the operator"), command="railctl"))
     except RailctlError as exc:
         _fail(report_for(exc, command="railctl"))
     except ValueError as exc:
@@ -242,6 +276,12 @@ def main() -> None:
         # answer "not verbose" for exactly the failures an operator reaches for `-vv` to
         # diagnose.
         _fail(_internal_report(exc, _entry_output(), verbose=_verbosity_in(sys.argv)))
+    else:
+        # Every branch above ends in `_fail`, which raises. This is the only path where the
+        # app ran to completion, and `outcome` is what `typer.core._main` handed back: the
+        # int a `typer.Exit` carried, or the command's own return value (`None`) for a run
+        # that never raised one.
+        raise SystemExit(outcome if isinstance(outcome, int) else 0)
 
 
 def _verbosity_in(argv: Sequence[str]) -> bool:
