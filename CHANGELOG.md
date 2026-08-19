@@ -17,6 +17,10 @@ All notable changes to this project are documented in this file. The format foll
   a contact or a programming-current problem, and the hint now says so instead of
   suggesting the wheels be checked. The original advice is kept for the case it was
   written for: the first failure of a session, where nothing has been proven yet. (#46)
+- `railctl restore` no longer reports the index page as unselected while verifying a write
+  that selected it. Every read-back of a CV above 256 carried that warning - fourteen of
+  them in a curated restore - saying the selection had not happened, in the run that made
+  it.
 - One selected CV31/CV32 page is now recorded under one key on the programming track.
   `PageKey` always documented that service mode is addressed by track and carries no
   locomotive address, but nothing enforced it and the callers disagreed, so the same
