@@ -31,6 +31,7 @@ from railctl.station.doctor import (
     PROBE_CV_VALUE,
     _check_d0,
     _check_d13,
+    _ProbeProgress,
     exit_code_for_report,
     run_probe,
     verdict_lines,
@@ -1743,6 +1744,20 @@ def _run_d13(
     )
 
 
+def _assert_the_layout_was_released(bench, report):
+    """`21 81` after the `80 80`, and a run that owes nothing at the end.
+
+    Every ending of D13 that sent the stop owes this, decisive or not: the check
+    reports what it read, and what it read cannot buy the layout being left
+    standing. `must_leave_held is False` is the other half - a run that still owed
+    the hold would have the closing `_settle_hold` put it back.
+    """
+    stop = bench.sent.index(cmd_emergency_stop_all())
+    assert cmd_track_power_on() in bench.sent[stop:]
+    assert report.layout.must_leave_held is False
+    assert report.layout.held is not True
+
+
 def test_d13_records_the_23151_order_when_the_first_bit_moves(doctor_bench):
     """The measurement made by hand on 2026-08-05, run by the tool: `80 80` sets
     bit 0, so bit 0 is emergency stop and bit 1 is emergency off."""
@@ -1753,7 +1768,12 @@ def test_d13_records_the_23151_order_when_the_first_bit_moves(doctor_bench):
     # The evidence, not just the verdict: both bytes and the bit that moved, so an
     # operator can check the run against the LED table in docs/probe-results.md.
     assert "0x04" in d13.detail and "0x05" in d13.detail
-    assert "bit 0" in d13.detail
+    # Both bit numbers appear in either order's detail ("bit N is emergency stop
+    # and bit 1-N is emergency off"), so a bare `"bit 0" in detail` is satisfied by
+    # the lenz_spec sentence too and pins nothing. These two phrases are the ones
+    # that differ between the orders.
+    assert "moved bit 0" in d13.detail
+    assert "bit 0 is emergency stop and bit 1 is emergency off" in d13.detail
     assert "lenz_23151" in d13.detail
 
 
@@ -1766,7 +1786,8 @@ def test_d13_records_the_lenz_order_when_the_second_bit_moves(doctor_bench):
     assert d13.status == "ok"
     assert report.capabilities.status_bit_order == "lenz_spec"
     assert "0x04" in d13.detail and "0x06" in d13.detail
-    assert "bit 1" in d13.detail
+    assert "moved bit 1" in d13.detail
+    assert "bit 1 is emergency stop and bit 0 is emergency off" in d13.detail
     assert "lenz_spec" in d13.detail
 
 
@@ -1779,6 +1800,11 @@ def test_d13_records_nothing_when_no_disputed_bit_moves(doctor_bench):
     assert d13.status == "unknown"
     assert report.capabilities.status_bit_order is None
     assert "0x04" in d13.detail
+    # The `80 80` went out whatever the status then read, so the release is owed on
+    # this path exactly as much as on the decisive one - and only this assertion
+    # pins it. Without it, a release moved into the decisive branch leaves the whole
+    # layout in emergency stop under a report saying the run touched nothing.
+    _assert_the_layout_was_released(doctor_bench, report)
 
 
 def test_d13_records_nothing_when_both_disputed_bits_move(doctor_bench):
@@ -1789,6 +1815,7 @@ def test_d13_records_nothing_when_both_disputed_bits_move(doctor_bench):
     assert d13.status == "unknown"
     assert report.capabilities.status_bit_order is None
     assert "0x07" in d13.detail
+    _assert_the_layout_was_released(doctor_bench, report)
 
 
 def test_d13_sends_no_stop_at_all_when_the_track_is_not_energised(doctor_bench):
@@ -1819,7 +1846,7 @@ def test_d13_sends_no_stop_when_a_disputed_bit_is_already_set(doctor_bench):
     assertion below for the wrong reason.
     """
     doctor_bench.transport.on_write.set(cmd_station_status(), STATUS_REPLY_HELD_AND_LIVE)
-    check, layout = _check_d13(doctor_bench.station, LAYOUT_UNTOUCHED)
+    check, layout = _check_d13(doctor_bench.station, _ProbeProgress(), LAYOUT_UNTOUCHED)
     assert check.status == "unknown"
     assert doctor_bench.station.capabilities.status_bit_order is None
     assert "0x05" in check.detail
@@ -1862,6 +1889,11 @@ def test_d13_fails_and_says_the_layout_is_held_when_the_release_does_not_take(do
     # printing "this run did not change the track power" over a stopped layout.
     assert report.layout.must_leave_held is True
     assert report.layout.held is True
+    # The row is frozen BEFORE the closing `_settle_hold` reads the layout back, so
+    # it must not assert an outcome that later reading can contradict: a re-assert
+    # coming back with the bit clear would leave the report saying two opposite
+    # things about one layout with nothing saying which reading is the newer.
+    assert "the later of the two readings" in d13.detail
 
 
 def test_d13_is_reported_last_but_measured_while_the_power_state_is_known(doctor_bench):
@@ -1903,3 +1935,159 @@ def test_d13_is_skipped_and_sends_nothing_unless_it_is_asked_for(doctor_bench):
     assert report.capabilities.status_bit_order is None
     assert cmd_emergency_stop_all() not in doctor_bench.sent
     assert cmd_track_power_on() not in doctor_bench.sent
+
+
+def test_d13_records_that_it_stopped_the_layout_even_when_everything_went_right(doctor_bench):
+    """The successful ending still sent `80 80` to every locomotive on the layout
+    and then the one telegram measured (2026-08-09, run 5) to start a locomotive
+    with a speed stored. Nothing is left held, so this is not a hazard and not a
+    warning - but the layout block is built from these fields, and with all of them
+    at their defaults it says "this run did not change the track power" and stops.
+    """
+    report = _run_d13(doctor_bench, after_the_stop=STATUS_REPLY_HELD_AND_LIVE)
+    assert report.check("D13").status == "ok"
+    assert report.layout.hold_applied is True
+    assert report.layout.must_leave_held is False
+
+
+# -- D13: the endings where a read raises ---------------------------------------
+#
+# Every branch below is reached by a read that failed rather than by a byte that
+# disagreed, and each one owes the same thing as the endings above: the `80 80`
+# went out, so the `21 81` has to follow it. Scripting silence is what makes them
+# reachable - `Responder` answers `None` by saying nothing at all, which is a
+# LinkTimeout one layer down.
+
+
+def test_d13_measures_nothing_and_sends_no_stop_when_the_first_read_fails(doctor_bench):
+    """The status read BEFORE the stop. Nothing is known about the layout, so the
+    precondition cannot be evaluated and the one thing the check must not do is
+    send a stop anyway - a hold applied to a layout whose state was never read is
+    a hold this run cannot attribute and must not release."""
+    doctor_bench.transport.on_write.set(cmd_station_status(), None)
+    progress = _ProbeProgress()
+    check, layout = _check_d13(doctor_bench.station, progress, LAYOUT_UNTOUCHED)
+    assert check.status == "unknown"
+    assert "could not be read before the probe" in check.detail
+    assert doctor_bench.station.capabilities.status_bit_order is None
+    assert cmd_emergency_stop_all() not in doctor_bench.sent
+    assert cmd_track_power_on() not in doctor_bench.sent
+    assert layout == LAYOUT_UNTOUCHED
+    assert progress.layout == LAYOUT_UNTOUCHED
+
+
+def test_d13_releases_and_reports_unknown_when_the_read_after_the_stop_fails(doctor_bench):
+    """The station took the stop and then said nothing about it. The measurement is
+    lost - never guessed - but the layout is not: the release goes out anyway, and
+    when it reads back clear this run owes nothing and says nothing was measured.
+    """
+    report = _run_d13(doctor_bench, after_the_stop=None)
+    d13 = report.check("D13")
+    assert d13.status == "unknown"
+    assert "could not be held and read back" in d13.detail
+    assert "released and reads clear again" in d13.detail
+    assert report.capabilities.status_bit_order is None
+    _assert_the_layout_was_released(doctor_bench, report)
+    assert report.layout.hold_applied is True
+
+
+def test_d13_fails_when_the_read_after_the_stop_fails_and_the_release_reads_held(doctor_bench):
+    """Same failed read, and this time the release did not take either. The layout
+    IS standing, and the only thing the report can do about it is say so loudly and
+    hand the run the hold to answer for."""
+    report = _run_d13(
+        doctor_bench,
+        after_the_stop=None,
+        after_the_restore=STATUS_REPLY_HELD_AND_LIVE,
+        after_the_closing_hold=STATUS_REPLY_HELD_AND_LIVE,
+    )
+    d13 = report.check("D13")
+    assert d13.status == "fail"
+    assert "THE LAYOUT IS LEFT IN EMERGENCY STOP" in d13.detail
+    assert report.layout.must_leave_held is True
+    assert report.layout.held is True
+    assert report.layout.hold_applied is True
+
+
+def test_d13_fails_when_the_release_itself_is_never_confirmed(doctor_bench):
+    """The release telegram went out and the station never answered the read after
+    it. `held` stays UNKNOWN - never `False` - because nobody read anything back,
+    and the hold is still this run's to answer for."""
+    on_write = doctor_bench.transport.on_write
+    # Scripted here rather than through `_run_d13`, whose `None` means "leave this
+    # one to the persistent reply" - and silence is never implied in this suite.
+    on_write.queue_once_for(cmd_emergency_stop_all(), None)  # D13's read after the stop
+    on_write.queue_once_for(cmd_emergency_stop_all(), None)  # the closing re-assert's read
+    on_write.queue_once_for(cmd_track_power_on(), None)  # the release's own read back
+    report = run_probe(
+        doctor_bench.station,
+        use_programming_track=False,
+        measure_status_bit_order=True,
+        now_utc=lambda: "2026-08-05T00:00:00Z",
+    )
+    d13 = report.check("D13")
+    assert d13.status == "fail"
+    assert "THE LAYOUT IS LEFT IN EMERGENCY STOP" in d13.detail
+    assert report.layout.must_leave_held is True
+    assert report.layout.held is None
+    assert report.layout.hold_applied is True
+
+
+# -- D13: an exception that is not a RailctlError, between the stop and the -----
+#    release
+#
+# `_check_d13` answers for `RailctlError` itself. Everything else unwinds through
+# the `80 80` it just sent: the bare `ValueError` `Station.exchange` raises for an
+# interface-status reply, and the `KeyboardInterrupt` an operator sends when the
+# layout stops in front of them - which is exactly the moment the check is blocked
+# reading the status back. Without a release on the way out, the whole layout
+# stands in emergency stop and `run_probe` publishes D3's `held=False` over it.
+
+
+def test_d13_releases_the_layout_when_a_non_railctl_error_unwinds_the_check(doctor_bench):
+    """`01 09` is the interface status `Station.exchange` maps to a bare
+    `ValueError`, not to a `RailctlError`."""
+    doctor_bench.transport.on_write.queue_once_for(cmd_emergency_stop_all(), encode(0x01, 0x09))
+    progress = _ProbeProgress()
+    with pytest.raises(ValueError):
+        _check_d13(doctor_bench.station, progress, LAYOUT_UNTOUCHED)
+    stop = doctor_bench.sent.index(cmd_emergency_stop_all())
+    assert cmd_track_power_on() in doctor_bench.sent[stop:]
+    # Read back clear, so nothing is owed - but the run still stopped the layout,
+    # and `run_probe` publishes this on the exception.
+    assert progress.layout.hold_applied is True
+    assert progress.layout.must_leave_held is False
+
+
+def test_d13_publishes_a_held_layout_when_the_release_after_an_interrupt_does_not_take(
+    doctor_bench,
+):
+    """A `KeyboardInterrupt` is the operator's own ending here, and the release
+    then read the bit still set. The exception is what the caller gets, and the
+    layout it carries has to be the held one - `must_leave_held` is what makes
+    `run_probe` re-read the state and the CLI name it."""
+    responder = doctor_bench.transport.on_write
+    doctor_bench.transport.on_write.queue_once_for(cmd_track_power_on(), STATUS_REPLY_HELD_AND_LIVE)
+    interrupted: list[bool] = []
+
+    def interrupt_the_read_after_the_stop(framed: bytes, transport: FakeTransport) -> None:
+        telegram = doctor_bench.unframe(framed)
+        if (
+            telegram == cmd_station_status()
+            and not interrupted
+            and cmd_emergency_stop_all() in doctor_bench.sent
+        ):
+            interrupted.append(True)
+            raise KeyboardInterrupt
+        responder(framed, transport)
+
+    doctor_bench.transport.on_write = interrupt_the_read_after_the_stop
+    progress = _ProbeProgress()
+    with pytest.raises(KeyboardInterrupt):
+        _check_d13(doctor_bench.station, progress, LAYOUT_UNTOUCHED)
+    assert interrupted == [True]
+    stop = doctor_bench.sent.index(cmd_emergency_stop_all())
+    assert cmd_track_power_on() in doctor_bench.sent[stop:]
+    assert progress.layout.held is True
+    assert progress.layout.must_leave_held is True
+    assert progress.layout.hold_applied is True

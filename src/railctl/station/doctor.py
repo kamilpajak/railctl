@@ -181,20 +181,27 @@ def _idle_probe_address(station: Station, address: int | None) -> LayoutState:
     telegram lands while the layout is held, and run 7 that the hold survives it.
     """
     if address is None:
-        return LayoutState(energised=True, must_leave_held=True)
+        return LayoutState(energised=True, must_leave_held=True, hold_applied=True)
     stored = _stored_direction(station, address)
     try:
         station.drive(address, 0, Direction.FORWARD if stored is None else stored)
     except RailctlError:
         # Not a silent success: this locomotive still holds whatever speed the
         # station has for it, so a later release would start it.
-        return LayoutState(energised=True, idled_address=address, idled=False, must_leave_held=True)
+        return LayoutState(
+            energised=True,
+            idled_address=address,
+            idled=False,
+            must_leave_held=True,
+            hold_applied=True,
+        )
     return LayoutState(
         energised=True,
         idled_address=address,
         idled=True,
         direction_preserved=stored is not None,
         must_leave_held=True,
+        hold_applied=True,
     )
 
 
@@ -214,7 +221,9 @@ def _abandon_energised_track(station: Station) -> tuple[Check, bool, LayoutState
 
     `must_leave_held` stays `False`: this run has given up on holding and has put
     the power back the way it found it, so the closing re-assert must not fire and
-    overwrite a reading this function already made.
+    overwrite a reading this function already made. `hold_applied` is `True` all the
+    same - the stop telegram was written before it raised, and this field says what
+    this run SENT, so a hold that turns out to be standing here is this run's.
     """
     try:
         station.power_off()
@@ -227,7 +236,7 @@ def _abandon_energised_track(station: Station) -> tuple[Check, bool, LayoutState
         return (
             Check("D3", CHECK_TITLES["D3"], "fail", detail),
             False,
-            LayoutState(energised=True, held=None),
+            LayoutState(energised=True, held=None, hold_applied=True),
         )
     detail = (
         "track power was turned on but the emergency stop that should hold the layout "
@@ -236,7 +245,7 @@ def _abandon_energised_track(station: Station) -> tuple[Check, bool, LayoutState
     return (
         Check("D3", CHECK_TITLES["D3"], "fail", detail),
         False,
-        LayoutState(energised=True, track_power=False, held=None),
+        LayoutState(energised=True, track_power=False, held=None, hold_applied=True),
     )
 
 
@@ -410,13 +419,23 @@ def _d13_order_that_moved(before: int, after: int) -> StatusBitOrder | None:
     return None
 
 
-def _check_d13(station: Station, layout: LayoutState) -> tuple[Check, LayoutState]:
+def _check_d13(
+    station: Station, progress: _ProbeProgress, layout: LayoutState
+) -> tuple[Check, LayoutState]:
     """Which of bits 0 and 1 of the status byte this station uses for what.
 
     Hold the layout, read the status again, see which bit moved, release. The
     Lenz spec is what makes the observation decisive: 2.2.4 says the DCC track
     power remains switched on through `80 80`, so the bit that appears is the
     emergency STOP bit whichever document the station follows.
+
+    `progress` is written to as the HELD WINDOW OPENS, not once the check has
+    decided what to say. This is the only check that puts the whole layout in
+    emergency stop, and every `return` below is reachable only if nothing raised:
+    an exception thrown between the stop and the release unwinds past all of
+    them, and `run_probe` then publishes whatever `progress.layout` last held. D3
+    leaves `held=False, must_leave_held=False` there, which is a definite "nothing
+    is holding the layout" printed over a layout that is definitely standing.
     """
     try:
         before = station.status()
@@ -426,16 +445,35 @@ def _check_d13(station: Station, layout: LayoutState) -> tuple[Check, LayoutStat
     refused = _d13_precondition(station, before)
     if refused is not None:
         return refused, layout
+    # Below this line, and not one line above it. Nothing so far has sent a
+    # telegram that moves the layout, and the precondition has just established
+    # that nothing else is holding it - so this is the first point at which a
+    # release is D13's to send, and the first at which a hold on this layout
+    # would be this run's doing.
+    progress.layout = _d13_held_layout(layout, None)
     try:
-        station.emergency_stop(address=None)
-        after = station.status()
-    except RailctlError as exc:
-        # The stop telegram may well have gone out, so the release runs anyway.
-        return _d13_gave_up(station, layout, f"the layout could not be held and read back ({exc})")
-    order = _d13_order_that_moved(before.raw, after.raw)
-    if order is not None:
-        station.record(status_bit_order=order.name)
-    return _d13_verdict(station, layout, before.raw, after.raw, order)
+        try:
+            station.emergency_stop(address=None)
+            after = station.status()
+        except RailctlError as exc:
+            # The stop telegram may well have gone out, so the release runs anyway.
+            return _d13_gave_up(
+                station, layout, f"the layout could not be held and read back ({exc})"
+            )
+        order = _d13_order_that_moved(before.raw, after.raw)
+        if order is not None:
+            station.record(status_bit_order=order.name)
+        return _d13_verdict(station, layout, before.raw, after.raw, order)
+    except BaseException:
+        # Everything that is NOT a RailctlError, which the arms above already
+        # answer for: the `ValueError` `Station.exchange` raises for an
+        # interface-status reply, and the `KeyboardInterrupt` an operator sends
+        # when the layout stops in front of them - which is exactly the moment
+        # this check is blocked reading the status back. Both unwind straight
+        # past the release, and without this the `80 80` stands, `21 81` is never
+        # sent, and the run reports a layout it no longer describes.
+        progress.layout = _d13_abandoned(station, layout)
+        raise
 
 
 def _d13_precondition(station: Station, before: StationStatus) -> Check | None:
@@ -472,7 +510,7 @@ def _d13_gave_up(
     released = _d13_release(station)
     if released is not None and not released & STATUS_DISPUTED_BITS:
         detail = f"{what_failed}; the layout was released and reads clear again; {_D13_UNMEASURED}"
-        return Check("D13", CHECK_TITLES["D13"], "unknown", detail), layout
+        return Check("D13", CHECK_TITLES["D13"], "unknown", detail), _d13_stop_was_sent(layout)
     return (
         Check("D13", CHECK_TITLES["D13"], "fail", f"{what_failed}; {_D13_HELD_WARNING}"),
         _d13_held_layout(layout, released),
@@ -495,14 +533,64 @@ def _d13_held_layout(layout: LayoutState, released: int | None) -> LayoutState:
     be free is held again and reported held, where the other choice leaves a
     locomotive able to start under a report that says nothing about it.
     """
-    return replace(layout, held=True if released is not None else None, must_leave_held=True)
+    return replace(
+        layout,
+        held=True if released is not None else None,
+        must_leave_held=True,
+        hold_applied=True,
+    )
+
+
+def _d13_stop_was_sent(layout: LayoutState) -> LayoutState:
+    """The layout after a D13 that held it and got the release CONFIRMED.
+
+    Nothing is owed and nothing is left standing, so `must_leave_held` stays
+    `False` and the run is not responsible for a hazard. `hold_applied` is still
+    set, because the run stopped every locomotive on the layout and started them
+    again, and a report that says "this run did not change the track power" and
+    nothing else describes a run that did not happen. The CLI reads this field to
+    say so, and to keep "the hold this run found" out of the words for a hold this
+    run made.
+    """
+    return replace(layout, hold_applied=True)
+
+
+def _d13_abandoned(station: Station, layout: LayoutState) -> LayoutState:
+    """The release D13 owes, on a path where an exception is already on its way out.
+
+    Same reasoning as `_settle_on_the_way_out` and `cli/deps.close_quietly`: the
+    exception already unwinding is the answer the caller needs, so a failure in
+    here must not replace it with whatever went wrong while tidying up.
+
+    `_settle_hold` is the wrong tool on this path, which is the whole reason this
+    exists: it RE-ASSERTS the hold a run owes, and the hold here is one D13
+    applied and owes a release for. Skipping the release is the ending the check's
+    own safety note forbids - `80 80` in force, no `21 81`, and the operator told
+    nothing.
+    """
+    try:
+        released = _d13_release(station)
+    except Exception:
+        released = None
+    if released is not None and not released & STATUS_DISPUTED_BITS:
+        return _d13_stop_was_sent(layout)
+    return _d13_held_layout(layout, released)
 
 
 #: Printed whenever the release did not visibly take. The words matter more than
 #: the verdict: an operator reads this before walking up to the track.
+#:
+#: It says what THIS CHECK read, and points at the reading taken after it. The
+#: check row is frozen here, before `run_probe`'s closing `_settle_hold` re-asserts
+#: the hold and reads the layout back, so a flat "nothing on the track can move"
+#: is an outcome this row cannot know: the later reading can come back with the
+#: emergency stop clear, and then the report asserts two opposite things about the
+#: same layout with nothing saying which is newer.
 _D13_HELD_WARNING: Final[str] = (
     "THE LAYOUT IS LEFT IN EMERGENCY STOP - the resume that should have released it did not "
-    "clear the bit, so nothing on the track can move until `railctl power resume` succeeds"
+    "clear the bit, so treat the track as unable to move until `railctl power resume` succeeds; "
+    "the layout block at the end of this report carries the state read after this check, which "
+    "is the later of the two readings"
 )
 
 
@@ -543,7 +631,7 @@ def _d13_verdict(
             Check("D13", CHECK_TITLES["D13"], "fail", f"{measured}; {_D13_HELD_WARNING}"),
             _d13_held_layout(layout, released),
         )
-    return Check("D13", CHECK_TITLES["D13"], status, measured), layout
+    return Check("D13", CHECK_TITLES["D13"], status, measured), _d13_stop_was_sent(layout)
 
 
 _SILENCE_NOTE: Final[str] = (
@@ -1113,7 +1201,10 @@ def _probe(
     # is the same telegram D13 uses to release its own hold, so a D13 running
     # after that batch would be measuring a layout two other things had just moved.
     if measure_status_bit_order:
-        d13_check, layout = _check_d13(station, layout)
+        # `_check_d13` writes `progress.layout` itself the moment its held window
+        # opens; this is the ordinary "the moment it is known" write for the
+        # ending where it returned rather than raised.
+        d13_check, layout = _check_d13(station, progress, layout)
         progress.layout = layout
     else:
         d13_check = Check("D13", CHECK_TITLES["D13"], "skip", _D13_NOT_ASKED_FOR)

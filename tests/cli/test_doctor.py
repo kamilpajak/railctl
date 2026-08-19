@@ -186,6 +186,7 @@ def test_a_run_that_changed_no_track_power_says_so_and_still_exits_zero():
         "idled": None,
         "direction_preserved": None,
         "must_leave_held": False,
+        "hold_applied": False,
     }
     assert "  this run did not change the track power" in result.lines
     assert result.exit_code == 0
