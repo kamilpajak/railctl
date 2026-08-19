@@ -112,6 +112,15 @@ def pom_cv_fields(cv: int) -> tuple[int, int]:
 
     Returns `(MM, LSB)`. MM is the top two bits of the zero-based value and is
     OR-ed into the option byte by the caller: `0xE4 | MM`.
+
+    Checked against JMRI's `XNetMessage.getWriteOpsModeCVMsg` on 2026-08-19,
+    which computes the same two fields differently - `((cv - 1) & 0x0300) /
+    0x00FF` and `(cv & 0xFF) - 1`. The frames match at every value tried,
+    CV256, CV512, CV768 and CV1024 included. Recorded because the second
+    expression is the one that looks wrong at those four: it yields -1 there,
+    and JMRI reaches the right byte anyway through a cast further down. Two
+    routes to the same wire, and `(cv - 1) & 0xFF` is the one that needs no
+    downstream rescue.
     """
     _check_range(cv, MAX_CV_POM, "POM")
     wire = cv - 1

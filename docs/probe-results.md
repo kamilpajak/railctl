@@ -1293,3 +1293,54 @@ One wart, worth its own issue: the `61 13` hint says to check the wheel contact 
 about the 750 mA programming output. In run 1 to 3 two other CVs answered in that same
 session, so contact and current cannot be the cause, and the advice sends an operator to
 look at the track for a decoder that is talking to them.
+
+## A CV above 511 checked against a known value — SETTLED 2026-08-19
+
+The sweep established that every CV from 512 to 1024 answers. It did not establish that
+the answers belong to the CVs they are labelled with, and roughly 500 of them are zeroes
+that an out-of-range read would also produce. This settles that, for one CV, by putting a
+known value there through a **different opcode family** than the one that reads it.
+
+The locomotive has no speaker fitted, so the planned listening test (CV523 is "Volume on
+Key F4" in JMRI's ZIMO definition) could not run. The cross-encoding half does not need
+one.
+
+| step | track | what | result |
+| --- | --- | --- | --- |
+| 1 | prog | `cv read 513-530 --mode service` | baseline, 18 of 18 ok, CV523 = 128 |
+| 2 | main | `cv write 523 20 --track main --address 3 --no-verify` | sent blind; POM has no feedback |
+| 3 | prog | `cv read 513-530 --mode service` | **exactly one row changed: CV523, 128 -> 20** |
+| 4 | prog | `cv write 523 128 --track prog --verify` | `verified: true` |
+| 5 | prog | `cv read 513-530 --mode service` | identical to the baseline, no differences |
+
+The write went out as POM (`E6 30`, ten-bit, zero-based) and the read came back as the Z21
+opcode (`23 11`, sixteen-bit, zero-based). Two encodings with different field layouts agree
+on which register is CV523, and CV523 is above the boundary the sweep's warning is about.
+
+**Reading a RANGE rather than the single CV is what makes step 3 evidence.** A blind write
+that landed somewhere else would show up as a change at the wrong number; a check of CV523
+alone would have missed it. Nothing outside the target moved.
+
+### The same two encoders agree with JMRI
+
+The bench cannot rule out both of our encoders sharing a compensating error. A third
+implementation can. JMRI's `XNetMessage.getWriteOpsModeCVMsg` and
+`Z21XNetMessage.getZ21ReadDirectCVMsg` produce the same bytes as ours - for CV523 the POM
+address bytes are `EE 0A` from both, and the Z21 read is byte for byte identical
+including the zero-based offset. JMRI reaches the POM bytes by a different route
+(`((cv - 1) & 0x0300) / 0x00FF` for the high bits, `(cv & 0xFF) - 1` for the low byte),
+and the frames still match at every value tested, boundaries included. For a shared error
+to explain the bench result, the same compensating error would have to exist in JMRI's two
+encoders as well.
+
+One difference is real but harmless: at CV256, 512, 768 and 1024 JMRI's low-byte
+expression yields `-1`, which its own `setElement` stores unmasked. It reaches the wire
+correctly anyway - the traffic controller casts to `byte`, and the parity XOR is masked -
+but the monitor displays those writes as "CV 0". Reported upstream as JMRI issue #15399.
+Our `pom_cv_fields` computes `(cv - 1) & 0xFF` and has no such intermediate.
+
+### What is still open
+
+That a CV which answered `0` is implemented at all. That is the ordinary silence-versus-zero
+ambiguity and it applies at every CV number, not only above 511 - it is not a property of
+the high range and no read can settle it.
