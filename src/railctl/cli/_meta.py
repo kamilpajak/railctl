@@ -600,6 +600,19 @@ BACKUP_MODE_OPT = Option(
     enum=CV_MODES,
     default="auto",
 )
+#: M11's sweep, and the only spelling of it. The design's flag list also
+#: mentions `--set`, which is deliberately not implemented: with `--all` it
+#: would be a second way to say the same thing, and two spellings of one
+#: choice is how a CLI grows a contradiction.
+BACKUP_ALL_OPT = Option(
+    name="--all",
+    help=(
+        "sweep every CV the resolved mode can reach, not only the ones the catalog "
+        "names; the file records the range and marks unnamed rows source=sweep"
+    ),
+    type="boolean",
+    default=False,
+)
 #: Unlike `cv read`'s `--page`, this DECLARES the page the decoder is known to
 #: sit on - a backup never writes CV31/CV32, so a non-default pair read off
 #: the decoder without this flag aborts rather than record rows against a
@@ -628,7 +641,10 @@ BACKUP_EXIT_CODES: Final[tuple[int, ...]] = CV_READ_EXIT_CODES
 
 _BACKUP = CommandMeta(
     path="backup",
-    help="Back up the curated decoder CVs to a railctl/backup/v1 file",
+    help=(
+        "Back up decoder CVs to a railctl/backup/v1 file: the curated set, or every CV "
+        "the resolved mode can reach with --all"
+    ),
     schema="railctl/backup/v1",
     # Reads only: a backup that changes decoder state is not a backup, and the
     # one CV pair a read path could write (the CV31/CV32 selectors) is exactly
@@ -636,7 +652,14 @@ _BACKUP = CommandMeta(
     # with --page or the run aborts.
     mutates=False,
     exit_codes=BACKUP_EXIT_CODES,
-    options=(BACKUP_OUT_OPT, BACKUP_NOTE_OPT, BACKUP_FORCE_OPT, BACKUP_MODE_OPT, BACKUP_PAGE_OPT),
+    options=(
+        BACKUP_OUT_OPT,
+        BACKUP_NOTE_OPT,
+        BACKUP_FORCE_OPT,
+        BACKUP_ALL_OPT,
+        BACKUP_MODE_OPT,
+        BACKUP_PAGE_OPT,
+    ),
 )
 
 
@@ -1143,7 +1166,11 @@ _COMMAND_EXIT_MEANINGS: Final[dict[str, dict[int, str]]] = {
             "error row (code backup_incomplete); or the operator interrupted the run and the "
             'partial file carries "interrupted": true (code aborted); or the backup file '
             "itself could not be written (code backup_file). A skipped row never causes "
-            "this - a recorded decision is not a hole"
+            "this - a recorded decision is not a hole. An --all sweep NORMALLY ends here: "
+            'most CV numbers are not implemented in any decoder, and silence and "this CV '
+            'does not exist" cannot be told apart on this hardware, so those rows are '
+            "no_response and the file is incomplete by definition. The file is the product "
+            "either way"
         )
     },
     # 9 collects every restore refusal that is about the FILE or the decoder in
