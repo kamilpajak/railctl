@@ -582,6 +582,15 @@ def _d13_abandoned(station: Station, layout: LayoutState) -> LayoutState:
     applied and owes a release for. Skipping the release is the ending the check's
     own safety note forbids - `80 80` in force, no `21 81`, and the operator told
     nothing.
+
+    `except Exception`, not `except BaseException`: a second Ctrl-C arriving while
+    this is releasing must not be swallowed. The cost is the one ending where the
+    release goes unsent - and the operator is still told, because `_check_d13`
+    wrote the held window to `progress.layout` before it sent the stop, and that
+    write is what `run_probe` publishes when nothing later overwrites it. Told but
+    not released is the right trade here: absorbing a second interrupt to finish a
+    telegram is how a program stops being interruptible at exactly the moment
+    somebody is trying to stop it.
     """
     try:
         released = _d13_release(station)
