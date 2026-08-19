@@ -1,4 +1,4 @@
-"""railctl doctor: checks D0-D12 and the verdict block.
+"""railctl doctor: checks D0-D13 and the verdict block.
 
 Every scripted scenario here uses a `Responder` keyed by exact request bytes,
 never `FakeTransport.expect()`'s ordered queue: `run_probe` sends a variable
@@ -30,11 +30,13 @@ from railctl.station.doctor import (
     PROBE_CV,
     PROBE_CV_VALUE,
     _check_d0,
+    _check_d13,
     exit_code_for_report,
     run_probe,
     verdict_lines,
 )
 from railctl.station.types import (
+    LAYOUT_UNTOUCHED,
     Check,
     CvReadOutcome,
     CvSpec,
@@ -188,9 +190,9 @@ def doctor_bench(bench_factory):
     return bench
 
 
-def test_check_ids_are_thirteen_and_unique():
-    assert len(CHECK_IDS) == 13
-    assert len(set(CHECK_IDS)) == 13
+def test_check_ids_are_fourteen_and_unique():
+    assert len(CHECK_IDS) == 14
+    assert len(set(CHECK_IDS)) == 14
     assert set(CHECK_TITLES) == set(CHECK_IDS)
 
 
@@ -1262,6 +1264,7 @@ def test_station_probe_delegates_to_run_probe(doctor_bench, monkeypatch):
         address: int | None = None,
         allow_power_on: bool = False,
         use_programming_track: bool = True,
+        measure_status_bit_order: bool = False,
     ) -> DoctorReport:
         calls.append(
             {
@@ -1269,6 +1272,7 @@ def test_station_probe_delegates_to_run_probe(doctor_bench, monkeypatch):
                 "address": address,
                 "allow_power_on": allow_power_on,
                 "use_programming_track": use_programming_track,
+                "measure_status_bit_order": measure_status_bit_order,
             }
         )
         return DoctorReport(
@@ -1278,7 +1282,10 @@ def test_station_probe_delegates_to_run_probe(doctor_bench, monkeypatch):
 
     monkeypatch.setattr(doctor_module, "run_probe", spy)
     report = doctor_bench.station.probe(
-        address=50, allow_power_on=True, use_programming_track=False
+        address=50,
+        allow_power_on=True,
+        use_programming_track=False,
+        measure_status_bit_order=True,
     )
     assert isinstance(report, DoctorReport)
     assert report.check("D0") is not None
@@ -1288,6 +1295,7 @@ def test_station_probe_delegates_to_run_probe(doctor_bench, monkeypatch):
             "address": 50,
             "allow_power_on": True,
             "use_programming_track": False,
+            "measure_status_bit_order": True,
         }
     ]
 
@@ -1687,3 +1695,211 @@ def test_held_is_unknown_when_the_confirming_read_never_answers(doctor_bench):
     )
     assert report.layout.held is None
     assert report.layout.track_power is None
+
+
+# -- D13: which order this station uses for the two disputed status bits -------
+#
+# The measurement is one telegram: hold the layout with `80 80`, read the status
+# again, and see which of bits 0 and 1 went from clear to set. Every scenario
+# below runs with `use_programming_track=False`, so the only `21 81`
+# (resume-operations) telegram in the run is D13's own restore -
+# `exit_service_mode` sends one unconditionally at the end of the D5-D8 batch and
+# would otherwise satisfy the assertions about the restore without D13 sending
+# anything at all.
+
+STATUS_REPLY_HELD_AND_LIVE = encode(0x62, 0x22, 0x05)  # bit 0 set (measured: track still live)
+STATUS_REPLY_EMERGENCY_OFF = encode(0x62, 0x22, 0x06)  # bit 1 set
+STATUS_REPLY_BOTH_BITS = encode(0x62, 0x22, 0x07)  # both disputed bits set
+
+
+def _run_d13(
+    bench,
+    *,
+    after_the_stop: bytes,
+    after_the_restore: bytes | None = None,
+    after_the_closing_hold: bytes | None = None,
+    address: int | None = None,
+):
+    """One `run_probe` with the status D13 reads after `80 80` scripted.
+
+    `queue_once_for` scopes the reply to the poll that immediately follows the
+    stop telegram, so D2's own status read - which happens first and must see the
+    ordinary powered byte - cannot swallow it.
+    """
+    bench.transport.on_write.queue_once_for(cmd_emergency_stop_all(), after_the_stop)
+    if after_the_closing_hold is not None:
+        # A second entry on the same scoped queue: the closing `_settle_hold`
+        # sends its own `80 80` and reads the status straight afterwards, which
+        # is the same request pair D13 used, one run later.
+        bench.transport.on_write.queue_once_for(cmd_emergency_stop_all(), after_the_closing_hold)
+    if after_the_restore is not None:
+        bench.transport.on_write.queue_once_for(cmd_track_power_on(), after_the_restore)
+    return run_probe(
+        bench.station,
+        address=address,
+        use_programming_track=False,
+        measure_status_bit_order=True,
+        now_utc=lambda: "2026-08-05T00:00:00Z",
+    )
+
+
+def test_d13_records_the_23151_order_when_the_first_bit_moves(doctor_bench):
+    """The measurement made by hand on 2026-08-05, run by the tool: `80 80` sets
+    bit 0, so bit 0 is emergency stop and bit 1 is emergency off."""
+    report = _run_d13(doctor_bench, after_the_stop=STATUS_REPLY_HELD_AND_LIVE)
+    d13 = report.check("D13")
+    assert d13.status == "ok"
+    assert report.capabilities.status_bit_order == "lenz_23151"
+    # The evidence, not just the verdict: both bytes and the bit that moved, so an
+    # operator can check the run against the LED table in docs/probe-results.md.
+    assert "0x04" in d13.detail and "0x05" in d13.detail
+    assert "bit 0" in d13.detail
+    assert "lenz_23151" in d13.detail
+
+
+def test_d13_records_the_lenz_order_when_the_second_bit_moves(doctor_bench):
+    """No station here has ever done this. It is the whole reason the order is a
+    capability rather than a constant: JMRI reads the byte this way, so a station
+    that behaves this way is not hypothetical."""
+    report = _run_d13(doctor_bench, after_the_stop=STATUS_REPLY_EMERGENCY_OFF)
+    d13 = report.check("D13")
+    assert d13.status == "ok"
+    assert report.capabilities.status_bit_order == "lenz_spec"
+    assert "0x04" in d13.detail and "0x06" in d13.detail
+    assert "bit 1" in d13.detail
+    assert "lenz_spec" in d13.detail
+
+
+def test_d13_records_nothing_when_no_disputed_bit_moves(doctor_bench):
+    """The stop went out and the status did not change. That is not evidence for
+    either order - it is an instrument that told us nothing - so the capability
+    stays `None` and the two bytes go in the detail."""
+    report = _run_d13(doctor_bench, after_the_stop=STATUS_REPLY_POWERED)
+    d13 = report.check("D13")
+    assert d13.status == "unknown"
+    assert report.capabilities.status_bit_order is None
+    assert "0x04" in d13.detail
+
+
+def test_d13_records_nothing_when_both_disputed_bits_move(doctor_bench):
+    """Both bits set at once fits neither order: whatever this station is doing,
+    one `80 80` cannot say which bit is which. Never a guess."""
+    report = _run_d13(doctor_bench, after_the_stop=STATUS_REPLY_BOTH_BITS)
+    d13 = report.check("D13")
+    assert d13.status == "unknown"
+    assert report.capabilities.status_bit_order is None
+    assert "0x07" in d13.detail
+
+
+def test_d13_sends_no_stop_at_all_when_the_track_is_not_energised(doctor_bench):
+    """`80 80` on a dead track measures nothing and leaves a hold behind that the
+    restore cannot be checked against, so the check must not send it. The command
+    script is the assertion; the verdict alone would pass on a check that sent the
+    telegram and then discarded the answer."""
+    doctor_bench.transport.on_write.set(cmd_station_status(), STATUS_REPLY_EMERGENCY_OFF)
+    report = run_probe(
+        doctor_bench.station,
+        use_programming_track=False,
+        measure_status_bit_order=True,
+        now_utc=lambda: "2026-08-05T00:00:00Z",
+    )
+    d13 = report.check("D13")
+    assert d13.status == "unknown"
+    assert report.capabilities.status_bit_order is None
+    assert "0x06" in d13.detail
+    assert cmd_emergency_stop_all() not in doctor_bench.sent
+
+
+def test_d13_sends_no_stop_when_a_disputed_bit_is_already_set(doctor_bench):
+    """A layout that is already held starts from a byte where the bit D13 is about
+    to set may already be set - so nothing could be attributed to the stop, and
+    the restore would have to release a hold this run did not apply. `_check_d13`
+    is called directly here: a whole `run_probe` on this status ends with the
+    closing hold re-assertion, which sends its own `80 80` and would satisfy the
+    assertion below for the wrong reason.
+    """
+    doctor_bench.transport.on_write.set(cmd_station_status(), STATUS_REPLY_HELD_AND_LIVE)
+    check, layout = _check_d13(doctor_bench.station, LAYOUT_UNTOUCHED)
+    assert check.status == "unknown"
+    assert doctor_bench.station.capabilities.status_bit_order is None
+    assert "0x05" in check.detail
+    assert doctor_bench.sent == [cmd_station_status()]
+    assert layout == LAYOUT_UNTOUCHED
+
+
+def test_d13_restores_the_layout_with_resume_operations(doctor_bench):
+    """The hold D13 applies is released by D13, and the release is READ BACK - the
+    check reports what the station says, never what it sent."""
+    report = _run_d13(doctor_bench, after_the_stop=STATUS_REPLY_HELD_AND_LIVE)
+    assert report.check("D13").status == "ok"
+    stop = doctor_bench.sent.index(cmd_emergency_stop_all())
+    assert cmd_track_power_on() in doctor_bench.sent[stop:]
+    assert report.layout.held is not True
+
+
+def test_d13_fails_and_says_the_layout_is_held_when_the_release_does_not_take(doctor_bench):
+    """The failure direction that matters. Locomotives left standing is the safe
+    ending, but the operator has to be TOLD, or they walk up to a layout they
+    believe is as they left it.
+
+    The measurement itself still stands: the bit moved, and that is what it moved.
+    Throwing a measurement away because the tidy-up afterwards failed is the same
+    mistake as recording a capability absent because the instrument broke.
+    """
+    report = _run_d13(
+        doctor_bench,
+        after_the_stop=STATUS_REPLY_HELD_AND_LIVE,
+        after_the_restore=STATUS_REPLY_HELD_AND_LIVE,
+        after_the_closing_hold=STATUS_REPLY_HELD_AND_LIVE,
+    )
+    d13 = report.check("D13")
+    assert d13.status == "fail"
+    assert "emergency stop" in d13.detail.lower()
+    assert report.capabilities.status_bit_order == "lenz_23151"
+    # The layout block is the other half of telling the operator, and it is what
+    # the CLI reads: `must_leave_held` makes the run answer for the hold, so the
+    # closing re-assert reads the state back and the report names it instead of
+    # printing "this run did not change the track power" over a stopped layout.
+    assert report.layout.must_leave_held is True
+    assert report.layout.held is True
+
+
+def test_d13_is_reported_last_but_measured_while_the_power_state_is_known(doctor_bench):
+    """Two things at once, because they are one decision. D13 RUNS straight after
+    D3 - the track power is known there and nothing has entered service mode yet -
+    and it is REPORTED after D12, where a check added later belongs. The ordering
+    that matters on the wire is the first: the `80 80` must land before any
+    service-mode session, which cuts main power and ends by resuming operations.
+    """
+    report = _run_d13(doctor_bench, after_the_stop=STATUS_REPLY_HELD_AND_LIVE, address=3)
+    assert tuple(check.id for check in report.checks) == CHECK_IDS
+    assert CHECK_IDS[-1] == "D13"
+    order = doctor_bench.sent
+    assert order.index(cmd_emergency_stop_all()) < order.index(
+        cmd_function_single(3, 0, FunctionAction.OFF, threshold=100)
+    )
+
+
+def test_d13_is_skipped_and_sends_nothing_unless_it_is_asked_for(doctor_bench):
+    """The DEFAULT run, and the reason the flag exists.
+
+    D13 holds the layout and then releases it, and this station's own bench
+    measured (2026-08-09, run 5) that resume-operations is what starts a
+    locomotive with a speed stored. Two settled rules of this codebase follow
+    from that: the doctor holds only a layout it energised or found held, and the
+    doctor never releases. A live, RELEASED layout - the only state D13 can
+    measure in - is exactly where both bite, so the operator opts in and the
+    plain run sends no stop at all.
+
+    `skip`, not `unknown`: nothing got in the way, nobody asked. The same reading
+    D4 uses for a run with no address.
+    """
+    report = run_probe(
+        doctor_bench.station, use_programming_track=False, now_utc=lambda: "2026-08-05T00:00:00Z"
+    )
+    d13 = report.check("D13")
+    assert d13.status == "skip"
+    assert "--measure-status-bits" in d13.detail
+    assert report.capabilities.status_bit_order is None
+    assert cmd_emergency_stop_all() not in doctor_bench.sent
+    assert cmd_track_power_on() not in doctor_bench.sent

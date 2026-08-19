@@ -6,6 +6,16 @@ All notable changes to this project are documented in this file. The format foll
 
 ## [Unreleased]
 
+### Added
+
+- The status byte's bit order is now something the tool measures rather than something it
+  asserts. Two manuals disagree about which of bits 0 and 1 is emergency stop and which is
+  emergency off; both readings are carried as named data, the order measured on the YD7010
+  stays the default, and `railctl doctor --measure-status-bits` (check D13) measures which
+  one the attached station actually uses and records it as a capability. The flag is opt-in
+  because the measurement holds the whole layout for one telegram and then releases it. No
+  reading changes on a station that has not been measured. (#13)
+
 ### Fixed
 
 - `railctl cv read --page` no longer contradicts itself. It asks the operator to approve

@@ -91,6 +91,22 @@ and nothing suggests anyone has run it against a YD7010. It is worth recording f
 reason: a reader who checks our claim against the best-known open implementation will find it
 disagrees, and should know that was checked rather than missed.
 
+### The order is now a measured capability, not a constant
+
+Issue #13. The reading above is still the reading, and it is still the DEFAULT the tool applies
+when nothing has measured the attached station (`xbus/dialect.py`, `DEFAULT_STATUS_BIT_ORDER =
+LENZ_23151`). What changed is that it is no longer a claim about XpressNet: the two documented
+orders are named data, `capabilities.status_bit_order` records which one a station was measured
+to use, and **`railctl doctor --measure-status-bits` (check D13) is the instrument** - it repeats
+the experiment above, one `80 80` and one status read, and records the order whose emergency-stop
+bit moved.
+
+D13 is opt-in because the experiment holds the whole layout and then releases it, and the release
+is when a locomotive with a stored speed starts moving (run 5, 2026-08-09). It also refuses to
+measure unless the track is live with neither disputed bit already set, because a bit that was
+already set is a bit the stop cannot be credited with. `null` in the capabilities file means
+nobody ran it - never that the station uses the default.
+
 ### Second finding from the same run
 
 `21 80` and `21 81` are both answered with the generic ack `01 04 05`, never `61 00` / `61 01`.

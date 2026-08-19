@@ -25,6 +25,7 @@ import dataclasses
 import pytest
 
 from railctl.xbus.codec import encode
+from railctl.xbus.dialect import DEFAULT_STATUS_BIT_ORDER, LENZ_23151, LENZ_SPEC
 from railctl.xbus.replies import (
     EXTENDED_LOCO_INFO_HEADERS,
     HEADER_61_REPLIES,
@@ -140,6 +141,88 @@ def test_every_status_bit_owns_exactly_one_flag():
             flipped = StationStatus.from_raw(raw ^ mask)
             moved = {other for other in flags if getattr(status, other) != getattr(flipped, other)}
             assert moved == {name}, (raw, name, moved)
+
+
+#: The three bytes the 2026-08-05 LED experiment produced, and what each of them
+#: means under EACH documented order - written out row by row rather than derived
+#: from the code under test, because a table generated from `StatusBitOrder` would
+#: agree with any masks at all, including two swapped ones.
+#:
+#:     raw    order        emergency_stop  emergency_off  track_power
+_MEASURED_BYTES_UNDER_BOTH_ORDERS = (
+    (0x04, LENZ_23151, False, False, True),
+    (0x05, LENZ_23151, True, False, True),
+    (0x06, LENZ_23151, False, True, False),
+    (0x04, LENZ_SPEC, False, False, True),
+    (0x05, LENZ_SPEC, False, True, False),
+    (0x06, LENZ_SPEC, True, False, True),
+)
+
+
+@pytest.mark.parametrize(
+    ("raw", "order", "emergency_stop", "emergency_off", "track_power"),
+    _MEASURED_BYTES_UNDER_BOTH_ORDERS,
+    ids=[f"0x{raw:02X}-{order.name}" for raw, order, *_ in _MEASURED_BYTES_UNDER_BOTH_ORDERS],
+)
+def test_the_three_measured_bytes_read_both_ways_under_the_two_orders(
+    raw: int, order, emergency_stop: bool, emergency_off: bool, track_power: bool
+):
+    """The same three bytes, decoded under each documented order.
+
+    `0x05` is the row that matters. Under the measured 23151 order it is an
+    emergency stop with the track still live (Lenz 2.2.4: "The DCC track power
+    remains switched on"), which is what the green FLASHING LED said. Under the
+    Lenz order the same byte is emergency off, and `track_power` reads False for
+    a track a multimeter and an LED both say is live. Reading it the wrong way
+    round is not cosmetic, and this table is what keeps both readings honest
+    while only one of them is the default.
+    """
+    status = StationStatus.from_raw(raw, order=order)
+    assert status.raw == raw
+    assert status.emergency_stop is emergency_stop
+    assert status.emergency_off is emergency_off
+    assert status.track_power is track_power
+
+
+@pytest.mark.parametrize("raw", [0x04, 0x05, 0x06])
+def test_the_default_order_decodes_exactly_as_the_measured_order_does(raw: int):
+    """A regression pin on the DEFAULT, not on the orders.
+
+    `DEFAULT_STATUS_BIT_ORDER` is `LENZ_23151` - the order measured on the only
+    station this project has ever run against - so injecting the order changed no
+    reading anywhere. A future edit to the default has to come here and change
+    this test on purpose.
+    """
+    assert dataclasses.astuple(StationStatus.from_raw(raw)) == dataclasses.astuple(
+        StationStatus.from_raw(raw, order=LENZ_23151)
+    )
+    assert DEFAULT_STATUS_BIT_ORDER is LENZ_23151
+
+
+def test_the_undisputed_bits_decode_identically_under_both_orders():
+    """Bits 2, 3, 6 and 7 are not in dispute; only bits 0 and 1 are. All 256 raw
+    bytes, so no arrangement of the two disputed masks can reach the other four."""
+    for raw in range(256):
+        measured = StationStatus.from_raw(raw, order=LENZ_23151)
+        spec = StationStatus.from_raw(raw, order=LENZ_SPEC)
+        assert measured.raw == spec.raw == raw
+        assert measured.auto_start_mode is spec.auto_start_mode
+        assert measured.service_mode is spec.service_mode
+        assert measured.powering_up is spec.powering_up
+        assert measured.ram_error is spec.ram_error
+        # And the two that ARE in dispute are simply swapped, never lost.
+        assert measured.emergency_stop is spec.emergency_off
+        assert measured.emergency_off is spec.emergency_stop
+
+
+def test_parse_applies_the_default_order_because_xbus_knows_no_station():
+    """`parse` has no capabilities to consult - it is handed bytes and nothing
+    else - so it decodes with the documented default and leaves `raw` on the
+    object. `station/facade.py` is where the measured order is applied, by
+    re-deriving from that `raw`."""
+    reply = parse(tg("62 22 05 45"))
+    assert isinstance(reply, StationStatus)
+    assert reply == StationStatus.from_raw(0x05, order=DEFAULT_STATUS_BIT_ORDER)
 
 
 def test_track_power_is_the_inverse_of_emergency_off():

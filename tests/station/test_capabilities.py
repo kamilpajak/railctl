@@ -195,6 +195,7 @@ def test_load_ignores_an_unrecognised_key_in_a_link_entry(tmp_path: Path):
         {"xpressnet_version": 4},
         {"pom_result_channel": "maybe"},
         {"pom_read_provenance": "probably"},
+        {"status_bit_order": "lenz_9999"},
         {"notes": 7},
     ],
     ids=[
@@ -203,6 +204,7 @@ def test_load_ignores_an_unrecognised_key_in_a_link_entry(tmp_path: Path):
         "str-field",
         "result-channel-enum",
         "provenance-enum",
+        "status-bit-order-enum",
         "notes-wrong-type",
     ],
 )
@@ -288,6 +290,7 @@ _SAMPLE_VALUES: dict[str, object] = {
     "z21_cv_opcodes": True,
     "function_groups_4_5": False,
     "single_function_cmd": True,
+    "status_bit_order": "lenz_spec",
     "notes": ("POM read produced no result at all",),
 }
 
@@ -473,3 +476,77 @@ def test_a_malformed_entry_for_this_link_is_replaced_rather_than_blocking_the_sa
     )
     assert Capabilities(link_identity=IDENTITY, pom_read=True).save(path) is True
     assert Capabilities.load(path, IDENTITY).pom_read is True
+
+
+# -- a file written before `status_bit_order` existed -------------------------
+
+#: A capabilities.json exactly as railctl 0.1.0 wrote it, typed out here rather
+#: than produced by `Capabilities.save`. A fixture built by the writer under test
+#: cannot show that an OLDER writer's output still loads: it would grow the new
+#: key the moment the field was added, and the test would pass while proving
+#: nothing about the file already on the operator's disk.
+_FILE_WITHOUT_THE_NEW_FIELD = """{
+  "version": 1,
+  "links": {
+    "7010A0001194": {
+      "command_station_id": 18,
+      "function_groups_4_5": true,
+      "loco_address_threshold": null,
+      "notes": [],
+      "pom_echo_zero_based": false,
+      "pom_read": true,
+      "pom_read_provenance": null,
+      "pom_result_channel": "poll",
+      "probed_at": "2026-08-19T09:00:00Z",
+      "service_direct_cv": true,
+      "service_ext_cv": true,
+      "single_function_cmd": true,
+      "xpressnet_version": "4.0",
+      "z21_cv_opcodes": true
+    }
+  }
+}
+"""
+
+
+def test_a_file_written_before_the_status_bit_order_existed_still_loads(tmp_path: Path):
+    """The old file must load, and the field nobody measured must be `None`.
+
+    `None` is the whole point: a capabilities file written before D13 existed is
+    a file whose station was never asked which order it uses, and that is not the
+    same as a station that uses the default. Everything else in the file has to
+    survive too - a loader that rejected the file, or reset it, would throw away
+    measurements that cost seconds of hardware time each.
+    """
+    path = tmp_path / "capabilities.json"
+    path.write_text(_FILE_WITHOUT_THE_NEW_FIELD, encoding="utf-8")
+    caps = Capabilities.load(path, IDENTITY)
+    assert caps.status_bit_order is None
+    assert caps.pom_read is True
+    assert caps.pom_result_channel == "poll"
+    assert caps.xpressnet_version == "4.0"
+    assert caps.probed is True
+
+
+def test_both_documented_order_names_load_from_a_hand_written_file(tmp_path: Path):
+    """The two values D13 can record, read back off a file this module did not
+    write. `lenz_spec` is the one no station here has ever been measured to use,
+    so nothing else in the suite would notice if the loader dropped it."""
+    path = tmp_path / "capabilities.json"
+    for name in ("lenz_spec", "lenz_23151"):
+        path.write_text(
+            '{"version": 1, "links": {"' + IDENTITY + '": {"status_bit_order": "' + name + '"}}}',
+            encoding="utf-8",
+        )
+        assert Capabilities.load(path, IDENTITY).status_bit_order == name
+
+
+def test_a_null_status_bit_order_loads_as_none_rather_than_being_rejected(tmp_path: Path):
+    """`null` on disk is "nobody established this", exactly as it is for every
+    other field - the writer emits it for an unmeasured station on every save."""
+    path = tmp_path / "capabilities.json"
+    path.write_text(
+        '{"version": 1, "links": {"' + IDENTITY + '": {"status_bit_order": null}}}',
+        encoding="utf-8",
+    )
+    assert Capabilities.load(path, IDENTITY).status_bit_order is None

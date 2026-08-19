@@ -74,7 +74,13 @@ from railctl.xbus.commands import (
     cmd_track_power_on,
     pack_function_bits,
 )
-from railctl.xbus.dialect import DIVERGENCE_BAND, XPRESSNET
+from railctl.xbus.dialect import (
+    DEFAULT_STATUS_BIT_ORDER,
+    DIVERGENCE_BAND,
+    XPRESSNET,
+    StatusBitOrder,
+    status_bit_order_by_name,
+)
 from railctl.xbus.replies import (
     EXTENDED_LOCO_INFO_HEADERS,
     POWER_OFF,
@@ -189,6 +195,23 @@ class Station:
         return measured if measured is not None else XPRESSNET.long_address_threshold
 
     @property
+    def status_bit_order(self) -> StatusBitOrder:
+        """Which of bits 0 and 1 of the status byte is emergency stop, and which is
+        emergency off: measured once `railctl doctor` D13 runs,
+        `DEFAULT_STATUS_BIT_ORDER` until then.
+
+        Exactly `threshold` above, one field along. Two manuals disagree about
+        those two bits (`xbus/dialect.py`), this station was measured to follow the
+        23151 one, and that measurement is the documented default - not a claim
+        that every XpressNet station does the same. A station D13 measures as
+        following the Lenz spec gets the Lenz reading here, and nothing else in the
+        codebase changes.
+        """
+        with self._lock:
+            measured = self._capabilities.status_bit_order
+        return DEFAULT_STATUS_BIT_ORDER if measured is None else status_bit_order_by_name(measured)
+
+    @property
     def description(self) -> str:
         return self.link.description
 
@@ -253,7 +276,14 @@ class Station:
         * `Other` with reason `empty` or `unknown_form` -> the base `RailctlError` (exit 9): the
           reply arrived intact, but this REPLY TABLE has no row for it yet - the station is not
           at fault.
-        * everything else - GenericAck, StationVersion, StationStatus, PowerState,
+        * `StationStatus` - returned with bits 0 and 1 re-derived from its own `raw` under
+          the order this station was MEASURED to use, `status_bit_order` above. `xbus` has no
+          station to ask and decodes with the documented default; this is the layer that holds
+          the capabilities, and this is the one place in `station/` that parses a reply, so
+          applying it here is what keeps every reader - `status()`, `_settle_power`, the
+          doctor's D2/D3, and `CvProgrammer._status_before`, which never goes through
+          `status()` at all - reading the same two bits the same way.
+        * everything else - GenericAck, StationVersion, PowerState,
           EmergencyStopBroadcast, ServiceModeEntry, every CV reply Tasks 4-6 add, and every
           `TRANSIENT_REPLIES` member (ShortCircuit, TrackShortCircuit, Busy, StationBusy,
           TransferError) - is returned untouched. None of `TRANSIENT_REPLIES`' five members says
@@ -265,6 +295,8 @@ class Station:
         """
         with self._lock:
             reply = replies.parse(self.link.request(telegram, timeout=timeout))
+            if isinstance(reply, StationStatus):
+                reply = StationStatus.from_raw(reply.raw, order=self.status_bit_order)
             if isinstance(reply, InterfaceStatus):
                 if reply.code == INTERFACE_STATUS_USAGE:
                     raise ValueError(
@@ -398,6 +430,8 @@ class Station:
             return self._version_cache
 
     def status(self) -> StationStatus:
+        """The decoded status byte. Bits 0 and 1 carry the order `status_bit_order`
+        resolves - `exchange` applies it, so this method never has to know."""
         with self._lock:
             reply = self.exchange(cmd_station_status(), timeout=self.timing.li_ack_normal)
             if not isinstance(reply, StationStatus):
@@ -530,6 +564,7 @@ class Station:
         address: int | None = None,
         allow_power_on: bool = False,
         use_programming_track: bool = True,
+        measure_status_bit_order: bool = False,
     ) -> DoctorReport:
         # Imported here, not at module level: doctor.py imports Station only
         # under TYPE_CHECKING, but facade.py importing doctor.py at module
@@ -544,6 +579,7 @@ class Station:
             address=address,
             allow_power_on=allow_power_on,
             use_programming_track=use_programming_track,
+            measure_status_bit_order=measure_status_bit_order,
         )
 
     # -- drive, loco_info and functions --------------------------------------

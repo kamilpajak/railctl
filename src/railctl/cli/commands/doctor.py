@@ -30,6 +30,7 @@ import typer
 
 from railctl.cli._errors import run
 from railctl.cli._meta import (
+    DOCTOR_MEASURE_STATUS_BITS,
     DOCTOR_NO_PROGRAMMING_TRACK,
     DOCTOR_NO_SAVE,
     DOCTOR_POWER_ON,
@@ -84,6 +85,7 @@ CAPABILITY_FIELDS: Final[tuple[tuple[str, str, str], ...]] = (
     ("pom_result_channel", "POM result channel", "text"),
     ("pom_echo_zero_based", "POM echo zero-based", "bool"),
     ("loco_address_threshold", "Long-address threshold", "text"),
+    ("status_bit_order", "Status bit order", "text"),
     ("service_direct_cv", "Service mode: direct CV", "bool"),
     ("service_ext_cv", "Service mode: extended CV", "bool"),
     ("z21_cv_opcodes", "Z21 16-bit CV opcodes", "bool"),
@@ -137,6 +139,7 @@ _NON_INTERACTIVE = global_option("--non-interactive")
 
 _POWER_ON = typer_option(DOCTOR_POWER_ON)
 _NO_PROGRAMMING_TRACK = typer_option(DOCTOR_NO_PROGRAMMING_TRACK)
+_MEASURE_STATUS_BITS = typer_option(DOCTOR_MEASURE_STATUS_BITS)
 _NO_SAVE = typer_option(DOCTOR_NO_SAVE)
 
 
@@ -464,6 +467,7 @@ def register(app: typer.Typer) -> None:
         non_interactive: bool = _NON_INTERACTIVE,
         power_on: bool = _POWER_ON,
         no_programming_track: bool = _NO_PROGRAMMING_TRACK,
+        measure_status_bits: bool = _MEASURE_STATUS_BITS,
         no_save: bool = _NO_SAVE,
     ) -> None:
         cli_ctx = ctx.obj
@@ -487,6 +491,7 @@ def register(app: typer.Typer) -> None:
                     address=settings.address,
                     allow_power_on=power_on,
                     use_programming_track=not no_programming_track,
+                    measure_status_bit_order=measure_status_bits,
                 )
                 saved_to, save_warning, published = _save_capabilities(
                     report.capabilities, no_save=no_save, stderr=output.stderr

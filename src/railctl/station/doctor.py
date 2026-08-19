@@ -1,4 +1,4 @@
-"""`Station.probe()`: checks D0-D12 and the human verdict block.
+"""`Station.probe()`: checks D0-D13 and the human verdict block.
 
 Every check here is READ-ONLY against the decoder - see the design document,
 "the doctor never writes a decoder CV" - and every service-mode check restores
@@ -44,10 +44,18 @@ from railctl.xbus.commands import (
     cmd_loco_info,
     cmd_service_direct_read,
     cmd_service_ext_read,
+    cmd_track_power_on,
     cmd_z21_cv_read,
 )
 from railctl.xbus.cv import CvEncoding
-from railctl.xbus.dialect import DIVERGENCE_BAND, XPRESSNET, Z21
+from railctl.xbus.dialect import (
+    DIVERGENCE_BAND,
+    STATUS_BIT_ORDERS,
+    STATUS_DISPUTED_BITS,
+    XPRESSNET,
+    Z21,
+    StatusBitOrder,
+)
 from railctl.xbus.replies import (
     UNSUPPORTED,
     CvValue,
@@ -83,6 +91,11 @@ CHECK_IDS: Final[tuple[str, ...]] = (
     "D10",
     "D11",
     "D12",
+    # D13 RUNS straight after D3 - see `_probe` - and is REPORTED here, at the
+    # end, because that is where a check added after the first twelve belongs.
+    # The two positions are different on purpose and the tuple is the reported
+    # order, which is what `DoctorReport.checks` is compared against.
+    "D13",
 )
 
 CHECK_TITLES: Final[dict[str, str]] = {
@@ -99,6 +112,7 @@ CHECK_TITLES: Final[dict[str, str]] = {
     "D10": "address band",
     "D11": "function groups 4/5",
     "D12": "single-function command",
+    "D13": "status bit order",
 }
 
 
@@ -314,6 +328,222 @@ def _settle_hold(station: Station, layout: LayoutState) -> LayoutState:
         # which the CLI treats as "not safe" - see LayoutState's own docstring.
         return replace(layout, held=None, track_power=None)
     return replace(layout, held=after.emergency_stop, track_power=after.track_power)
+
+
+#: What `_check_d13` needs to see before it sends anything: the track live, and
+#: NEITHER of the two disputed bits already set. The second half is what makes
+#: the measurement attributable - the bit the stop sets has to be a bit that was
+#: clear beforehand - and it is also what makes the restore checkable, because a
+#: hold this run did not apply is not a hold this run may release.
+#:
+#: SAFETY. `80 80` is an emergency stop for every locomotive on the layout, and
+#: this check sends one on purpose. Doctor already energises and holds the track
+#: at D3 on a `--power-on` run, so this is not a new class of intrusion, and the
+#: failure direction is the safe one: a run that dies between the stop and the
+#: release leaves the locomotives STANDING, not running. What it must never do is
+#: leave them standing silently - see the `fail` ending below, and the layout
+#: block `run_probe` publishes on every ending.
+#:
+#: A consequence worth knowing rather than working around: a `--power-on` run
+#: cannot measure this. D3 holds the layout it energised, so by the time D13 looks
+#: the disputed bit is already set and the precondition refuses. The order is
+#: measured on a run that finds the track live and nothing holding it.
+_D13_UNMEASURED: Final[str] = "the status bit order stays unmeasured"
+
+#: Why the measurement is opt-in, in the words the operator reading the report
+#: needs. Two settled decisions of this codebase stand in its way, and both are
+#: about a layout somebody else is using rather than about this check:
+#:
+#: * the doctor holds the layout only when it energised it or found a hold
+#:   already there (`_check_d3`, and the mutation guard `test_power_on_changes_
+#:   nothing_on_a_track_that_is_already_live`), and
+#: * the doctor NEVER releases a hold - `_settle_hold`'s own docstring, from the
+#:   2026-08-09 run 5 where a locomotive with step 80 stored accelerated away on
+#:   resume-operations: "the release is the moment stored speeds start
+#:   locomotives, and a diagnostic command must not be what chooses that moment".
+#:
+#: D13 does both, and it can only ever measure on a layout that is live and
+#: RELEASED - the one state where those two rules bite hardest. So the operator
+#: chooses the moment, not the doctor, and the default run does not send the
+#: stop at all. `skip` rather than `unknown` for the same reason D4 uses it: this
+#: is a genuine opt-out, not a condition that got in the way.
+_D13_NOT_ASKED_FOR: Final[str] = (
+    "not measured: the measurement holds the whole layout with an emergency stop and then "
+    "releases it, and a diagnostic must not be what chooses the moment stored speeds start "
+    "locomotives (measured 2026-08-09, run 5) - pass --measure-status-bits, on a track that is "
+    "live with nothing held, to measure it"
+)
+
+
+def _d13_release(station: Station) -> int | None:
+    """Release the hold D13 applied and read back what the station says.
+
+    Resume-operations (`21 81`) is exactly the telegram that clears an emergency
+    stop - MEASURED 2026-08-09, run 5. `station.exchange` rather than
+    `station.power_on()`: the track was already live, so there is no power state
+    to settle, and `power_on()` would spend a second status round trip reading the
+    very byte this check has to read for itself anyway.
+
+    `None` means the release was never confirmed - the telegram may have gone out
+    and the station never said - which is UNKNOWN and, for a hold, never neutral.
+    """
+    try:
+        _exchange(station, cmd_track_power_on(), timeout=TIMING.li_ack_normal)
+        return station.status().raw
+    except RailctlError:
+        return None
+
+
+def _d13_order_that_moved(before: int, after: int) -> StatusBitOrder | None:
+    """The order whose EMERGENCY STOP bit is the one `80 80` set, or `None`.
+
+    `80 80` is an emergency stop, so under the order this station really uses it
+    sets that order's emergency-stop mask and nothing else in the disputed pair.
+    Both bits moving, or neither, fits no order at all and returns `None` - the
+    check then records nothing, which is the only honest answer to an instrument
+    that did not produce a reading.
+    """
+    changed = (after ^ before) & STATUS_DISPUTED_BITS
+    for order in STATUS_BIT_ORDERS:
+        if changed == order.emergency_stop_mask:
+            return order
+    return None
+
+
+def _check_d13(station: Station, layout: LayoutState) -> tuple[Check, LayoutState]:
+    """Which of bits 0 and 1 of the status byte this station uses for what.
+
+    Hold the layout, read the status again, see which bit moved, release. The
+    Lenz spec is what makes the observation decisive: 2.2.4 says the DCC track
+    power remains switched on through `80 80`, so the bit that appears is the
+    emergency STOP bit whichever document the station follows.
+    """
+    try:
+        before = station.status()
+    except RailctlError as exc:
+        detail = f"the status could not be read before the probe ({exc}); {_D13_UNMEASURED}"
+        return Check("D13", CHECK_TITLES["D13"], "unknown", detail), layout
+    refused = _d13_precondition(station, before)
+    if refused is not None:
+        return refused, layout
+    try:
+        station.emergency_stop(address=None)
+        after = station.status()
+    except RailctlError as exc:
+        # The stop telegram may well have gone out, so the release runs anyway.
+        return _d13_gave_up(station, layout, f"the layout could not be held and read back ({exc})")
+    order = _d13_order_that_moved(before.raw, after.raw)
+    if order is not None:
+        station.record(status_bit_order=order.name)
+    return _d13_verdict(station, layout, before.raw, after.raw, order)
+
+
+def _d13_precondition(station: Station, before: StationStatus) -> Check | None:
+    """`None` when D13 may send its stop; the refusal to report when it may not.
+
+    Two arms, and the detail says which one fired, because they call for
+    different things: energise the track, or find out what is already holding it.
+    Both readings are taken under the order currently IN FORCE - the documented
+    default until something measures this station - which is why neither message
+    states what the byte means, only what it reads as.
+    """
+    name = station.status_bit_order.name
+    if not before.track_power:
+        detail = (
+            f"the track reads as unpowered (status 0x{before.raw:02X} under the {name} order in "
+            f"force), and holding a dead layout measures nothing; {_D13_UNMEASURED} - re-run on "
+            f"a live track"
+        )
+        return Check("D13", CHECK_TITLES["D13"], "unknown", detail)
+    if before.raw & STATUS_DISPUTED_BITS:
+        detail = (
+            f"status 0x{before.raw:02X} already has one of the two disputed bits set, so the "
+            f"layout is already held or already dead and nothing this check sets could be "
+            f"attributed to it; {_D13_UNMEASURED} - re-run with the layout live and released"
+        )
+        return Check("D13", CHECK_TITLES["D13"], "unknown", detail)
+    return None
+
+
+def _d13_gave_up(
+    station: Station, layout: LayoutState, what_failed: str
+) -> tuple[Check, LayoutState]:
+    """The stop or the read after it raised. Release anyway, then say so."""
+    released = _d13_release(station)
+    if released is not None and not released & STATUS_DISPUTED_BITS:
+        detail = f"{what_failed}; the layout was released and reads clear again; {_D13_UNMEASURED}"
+        return Check("D13", CHECK_TITLES["D13"], "unknown", detail), layout
+    return (
+        Check("D13", CHECK_TITLES["D13"], "fail", f"{what_failed}; {_D13_HELD_WARNING}"),
+        _d13_held_layout(layout, released),
+    )
+
+
+def _d13_held_layout(layout: LayoutState, released: int | None) -> LayoutState:
+    """The layout this run now answers for, after a release that did not take.
+
+    `must_leave_held` is set as well as `held`, and it is not a formality. It is
+    what makes `run_probe`'s closing `_settle_hold` re-assert the hold and READ
+    IT BACK, and what makes the CLI treat this run as responsible for the state
+    it is describing - without it, a run that left a layout in emergency stop
+    printed "this run did not change the track power" and nothing else, so the
+    one block an operator reads before walking up to the track was the one that
+    did not mention the hold.
+
+    Re-asserting on `held=None` is deliberate too. Unknown is not neutral for a
+    hold, and this is the direction that cannot hurt: a layout that turns out to
+    be free is held again and reported held, where the other choice leaves a
+    locomotive able to start under a report that says nothing about it.
+    """
+    return replace(layout, held=True if released is not None else None, must_leave_held=True)
+
+
+#: Printed whenever the release did not visibly take. The words matter more than
+#: the verdict: an operator reads this before walking up to the track.
+_D13_HELD_WARNING: Final[str] = (
+    "THE LAYOUT IS LEFT IN EMERGENCY STOP - the resume that should have released it did not "
+    "clear the bit, so nothing on the track can move until `railctl power resume` succeeds"
+)
+
+
+def _d13_verdict(
+    station: Station,
+    layout: LayoutState,
+    before: int,
+    after: int,
+    order: StatusBitOrder | None,
+) -> tuple[Check, LayoutState]:
+    """The reading, then the release, then one sentence carrying both.
+
+    The release is reported even when the reading failed, and the reading is kept
+    even when the release failed: a measurement discarded because the tidy-up
+    afterwards went wrong is a capability lost to a broken instrument, one step
+    removed.
+    """
+    if order is None:
+        measured = (
+            f"holding the layout moved no single disputed bit (0x{before:02X} -> 0x{after:02X}); "
+            f"exactly one of bits 0 and 1 has to go from clear to set for the order to follow "
+            f"from it, so {_D13_UNMEASURED}"
+        )
+        status: Literal["ok", "unknown"] = "unknown"
+    else:
+        moved_bit = order.emergency_stop_mask.bit_length() - 1
+        measured = (
+            f"holding the layout moved bit {moved_bit} (0x{before:02X} -> 0x{after:02X}), so bit "
+            f"{moved_bit} is emergency stop and bit {1 - moved_bit} is emergency off - the "
+            f"{order.name} order; the front-panel Track Out LED should have gone green FLASHING "
+            f"(track voltage ON) while it was held, which is the state docs/probe-results.md "
+            f"tabulates"
+        )
+        status = "ok"
+    released = _d13_release(station)
+    if released is None or released & STATUS_DISPUTED_BITS:
+        return (
+            Check("D13", CHECK_TITLES["D13"], "fail", f"{measured}; {_D13_HELD_WARNING}"),
+            _d13_held_layout(layout, released),
+        )
+    return Check("D13", CHECK_TITLES["D13"], status, measured), layout
 
 
 _SILENCE_NOTE: Final[str] = (
@@ -827,11 +1057,12 @@ def run_probe(
     address: int | None = None,
     allow_power_on: bool = False,
     use_programming_track: bool = True,
+    measure_status_bit_order: bool = False,
     now_utc: Callable[[], str] | None = None,
 ) -> DoctorReport:
     """The probe, plus the guarantee that its layout is reported on every ending.
 
-    A thin wrapper on purpose: `_probe` is free to raise from any of thirteen checks,
+    A thin wrapper on purpose: `_probe` is free to raise from any of fourteen checks,
     and every one of those endings owes the caller the same two things - a layout
     left as this run is responsible for leaving it, and a statement of what that is.
     """
@@ -843,6 +1074,7 @@ def run_probe(
             address=address,
             allow_power_on=allow_power_on,
             use_programming_track=use_programming_track,
+            measure_status_bit_order=measure_status_bit_order,
             now_utc=now_utc,
         )
     except BaseException as exc:
@@ -857,6 +1089,7 @@ def _probe(
     address: int | None,
     allow_power_on: bool,
     use_programming_track: bool,
+    measure_status_bit_order: bool,
     now_utc: Callable[[], str] | None,
 ) -> DoctorReport:
     checks: list[Check] = [_check_d0(station), _check_d1(station)]
@@ -873,6 +1106,17 @@ def _probe(
     # and from here on the run may have energised the track.
     progress.layout = layout
     checks.append(d3_check)
+
+    # D13 runs HERE and is appended at the end (see CHECK_IDS). Here, because the
+    # power state is known and nothing has entered service mode yet: a
+    # service-mode session cuts main power and ends by resuming operations, which
+    # is the same telegram D13 uses to release its own hold, so a D13 running
+    # after that batch would be measuring a layout two other things had just moved.
+    if measure_status_bit_order:
+        d13_check, layout = _check_d13(station, layout)
+        progress.layout = layout
+    else:
+        d13_check = Check("D13", CHECK_TITLES["D13"], "skip", _D13_NOT_ASKED_FOR)
 
     d4_noack = False
     if track_powered and resolved_address is not None:
@@ -944,6 +1188,7 @@ def _probe(
         # a layout it had unheld while reporting that it changed nothing.
         layout = _settle_hold(station, layout)
         progress.layout = layout
+    checks.append(d13_check)
     clock = now_utc or _iso_utc_now
     station.record(probed_at=clock())
     return DoctorReport(checks=tuple(checks), capabilities=station.capabilities, layout=layout)

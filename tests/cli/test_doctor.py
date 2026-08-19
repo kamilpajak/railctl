@@ -374,11 +374,19 @@ class _FakeStation:
         self.calls: dict[str, object] = {}
         self.closed = False
 
-    def probe(self, *, address=None, allow_power_on=False, use_programming_track=True):
+    def probe(
+        self,
+        *,
+        address=None,
+        allow_power_on=False,
+        use_programming_track=True,
+        measure_status_bit_order=False,
+    ):
         self.calls = {
             "address": address,
             "allow_power_on": allow_power_on,
             "use_programming_track": use_programming_track,
+            "measure_status_bit_order": measure_status_bit_order,
         }
         return self._report
 
@@ -436,8 +444,26 @@ def test_power_on_and_no_programming_track_reach_station_probe(monkeypatch, tmp_
         "address": 3,
         "allow_power_on": True,
         "use_programming_track": False,
+        # Not passed on this invocation, and it must not travel on the back of
+        # another flag: D13 holds the layout, so the default has to be off.
+        "measure_status_bit_order": False,
     }
     assert fake_station.closed is True
+
+
+def test_measure_status_bits_reaches_station_probe_and_is_off_by_default(monkeypatch, tmp_path):
+    """The one flag that makes the doctor hold and release a layout it did not
+    energise. Both halves are pinned: it arrives when asked for, and it is absent
+    when it is not."""
+    report = _bench_report(powered=True)
+    app, fake_station = _wire(monkeypatch, tmp_path, report)
+    result = CliRunner().invoke(app, ["doctor", "--measure-status-bits", "--no-save"])
+    assert result.exit_code == 0, result.stdout + result.stderr
+    assert fake_station.calls["measure_status_bit_order"] is True
+
+    app, plain_station = _wire(monkeypatch, tmp_path, report)
+    assert CliRunner().invoke(app, ["doctor", "--no-save"]).exit_code == 0
+    assert plain_station.calls["measure_status_bit_order"] is False
 
 
 def test_doctor_saves_capabilities_json_merged_with_an_existing_station(monkeypatch, tmp_path):
