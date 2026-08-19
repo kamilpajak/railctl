@@ -14,7 +14,6 @@ from collections.abc import Callable, Sequence
 from typing import NoReturn
 
 import typer
-from typer.core import TyperGroup
 
 from railctl.cli._click_errors import ClickException, ClickUsageError
 from railctl.cli._errors import (
@@ -25,6 +24,7 @@ from railctl.cli._errors import (
     usage_report,
 )
 from railctl.cli._meta import GLOBAL_OPTIONS, TREE_ORDER, root_epilog, typer_option
+from railctl.cli._parse_context import ParseContextGroup, ParseContextTyper
 from railctl.cli.commands import (
     backup,
     basics,
@@ -44,7 +44,7 @@ from railctl.cli.result import ErrorReport
 from railctl.errors import AbortedError, RailctlError
 
 
-class _TreeOrderGroup(TyperGroup):
+class _TreeOrderGroup(ParseContextGroup):
     """Lists the root's commands in `_meta.COMMANDS` tree order.
 
     Typer's `get_group_from_info` assembles every plain command first and every
@@ -63,10 +63,13 @@ class _TreeOrderGroup(TyperGroup):
 
 # No `no_args_is_help=True`: measured on typer 0.27.1 with this group callback and one
 # command, it puts 944 bytes of help on stdout and exits 2. The contract is error to stderr,
-# non-zero exit, empty stdout - so a bare `railctl` must produce the "Missing command" error
-# Click writes to stderr on its own, which is what leaving this off gives (0 bytes on stdout,
-# 457 on stderr, exit 2).
-app = typer.Typer(
+# non-zero exit, empty stdout - so a bare `railctl` must be refused, not answered with a
+# help page. Leaving this off makes Click's group raise `Missing command.` as a
+# `UsageError`, and since the fix for issue #30 that is the one class `main()` turns into
+# the same `usage` envelope every other refusal gets. Before that fix the same route left
+# 457 bytes of Click's own prose there instead: the exit code and the empty stdout were
+# already right, only the shape of stderr was wrong.
+app = ParseContextTyper(
     add_completion=False,
     cls=_TreeOrderGroup,
     context_settings={"max_content_width": 100},
@@ -255,6 +258,16 @@ def main() -> None:
         # The operator stopped the run. Deliberately the same envelope `run()` publishes for
         # a KeyboardInterrupt inside a command body, with the same wording: one event must
         # not answer differently depending on how far the invocation had got.
+        #
+        # One route in - an `EOFError` out of the command body - reaches here with a bare
+        # newline already on stderr: `typer.core._main` echoes one before it converts the
+        # error to an `Abort`, and that write has happened before this function sees
+        # anything. The envelope below is still the only JSON value on the stream and
+        # `json.loads` still reads it (leading whitespace is legal JSON), which is what
+        # `tests/cli/test_usage_envelope.py` pins. Nothing here can unwrite that byte, and
+        # railctl's own prompt (`deps.confirm`) reads with `readline()`, which returns `""`
+        # at end of file rather than raising - so the route is one a bug takes, not one an
+        # operator can reach.
         _fail(report_for(AbortedError("interrupted by the operator"), command="railctl"))
     except RailctlError as exc:
         _fail(report_for(exc, command="railctl"))

@@ -55,6 +55,7 @@ from railctl.cli._meta import (
     typer_argument,
     typer_option,
 )
+from railctl.cli._parse_context import ParseContextTyper
 from railctl.cli.commands.throttle import preflight
 from railctl.cli.config import capabilities_path
 from railctl.cli.cvspec import parse_cv_spec
@@ -417,7 +418,7 @@ def register(app: typer.Typer) -> None:
     is added between `monitor` and `schema`, which is where `_meta.COMMANDS`
     puts its leaves.
     """
-    cv_app = typer.Typer(add_completion=False, context_settings={"max_content_width": 100})
+    cv_app = ParseContextTyper(add_completion=False, context_settings={"max_content_width": 100})
 
     @cv_app.command("read", help=_CV_READ_META.help, epilog=help_epilog(_CV_READ_META))
     def cv_read_command(

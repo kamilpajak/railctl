@@ -23,6 +23,7 @@ import typer
 import railctl.cli.main as cli_main
 from railctl.cli._click_errors import ClickException, ClickUsageError
 from railctl.cli._errors import OutputContext, run
+from railctl.cli._meta import error_codes
 from railctl.cli.result import ERROR_SCHEMA, INTERNAL_CODE, USAGE_CODE, USAGE_EXIT_CODE
 
 
@@ -44,6 +45,17 @@ def _envelope(capsys) -> dict:
     assert captured.out == ""
     assert captured.err.count("\n") == 1
     return json.loads(captured.err)
+
+
+def _manifest_usage_row() -> dict:
+    """The `usage` row `railctl schema` publishes, read from the manifest builder itself.
+
+    The envelope and the manifest derive the same two facts from different places -
+    `parse_failure_report` writes `retryable` and `exit_code` by hand, `_meta.error_codes`
+    derives them from `RETRYABLE_CODES` and `_RESERVED_EXIT_CODES` - so nothing but a test
+    that reads both stops them describing the same `code` differently.
+    """
+    return {row["code"]: row for row in error_codes()}[USAGE_CODE]
 
 
 def _throwaway_app(monkeypatch, body) -> None:
@@ -72,10 +84,43 @@ def test_a_parse_failure_exits_2_with_one_usage_envelope_on_stderr(monkeypatch, 
 
 
 @pytest.mark.parametrize("argv", PARSE_FAILURES)
-def test_a_parse_failure_agrees_with_the_process_status(monkeypatch, capsys, argv):
-    # The envelope's own `exit_code` and the process status are one answer, never two.
+def test_a_parse_failure_exits_with_the_status_the_manifest_publishes(monkeypatch, capsys, argv):
+    """The process status, the envelope's own `exit_code` and the manifest's `usage` row
+    are one answer read three ways.
+
+    Comparing the envelope against the process status alone proves nothing: `_fail` renders
+    the report and then raises `SystemExit(report.exit_code)`, so both sides come off the
+    same field and no change to `parse_failure_report` can make them disagree. The manifest
+    row is the independent third reading - it is what `railctl schema` tells a caller to
+    expect, and it is derived from `_RESERVED_EXIT_CODES`, not from the report.
+    """
+    published = _manifest_usage_row()["exit_code"]
     code = _exit_code(monkeypatch, argv)
-    assert _envelope(capsys)["exit_code"] == code
+    assert code == published
+    assert _envelope(capsys)["exit_code"] == published
+
+
+@pytest.mark.parametrize("argv", PARSE_FAILURES)
+def test_a_parse_failure_is_retryable_exactly_as_the_manifest_says(monkeypatch, capsys, argv):
+    """`retryable` decides whether a wrapper runs the command again.
+
+    `parse_failure_report` hardcodes it; `_meta.error_codes` derives the same code's answer
+    from `RETRYABLE_CODES`. Nothing else compares the two, so a one-token change here would
+    otherwise leave `railctl --json bogus` telling a caller to retry a typo forever while
+    `railctl schema` kept publishing `usage -> retryable: false`.
+    """
+    _exit_code(monkeypatch, argv)
+    assert _envelope(capsys)["retryable"] == _manifest_usage_row()["retryable"]
+
+
+@pytest.mark.parametrize("argv", PARSE_FAILURES)
+def test_a_parse_failure_carries_no_hint(monkeypatch, capsys, argv):
+    # `hint` is a sentence for a human, and there is none to give: everything a caller can
+    # act on is already in `message` (Click's own wording) and in the one runnable argv
+    # array in `suggestions`. The key is present and null, never absent - see
+    # `ErrorReport.envelope`.
+    _exit_code(monkeypatch, argv)
+    assert _envelope(capsys)["hint"] is None
 
 
 @pytest.mark.parametrize("argv", PARSE_FAILURES)
@@ -83,8 +128,13 @@ def test_a_parse_failure_carries_no_escape_code_and_no_usage_banner(monkeypatch,
     # Today every one of these lands as a Rich box with escape codes in it, even when
     # stderr is a file. JSON output must never carry an escape code, and the `Usage:`
     # block is prose a script has to parse around.
+    #
+    # The envelope is read first, on purpose: two `not in` assertions are both satisfied by
+    # a stderr that is completely empty, so without a positive reading of what WAS written
+    # this test would keep passing for a run that published nothing at all.
     _exit_code(monkeypatch, argv)
     captured = capsys.readouterr()
+    assert json.loads(captured.err)["schema"] == ERROR_SCHEMA
     assert "\x1b" not in captured.err
     assert "Usage:" not in captured.err
 
@@ -118,6 +168,19 @@ def test_a_subcommand_failure_suggests_that_subcommands_help(monkeypatch, capsys
     assert _envelope(capsys)["suggestions"] == [["railctl", "cv", "read", "--help"]]
 
 
+def test_an_option_missing_its_value_suggests_the_failing_levels_help(monkeypatch, capsys):
+    """`--mode` with nothing after it is refused by the vendored parser itself.
+
+    `_get_value_from_state` raises `BadOptionUsage` with no `ctx` at all - Click's
+    `augment_usage_errors` only wraps `Context.invoke` and `Parameter.handle_parse_result`,
+    neither of which the raw option parser runs inside. Left alone, a failure three words
+    deep answers with the root's help, which lists no `--mode` and no `--page`: the exact
+    "wrong page" `parse_failure_report`'s docstring is about.
+    """
+    _exit_code(monkeypatch, ["--format", "json", "cv", "read", "--mode"])
+    assert _envelope(capsys)["suggestions"] == [["railctl", "cv", "read", "--help"]]
+
+
 # -- details -----------------------------------------------------------------
 
 
@@ -131,6 +194,25 @@ def test_details_name_the_click_class_and_the_command_path(monkeypatch, capsys):
 def test_details_name_the_click_class_for_a_root_failure(monkeypatch, capsys):
     _exit_code(monkeypatch, ["--json", "--nosuchopt", "status"])
     assert _envelope(capsys)["details"]["parse_error"] == "NoSuchOption"
+
+
+def test_details_name_the_command_path_when_the_parser_raised_without_a_context(
+    monkeypatch, capsys
+):
+    # The other half of the ctx-less `BadOptionUsage` above: `details["command"]` is the
+    # level that failed, not missing, so a caller can tell WHERE the invocation was refused
+    # without re-deriving it from argv.
+    _exit_code(monkeypatch, ["--format", "json", "cv", "read", "--mode"])
+    details = _envelope(capsys)["details"]
+    assert details["parse_error"] == "BadOptionUsage"
+    assert details["command"] == "railctl cv read"
+
+
+def test_details_name_the_root_when_a_root_option_is_missing_its_value(monkeypatch, capsys):
+    # Same parser path one level up: the root group owns `--target`, so the context the
+    # failure is answered with must be the root's, and it must be present.
+    _exit_code(monkeypatch, ["--format", "json", "--target"])
+    assert _envelope(capsys)["details"]["command"] == "railctl"
 
 
 # -- the exit code main() now owns -------------------------------------------
@@ -221,8 +303,32 @@ def test_an_abort_answers_exactly_as_an_interrupt_inside_a_command_does(monkeypa
     code = _exit_code(monkeypatch, [])
     payload = _envelope(capsys)
     assert payload["code"] == expected["code"]
+    assert payload["message"] == expected["message"]
     assert payload["exit_code"] == expected["exit_code"]
     assert code == expected["exit_code"]
+
+
+def test_an_eof_reaches_the_same_envelope_behind_typers_own_blank_line(monkeypatch, capsys):
+    """An `EOFError` is the one Abort route that does not leave stderr byte-clean.
+
+    `typer.core._main` echoes an empty line to stderr and only then converts the error to
+    an `Abort`, so that byte is written before `main()` sees anything and nothing in this
+    tool can take it back. Pinned rather than fixed, and pinned as what it is: the envelope
+    is still the only JSON value on the stream and `json.loads` still reads it, because
+    leading whitespace is legal JSON. A test that asserted `err.count("\n") == 1` here
+    would be asserting something typer decides.
+    """
+
+    def at_end_of_file() -> None:
+        raise EOFError
+
+    expected = _keyboard_interrupt_envelope()
+    _throwaway_app(monkeypatch, at_end_of_file)
+    assert _exit_code(monkeypatch, []) == expected["exit_code"]
+    captured = capsys.readouterr()
+    assert captured.out == ""
+    assert captured.err.startswith("\n")
+    assert json.loads(captured.err) == expected
 
 
 def test_a_click_exception_that_is_not_a_usage_error_is_an_internal_envelope(monkeypatch, capsys):
