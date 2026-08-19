@@ -1,10 +1,20 @@
 # src/railctl/cli/commands/backup.py
-"""`railctl backup` - the curated-set CV backup (design C6, milestone M9).
+"""`railctl backup` - the CV backup (design C6, milestones M9 and M11).
 
 The run order is the design's, verbatim: capabilities (already loaded by
 `open_station`), the CV31/CV32 index selectors as singleton reads, CV29, the
-identity CVs (CV7, CV8, CV250-253), then the rest of `curated_cvs` ascending
-through `Station.cv_read_many`. Nothing read in an earlier step is re-read.
+identity CVs (CV7, CV8, CV250-253), then the rest of the planned list
+ascending through `Station.cv_read_many`. Nothing read in an earlier step is
+re-read.
+
+`--all` (M11) changes exactly one thing about that: the planned list is every
+CV inside `_sweep.sweep_bound` instead of the 77 the catalog names, so a
+decoder's undocumented settings land in the file too. Everything else holds -
+the same order, the same page gate, the same three-valued rows - and the file
+says which set it is (`"set": "all"`, `sweep_range`, `source: sweep` on the
+rows no catalog entry names). A sweep NORMALLY exits 9: most CV numbers are
+not implemented in any decoder, this hardware cannot tell that from silence,
+and nothing here special-cases the sweep to hide it.
 
 Three properties are load-bearing here rather than emergent:
 
@@ -32,7 +42,7 @@ NDJSON is this command's streaming mode and bypasses `run()` the same way
 `summary` line as the LAST line even on error and on Ctrl-C - once the
 station is open, no ending may leave the stream without one.
 
-The one stream shape that surprises: `start` carries the curated total, which
+The one stream shape that surprises: `start` carries the planned total, which
 is not known until CV29 has been read, so a failure BEFORE that point (the
 index-page refusal, a silent CV29) produces a stream whose only line is the
 summary. A consumer must therefore key on `type`, never on line position.
@@ -41,17 +51,20 @@ summary. A consumer must therefore key on `type`, never on line position.
 from __future__ import annotations
 
 import json
+import sys
+import time
 from collections.abc import Callable
 from datetime import UTC, datetime
 from importlib import metadata
 from pathlib import Path
-from typing import TYPE_CHECKING, Final, NoReturn
+from typing import TYPE_CHECKING, Final, NoReturn, TextIO
 
 import typer
 
 from railctl.backup import (
     BACKUP_SCHEMA,
     NOT_ATTEMPTED_DETAIL,
+    SOURCE_CATALOG,
     STDOUT_TARGET,
     BackupDocument,
     CvRecord,
@@ -64,6 +77,7 @@ from railctl.backup import (
 from railctl.catalog import CATALOG_FAMILY, CATALOG_SCHEMA, curated_cvs, load_catalog
 from railctl.cli._errors import OutputContext, report_for, run, usage_report
 from railctl.cli._meta import (
+    BACKUP_ALL_OPT,
     BACKUP_FORCE_OPT,
     BACKUP_MODE_OPT,
     BACKUP_NOTE_OPT,
@@ -73,6 +87,18 @@ from railctl.cli._meta import (
     global_option,
     help_epilog,
     typer_option,
+)
+from railctl.cli.commands._sweep import (
+    HIGHEST_EXERCISED_CV,
+    SWEEP_CONFIRM_SECONDS,
+    SWEEP_ESTIMATE_AFTER,
+    SWEEP_PROGRESS_EVERY,
+    SWEEP_SECONDS_PER_CV,
+    SWEEP_SET_NAME,
+    estimate_seconds,
+    format_duration,
+    sweep_bound,
+    sweep_name,
 )
 from railctl.cli.commands.cv import PROG_TRACK_NOTICE, _with_guidance, parse_page
 from railctl.cli.commands.throttle import preflight
@@ -84,6 +110,7 @@ from railctl.cli.deps import (
     check_choice,
     close_after,
     close_quietly,
+    confirm,
     link_info,
     merged_output,
     open_station,
@@ -112,9 +139,46 @@ if TYPE_CHECKING:
 
 _BACKUP_META = command_meta("backup")
 
-#: The one set M9 backs up. `--all` and `--set` arrive with M10/M11; naming
-#: only what exists keeps the default filename honest.
+#: The set a backup takes without `--all`. The sweep's own word is
+#: `SWEEP_SET_NAME`, and it reaches both the document's `set` key and the
+#: default filename, so a sweep can never overwrite a curated backup.
 SET_NAME: Final[str] = "curated"
+
+#: The two sweep names the buffered envelope and the ndjson stream share, so
+#: a consumer routes on one string whichever format it asked for.
+_SWEEP_UNEXERCISED_EVENT: Final[str] = "sweep.unexercised_range"
+_SWEEP_ESTIMATE_EVENT: Final[str] = "sweep.estimate"
+
+#: What a sweep's human summary says about its own exit code. Nothing is
+#: special-cased to make a sweep exit 0: silence and "this CV is not
+#: implemented" are indistinguishable on this hardware, the design has no
+#: status for the difference, and inventing one in the exit code would make
+#: every other command's 9 mean less.
+_SWEEP_EXIT_NOTE: Final[str] = (
+    "a sweep normally exits 9: most CV numbers are not implemented in any decoder, and "
+    "this hardware cannot tell that from silence, so they are recorded as no_response - "
+    "the file is the product either way"
+)
+
+#: What passing `HIGHEST_EXERCISED_CV` does and does not mean. The claim is
+#: about this bench's EVIDENCE, not about the decoder, and what the evidence
+#: says changed on 2026-08-19: the first full sweep got an answer for every CV
+#: from 512 to 1024 through the Z21 opcode. So "never answered" is no longer
+#: true and this text no longer says it. What is still true is the part that
+#: matters - no value up there has been checked against anything, and a zero
+#: cannot be told from a CV the decoder does not implement, which is the
+#: project's founding rule applied to a number instead of a capability.
+_UNEXERCISED_REASON: Final[str] = (
+    f"CV{HIGHEST_EXERCISED_CV + 1} and up first answered on this bench on 2026-08-19, and no "
+    f"value read there has been checked against a known quantity, so it is not corroborated "
+    f"by any measurement and a zero cannot be told from a CV the decoder does not implement; "
+    f"that does not mean those CVs do not work"
+)
+
+#: How many holes the incomplete report names before it stops counting them
+#: out. Twelve fits a terminal line; the full lists live in the report's
+#: `details` and in the file, so this trims the prose and never the data.
+INCOMPLETE_LIST_MAX: Final[int] = 12
 
 #: XpressNet's short/long address boundary: 1..99 ride in one byte.
 SHORT_ADDRESS_MAX: Final[int] = 99
@@ -181,6 +245,7 @@ _YES = global_option("--yes")
 _NON_INTERACTIVE = global_option("--non-interactive")
 
 _OUT_OPT = typer_option(BACKUP_OUT_OPT)
+_ALL_OPT = typer_option(BACKUP_ALL_OPT)
 _NOTE_OPT = typer_option(BACKUP_NOTE_OPT)
 _FORCE_OPT = typer_option(BACKUP_FORCE_OPT)
 _MODE_OPT = typer_option(BACKUP_MODE_OPT)
@@ -192,6 +257,104 @@ def utc_timestamp() -> str:
     purpose: the writer is a pure function of the document, so a test that
     pins this proves two consecutive backups byte-identical."""
     return datetime.now(UTC).strftime("%Y-%m-%dT%H:%M:%SZ")
+
+
+def monotonic_seconds() -> float:
+    """The clock a sweep's progress and revised estimate are measured on.
+
+    A module-level seam for the same reason `utc_timestamp` is one: the
+    rendered duration is part of the contract a test pins, and a test cannot
+    pin a real elapsed time. Monotonic rather than wall clock - a duration
+    that goes backwards because NTP stepped the clock would report a
+    negative rate.
+    """
+    return time.monotonic()
+
+
+class _SweepReporter:
+    """A sweep's stderr progress and its one revised estimate.
+
+    Never stdout, in any format: the JSON document and the ndjson stream own
+    that stream, and a progress line in either is a parse error at the other
+    end. `progress_lines` is false for ndjson, where the stream already
+    carries one line per CV and repeating it on stderr is noise; the revised
+    estimate is reported in every format, because it is the only correction
+    to a number the operator agreed to.
+    """
+
+    def __init__(
+        self,
+        total: int,
+        *,
+        stderr: TextIO,
+        on_event: Callable[[str, dict[str, object]], None] | None = None,
+        progress_lines: bool = True,
+    ) -> None:
+        self._total = total
+        self._stderr = stderr
+        self._on_event = on_event
+        self._progress_lines = progress_lines
+        self._started = monotonic_seconds()
+        self._done = 0
+
+    def observed(self) -> None:
+        """One more CV reported. Called for every row the collection records,
+        the CV31/CV32/CV29 singletons included - they cost the same seconds
+        as any other read, and an estimate that pretended otherwise would be
+        wrong by exactly what it left out."""
+        self._done += 1
+        if self._done == SWEEP_ESTIMATE_AFTER and self._done < self._total:
+            self._revise()
+        if self._progress_lines and self._done % SWEEP_PROGRESS_EVERY == 0:
+            if self._done < self._total:
+                self._say(
+                    f"sweep: {self._done} of {self._total} CVs, "
+                    f"about {format_duration(self._remaining())} left"
+                )
+
+    def finished(self) -> None:
+        """The closing line of a sweep that ran to the end. An interrupted run
+        gets no line here: the abort's own message says where the partial
+        file went, and a "done" line above it would contradict it."""
+        if self._progress_lines:
+            elapsed = monotonic_seconds() - self._started
+            self._say(
+                f"sweep: {self._done} of {self._total} CVs read in {format_duration(elapsed)}"
+            )
+
+    def _revise(self) -> None:
+        """The up-front estimate replaced by the observed rate, once.
+
+        It never re-prompts. The operator already agreed to the sweep, and a
+        question arriving mid-run on a stream nobody is watching is a hang,
+        not a safeguard.
+        """
+        rate = self._rate()
+        remaining = estimate_seconds(self._total - self._done, rate)
+        self._say(
+            f"sweep: revised estimate after {self._done} CVs - {rate:.2f} s per CV, "
+            f"{format_duration(estimate_seconds(self._total, rate))} for all "
+            f"{self._total} CVs, about {format_duration(remaining)} left"
+        )
+        if self._on_event is not None:
+            self._on_event(
+                _SWEEP_ESTIMATE_EVENT,
+                {
+                    "observed": self._done,
+                    "total": self._total,
+                    "seconds_per_cv": round(rate, 2),
+                    "remaining_seconds": round(remaining),
+                },
+            )
+
+    def _rate(self) -> float:
+        return (monotonic_seconds() - self._started) / self._done
+
+    def _remaining(self) -> float:
+        return estimate_seconds(self._total - self._done, self._rate())
+
+    def _say(self, line: str) -> None:
+        print(line, file=self._stderr)
 
 
 def resolve_backup_mode(mode_word: str, capabilities: Capabilities) -> ProgMode:
@@ -208,7 +371,8 @@ def resolve_backup_mode(mode_word: str, capabilities: Capabilities) -> ProgMode:
         if capabilities.pom_read is False:
             raise PomReadUnsupportedError(
                 "POM reading is recorded as unavailable on this command station, and a "
-                "backup will not send 77 reads down a channel measured not to answer",
+                "backup will not send a whole set of reads down a channel measured not "
+                "to answer",
                 hint=(
                     "rerun `railctl doctor` to re-probe POM reading, or put the locomotive "
                     "on the programming track and back up with --mode service"
@@ -225,11 +389,26 @@ def reachable_bound(mode: ProgMode, capabilities: Capabilities) -> int:
 
     Curated CVs above 255 live behind the ZIMO CV31/CV32 index page, and
     selecting a page writes the selectors - the one thing a backup never
-    does - so they are out of reach unless the extended service opcodes are a
-    measured yes. POM shares the 255 bound for the same reason: its native
-    range is not the problem, the page selection is.
+    does. What gets past that is an encoding whose READ needs no selection,
+    and there are two: the extended opcodes, and the Z21 16-bit opcode, which
+    carries CV1..1024 in one field and is the FIRST thing
+    `service_read_telegram` picks when it is proven. Either one, measured
+    yes, lifts the bound.
+
+    Checking only `service_ext_cv` was a defect until 2026-08-19: a station
+    proving the Z21 opcode and nothing else recorded every curated CV above
+    255 as skipped, with the detail "extended opcodes not probed" - true
+    about the extended opcodes and false about the CV, which `cv read` would
+    have read on that same station. It stayed invisible on this bench, where
+    the doctor proves both. Found by the M11 review, because `sweep_bound`
+    and this function then disagreed about the same CV.
+
+    POM keeps the 255 bound: its native range is not the problem, the page
+    selection is.
     """
-    if mode is ProgMode.SERVICE and capabilities.service_ext_cv is True:
+    if mode is ProgMode.SERVICE and (
+        capabilities.z21_cv_opcodes is True or capabilities.service_ext_cv is True
+    ):
         return MAX_CV_EXT
     return MAX_CV_DIRECT
 
@@ -253,7 +432,7 @@ def _bound_detail(cv: int, mode: ProgMode, capabilities: Capabilities) -> str:
 class _Plan:
     """Everything decided BEFORE the station opens - a refusal here costs no port."""
 
-    __slots__ = ("address", "declared_page", "mode_word", "note", "path")
+    __slots__ = ("address", "argv", "declared_page", "mode_word", "note", "path", "set_name")
 
     def __init__(
         self,
@@ -263,12 +442,24 @@ class _Plan:
         address: int,
         path: Path | None,
         note: str | None,
+        set_name: str,
+        argv: list[str],
     ) -> None:
         self.mode_word = mode_word
         self.declared_page = declared_page
         self.address = address
         self.path = path
         self.note = note
+        #: `"curated"` or `SWEEP_SET_NAME` - one word, decided once, reaching
+        #: both the filename and the document's `set` key.
+        self.set_name = set_name
+        #: The invocation as typed, for any suggestion this run has to make
+        #: after the plan exists - the sweep's confirmation among them.
+        self.argv = argv
+
+    @property
+    def sweep(self) -> bool:
+        return self.set_name == SWEEP_SET_NAME
 
 
 def _typed_argv(
@@ -276,15 +467,23 @@ def _typed_argv(
     *,
     out: str | None,
     note: str | None,
+    sweep: bool,
+    force: bool,
     mode_word: str,
     page_token: str | None,
     typed_globals: list[str],
 ) -> list[str]:
     """The invocation as typed, rebuilt as an argv array a suggestion can
-    extend: `--address` and backup's own options first, then the global
-    flags the operator actually typed, in registration order. `None` for an
-    address not yet resolved (a refusal ahead of `require_address`) simply
-    omits the flag rather than inventing a value."""
+    extend: `--address` and backup's own options first (in the order
+    `_meta` declares them), then the global flags the operator actually
+    typed, in registration order. `None` for an address not yet resolved (a
+    refusal ahead of `require_address`) simply omits the flag rather than
+    inventing a value.
+
+    `force` is carried like every other flag because this argv is what the
+    sweep's confirmation republishes: an operator who typed `--force` did so
+    because the target file already exists, and a retry that drops the flag
+    is refused by the overwrite check instead of running."""
     argv = ["railctl", "backup"]
     if address is not None:
         argv += ["--address", str(address)]
@@ -292,6 +491,10 @@ def _typed_argv(
         argv += ["--out", out]
     if note is not None:
         argv += ["--note", note]
+    if force:
+        argv.append(BACKUP_FORCE_OPT.name)
+    if sweep:
+        argv.append(BACKUP_ALL_OPT.name)
     if mode_word != "auto":
         argv += ["--mode", mode_word]
     if page_token is not None:
@@ -306,6 +509,7 @@ def plan_backup(
     page_token: str | None,
     out: str | None,
     note: str | None,
+    sweep: bool,
     force: bool,
     typed_globals: list[str],
 ) -> _Plan:
@@ -313,34 +517,44 @@ def plan_backup(
 
     The overwrite refusal lives here on purpose: `backup_path` only resolves
     the path, and refusing AFTER the station opened would cost the operator a
-    77-read run to learn the file already existed.
+    77-read run - or a sweep's half hour - to learn the file already existed.
+    The set name is decided here for the same reason: it is what names the
+    file, so `--all` writes `loco-0003-all.json` and can never land on top of
+    a curated backup.
     """
     prefix = ["railctl", "backup"]
     check_choice("mode", mode_word, BACKUP_MODE_OPT.enum or ())
     declared_page = parse_page(page_token, argv_hint=prefix)
     address = require_address(settings, argv_hint=prefix)
-    path = backup_path(address, SET_NAME, out)
+    set_name = SWEEP_SET_NAME if sweep else SET_NAME
+    argv = _typed_argv(
+        address,
+        out=out,
+        note=note,
+        sweep=sweep,
+        force=force,
+        mode_word=mode_word,
+        page_token=page_token,
+        typed_globals=typed_globals,
+    )
+    path = backup_path(address, set_name, out)
+    # `not force` guards this branch, so `argv` cannot already carry the flag
+    # and appending it here produces one `--force`, never two.
     if path is not None and not force and path.exists():
         raise UsageProblem(
             f"{path} already exists; a backup never overwrites silently - pass --force "
             f"to replace it",
-            suggestions=[
-                [
-                    *_typed_argv(
-                        address,
-                        out=out,
-                        note=note,
-                        mode_word=mode_word,
-                        page_token=page_token,
-                        typed_globals=typed_globals,
-                    ),
-                    "--force",
-                ]
-            ],
+            suggestions=[[*argv, "--force"]],
             details={"reason": "backup_file_exists", "path": str(path)},
         )
     return _Plan(
-        mode_word=mode_word, declared_page=declared_page, address=address, path=path, note=note
+        mode_word=mode_word,
+        declared_page=declared_page,
+        address=address,
+        path=path,
+        note=note,
+        set_name=set_name,
+        argv=argv,
     )
 
 
@@ -392,12 +606,18 @@ class _Collection:
         mode: ProgMode,
         address: int,
         declared_page: CvPage | None,
+        sweep_to: int | None = None,
         on_start: Callable[[int, ProgMode], None] | None = None,
         on_cv: Callable[[CvRecord, CvResult | None], None] | None = None,
     ) -> None:
         self._station = station
         self._catalog = catalog
         self.mode = mode
+        #: The sweep's bound, or `None` for a curated run. Decided before this
+        #: object exists, because it needs measured capabilities and an
+        #: operator's agreement, and both of those happen before the reads.
+        self._sweep_to = sweep_to
+        self.sweep_range: tuple[int, int] | None = None if sweep_to is None else (1, sweep_to)
         # Service mode acts on whatever stands on the programming track; the
         # address names the FILE there, never the read target.
         self._read_address = address if mode is ProgMode.POM else None
@@ -433,33 +653,70 @@ class _Collection:
             self.page_mismatch = self._declared_page
         self.page = page
         config_29 = self._singleton(29)
-        curated = curated_cvs(self._catalog, config_29.value)
-        self.planned = tuple(curated)
-        self.speed_table_included = any(self._catalog[cv].needs_speed_table for cv in curated)
+        planned = self._planned_cvs(config_29.value)
+        self.planned = tuple(planned)
+        # For a sweep this is a fact about the RANGE, not about CV29 bit 4:
+        # the speed-table CVs are inside every bound a sweep can take, so the
+        # file carries them whether or not the decoder has the table selected.
+        self.speed_table_included = any(
+            entry.needs_speed_table
+            for entry in (self._catalog.get(cv) for cv in planned)
+            if entry is not None
+        )
         if self._on_start is not None:
-            self._on_start(len(curated), self.mode)
+            self._on_start(len(planned), self.mode)
         for result in (selector_31, selector_32, config_29):
             self._record_result(result)
-        bound = reachable_bound(self.mode, self._station.capabilities)
-        for cv in curated:
-            if cv > bound:
-                self._record(
-                    CvRecord(
-                        cv=cv,
-                        name=self.name_for(cv),
-                        status=ReadStatus.SKIPPED,
-                        detail=_bound_detail(cv, self.mode, self._station.capabilities),
-                    ),
-                    None,
-                )
-        remaining = [cv for cv in curated if cv not in self.records]
+        if self._sweep_to is None:
+            # A sweep asks only for CVs inside its own bound, so nothing is
+            # ever out of range there and `_bound_detail` has nothing to
+            # explain; the curated list is the one that can name a CV the
+            # resolved mode cannot reach.
+            bound = reachable_bound(self.mode, self._station.capabilities)
+            for cv in planned:
+                if cv > bound:
+                    self._record(
+                        CvRecord(
+                            cv=cv,
+                            name=self.name_for(cv),
+                            status=ReadStatus.SKIPPED,
+                            detail=_bound_detail(cv, self.mode, self._station.capabilities),
+                        ),
+                        None,
+                    )
+        remaining = [cv for cv in planned if cv not in self.records]
         self._batch([cv for cv in IDENTITY_CVS if cv in remaining])
         self._batch([cv for cv in remaining if cv not in IDENTITY_CVS])
 
+    def _planned_cvs(self, cv29: int) -> list[int]:
+        """Every CV this run answers for, ascending.
+
+        The whole swept range for `--all`, the curated set CV29 selects
+        otherwise. CV31 and CV32 stay IN the swept range - they are read as
+        singletons above, and the `remaining` filter is what keeps them out
+        of a batch payload, which `cv_read_many` refuses. Holding the full
+        range here is what makes `summary.requested`, the stream's `total`
+        and the rows an interrupt fills in all mean the same set.
+        """
+        if self._sweep_to is not None:
+            return list(range(1, self._sweep_to + 1))
+        return curated_cvs(self._catalog, cv29)
+
+    def name_source(self, cv: int) -> tuple[str, str]:
+        """The `name` and `source` one CV's row carries.
+
+        A sweep keeps the catalog's slug where there is one - so its file
+        diffs against a curated backup by name - and calls the rest
+        `cv0617`, marked `sweep` so `restore` can refuse to write back a
+        value nothing documents. A curated run only ever visits catalog CVs,
+        so a KeyError there is a bug, not a data question.
+        """
+        if self._sweep_to is not None:
+            return sweep_name(cv, self._catalog)
+        return self._catalog[cv].slug, SOURCE_CATALOG
+
     def name_for(self, cv: int) -> str:
-        # Every CV this command visits came out of the catalog, so the slug
-        # always exists - a KeyError here is a bug, not a data question.
-        return self._catalog[cv].slug
+        return self.name_source(cv)[0]
 
     def _singleton(self, cv: int) -> CvResult:
         """One `cv_read` whose failure ABORTS the run: without the page and
@@ -471,9 +728,10 @@ class _Collection:
             raise _with_guidance(exc, mode=self.mode) from None
 
     def _record_result(self, result: CvResult) -> None:
-        spec = CvSpec(cv=result.cv, name=self.name_for(result.cv))
+        name, source = self.name_source(result.cv)
+        spec = CvSpec(cv=result.cv, name=name)
         outcome = CvReadOutcome(spec=spec, result=result, error=None)
-        self._record(record_for(outcome), result)
+        self._record(record_for(outcome, source=source), result)
 
     def _record(self, record: CvRecord, result: CvResult | None) -> None:
         if result is not None and self.encoding is None:
@@ -484,11 +742,14 @@ class _Collection:
             self._on_cv(record, result)
 
     def _batch(self, cvs: list[int]) -> None:
-        specs = [CvSpec(cv=cv, name=self.name_for(cv)) for cv in cvs]
+        named = {cv: self.name_source(cv) for cv in cvs}
+        specs = [CvSpec(cv=cv, name=named[cv][0]) for cv in cvs]
+
+        def record(outcome: CvReadOutcome) -> None:
+            self._record(record_for(outcome, source=named[outcome.spec.cv][1]), outcome.result)
 
         def progress(update: tuple[int, int, CvReadOutcome]) -> None:
-            outcome = update[2]
-            self._record(record_for(outcome), outcome.result)
+            record(update[2])
 
         outcomes = self._station.cv_read_many(
             specs, address=self._read_address, mode=self.mode, on_progress=progress
@@ -498,7 +759,7 @@ class _Collection:
         # only returns the finished list.
         for outcome in outcomes:
             if outcome.spec.cv not in self.records:
-                self._record(record_for(outcome), outcome.result)
+                record(outcome)
 
 
 def _decoder_block(records: Mapping[int, CvRecord]) -> dict[str, object]:
@@ -516,19 +777,22 @@ def _decoder_block(records: Mapping[int, CvRecord]) -> dict[str, object]:
 
 
 def _document(
-    collection: _Collection, context: _Context, *, interrupted: bool = False
+    collection: _Collection, context: _Context, *, set_name: str, interrupted: bool = False
 ) -> BackupDocument:
     records = dict(collection.records)
     if interrupted:
         # The rows the interrupt cut off: `skipped` with the not-attempted
         # detail, so the partial file still answers for every planned CV and
-        # `summary.requested` keeps meaning "the whole curated set".
+        # `summary.requested` keeps meaning "the whole set that was planned" -
+        # the curated list, or the swept range.
         for cv in collection.planned or ():
             if cv not in records:
+                name, source = collection.name_source(cv)
                 records[cv] = CvRecord(
                     cv=cv,
-                    name=collection.name_for(cv),
+                    name=name,
                     status=ReadStatus.SKIPPED,
+                    source=source,
                     detail=NOT_ATTEMPTED_DETAIL,
                 )
     kind = "short" if context.address <= SHORT_ADDRESS_MAX else "long"
@@ -538,12 +802,12 @@ def _document(
         note=context.note,
         loco={"address": context.address, "kind": kind},
         catalog={"family": CATALOG_FAMILY, "schema": CATALOG_SCHEMA},
-        set_name=SET_NAME,
+        set_name=set_name,
         mode=collection.mode.value,
         cv_encoding=collection.encoding,
         page=collection.page or DEFAULT_PAGE,
         speed_table_included=collection.speed_table_included,
-        sweep_range=None,
+        sweep_range=collection.sweep_range,
         link=context.link,
         capabilities=context.capabilities,
         decoder=_decoder_block(records),
@@ -561,17 +825,28 @@ class _BackupRun:
         plan: _Plan,
         catalog: Mapping[int, CatalogEntry],
         *,
+        settings: Settings,
         on_start: Callable[[int, ProgMode], None] | None = None,
         on_cv: Callable[[CvRecord, CvResult | None], None] | None = None,
+        on_event: Callable[[str, dict[str, object]], None] | None = None,
     ) -> None:
         self.plan = plan
         self._catalog = catalog
+        self._settings = settings
         self._on_start = on_start
         self._on_cv = on_cv
+        #: How this run publishes a named event AS IT HAPPENS - the ndjson
+        #: stream's `event` line. The buffered formats have no such channel,
+        #: so what they must carry is stashed for the envelope instead.
+        self._on_event = on_event
+        self._reporter: _SweepReporter | None = None
         self.collection: _Collection | None = None
         self.document: BackupDocument | None = None
         self.text: str | None = None
         self.written: Path | None = None
+        #: The `sweep.unexercised_range` warning's message and details, for a
+        #: buffered envelope to publish after the run.
+        self.unexercised: tuple[str, dict[str, object]] | None = None
 
     def execute(self, station: Station, output: OutputContext) -> None:
         plan = self.plan
@@ -583,6 +858,7 @@ class _BackupRun:
             preflight(station, speed=None, action="a main-track (POM) CV backup")
         else:
             print(PROG_TRACK_NOTICE, file=output.stderr)
+        sweep_to = self._plan_sweep(station, output, resolved) if plan.sweep else None
         context = _Context(station, note=plan.note, address=plan.address)
         collection = _Collection(
             station,
@@ -590,19 +866,97 @@ class _BackupRun:
             mode=resolved,
             address=plan.address,
             declared_page=plan.declared_page,
+            sweep_to=sweep_to,
             on_start=self._on_start,
-            on_cv=self._on_cv,
+            on_cv=self._cv_callback(),
         )
         self.collection = collection
         try:
             collection.collect()
         except KeyboardInterrupt:
             self._abort(context)
-        self.document = _document(collection, context)
+        if self._reporter is not None:
+            self._reporter.finished()
+        self.document = _document(collection, context, set_name=plan.set_name)
         self.text = write_backup(self.document)
         if plan.path is not None:
             write_backup_to(self.document, plan.path)
             self.written = plan.path
+
+    def _plan_sweep(self, station: Station, output: OutputContext, mode: ProgMode) -> int:
+        """The bound, the warning and the question - in that order, and all
+        three before the first read.
+
+        None of it can happen earlier than this. The bound comes from
+        MEASURED capabilities, and those are only known once the port is
+        open, so a sweep planned at the desk would be a guess about how many
+        CVs to read. The warning goes out ahead of the question on purpose:
+        an operator agreeing to half an hour of reads should already know
+        which part of the range nothing has ever corroborated.
+        """
+        bound = sweep_bound(mode, station.capabilities)
+        if bound > HIGHEST_EXERCISED_CV:
+            self._warn_unexercised(bound, output)
+        self._confirm_sweep(bound, output)
+        self._reporter = _SweepReporter(
+            bound,
+            stderr=output.stderr,
+            on_event=self._on_event,
+            # The ndjson stream already carries one line per CV on stdout.
+            progress_lines=output.fmt != "ndjson",
+        )
+        return bound
+
+    def _warn_unexercised(self, bound: int, output: OutputContext) -> None:
+        """Said ONCE, on every channel this run has, before the reads start."""
+        details: dict[str, object] = {
+            "from": HIGHEST_EXERCISED_CV + 1,
+            "to": bound,
+            "reason": _UNEXERCISED_REASON,
+        }
+        message = (
+            f"the sweep reaches CV{bound}, past CV{HIGHEST_EXERCISED_CV}: {_UNEXERCISED_REASON}"
+        )
+        self.unexercised = (message, details)
+        print(f"sweep: {message}", file=output.stderr)
+        if self._on_event is not None:
+            self._on_event(_SWEEP_UNEXERCISED_EVENT, dict(details))
+
+    def _confirm_sweep(self, bound: int, output: OutputContext) -> None:
+        """Ask before a long sweep (design L6). `confirm` returns at once with
+        `--yes`, and raises rather than blocking when stdin is not a
+        terminal, so this never hangs a scripted run."""
+        seconds = estimate_seconds(bound)
+        if seconds <= SWEEP_CONFIRM_SECONDS:
+            return
+        confirm(
+            f"sweep {bound} CVs (CV1..CV{bound}) off the decoder - about "
+            f"{format_duration(seconds)} at the measured {SWEEP_SECONDS_PER_CV} s per CV "
+            f"(docs/probe-results.md, 2026-08-19). Nothing is written to the decoder, and "
+            f"the run normally ends at exit 9 because most CV numbers answer nothing. "
+            f"Proceed",
+            settings=self._settings,
+            stdin=sys.stdin,
+            stderr=output.stderr,
+            retry_argv=self.plan.argv,
+        )
+
+    def _cv_callback(self) -> Callable[[CvRecord, CvResult | None], None] | None:
+        """The collection's one per-row callback, with the sweep's counter
+        folded in behind the format's own: the ndjson `cv` line is written
+        first, so a revised estimate that follows the tenth CV appears after
+        it rather than in the middle of it."""
+        reporter = self._reporter
+        inner = self._on_cv
+        if reporter is None:
+            return inner
+
+        def report(record: CvRecord, result: CvResult | None) -> None:
+            if inner is not None:
+                inner(record, result)
+            reporter.observed()
+
+        return report
 
     def _abort(self, context: _Context) -> NoReturn:
         """Ctrl-C: write what was measured, then exit 9 as `aborted`.
@@ -620,7 +974,7 @@ class _BackupRun:
             raise AbortedError(
                 "interrupted; the target was stdout (--out -), so no partial file was written"
             ) from None
-        partial = _document(collection, context, interrupted=True)
+        partial = _document(collection, context, set_name=self.plan.set_name, interrupted=True)
         # Assigned BEFORE writing, so the ndjson `finally` reads its counts
         # and `complete` off the SAME document the file was written from -
         # two channels describing one run must not disagree about it.
@@ -659,6 +1013,8 @@ def build_backup(document: BackupDocument, *, path: Path | None, text: str) -> C
         result.say(_row_line(record))
     completeness = "yes" if summary["complete"] else "no"
     result.say(f"{summary['ok']} of {summary['requested']} CVs read; complete: {completeness}")
+    if document.set_name == SWEEP_SET_NAME:
+        result.say(_SWEEP_EXIT_NOTE)
     result.say(f"written to {path}")
     return result
 
@@ -678,7 +1034,15 @@ def incomplete_report(
         (r for r in document.cvs if r.status in (ReadStatus.NO_RESPONSE, ReadStatus.ERROR)),
         key=lambda r: r.cv,
     )
-    listed = ", ".join(f"CV{r.cv} ({r.status.value})" for r in non_ok)
+    # Capped, because `--all` changed the size of this list: a curated run has
+    # a handful of holes and naming them all is the report, while a 1024 CV
+    # sweep has hundreds - most CV numbers are not implemented in any decoder -
+    # and inlining those is a multi-kilobyte line on stderr and inside the JSON
+    # envelope. Nothing is lost by capping: `details` below still carries every
+    # number, machine-readable, and so does the file.
+    listed = ", ".join(f"CV{r.cv} ({r.status.value})" for r in non_ok[:INCOMPLETE_LIST_MAX])
+    if len(non_ok) > INCOMPLETE_LIST_MAX:
+        listed += f", and {len(non_ok) - INCOMPLETE_LIST_MAX} more"
     message = (
         f"backup incomplete: {len(non_ok)} of {summary['requested']} CVs produced no "
         f"value - {listed}"
@@ -727,6 +1091,7 @@ def _work(
     page: str | None,
     out: str | None,
     note: str | None,
+    sweep: bool,
     force: bool,
     typed_globals: list[str],
 ) -> CommandResult:
@@ -736,6 +1101,7 @@ def _work(
         page_token=page,
         out=out,
         note=note,
+        sweep=sweep,
         force=force,
         typed_globals=typed_globals,
     )
@@ -743,7 +1109,7 @@ def _work(
     events = StationEventLog()
     station = open_station(settings, capabilities_path=capabilities_path(), on_event=events)
     try:
-        backup_run = _BackupRun(plan, catalog)
+        backup_run = _BackupRun(plan, catalog, settings=settings)
         backup_run.execute(station, output)
         outcome = build_backup(backup_run.document, path=plan.path, text=backup_run.text)
         collection = backup_run.collection
@@ -751,6 +1117,9 @@ def _work(
             outcome.warn(
                 _PAGE_MISMATCH_EVENT, _PAGE_MISMATCH_MESSAGE, **_mismatch_details(collection)
             )
+        if backup_run.unexercised is not None:
+            message, details = backup_run.unexercised
+            outcome.warn(_SWEEP_UNEXERCISED_EVENT, message, **details)
         events.attach_to(outcome)
         outcome.link = link_info(station, settings)
         outcome.station = station_info(station)
@@ -828,6 +1197,8 @@ def _refuse_stdout_stream(
     settings: Settings,
     *,
     note: str | None,
+    sweep: bool,
+    force: bool,
     mode_word: str,
     page_token: str | None,
     typed_globals: list[str],
@@ -842,6 +1213,8 @@ def _refuse_stdout_stream(
         address,
         out=None,
         note=note,
+        sweep=sweep,
+        force=force,
         mode_word=mode_word,
         page_token=page_token,
         typed_globals=typed_globals,
@@ -850,6 +1223,8 @@ def _refuse_stdout_stream(
         address,
         out=STDOUT_TARGET,
         note=note,
+        sweep=sweep,
+        force=force,
         mode_word=mode_word,
         page_token=page_token,
         typed_globals=_json_format_globals(typed_globals),
@@ -871,6 +1246,7 @@ def _run_ndjson(
     page: str | None,
     out: str | None,
     note: str | None,
+    sweep: bool,
     force: bool,
     typed_globals: list[str],
 ) -> NoReturn:
@@ -918,6 +1294,8 @@ def _run_ndjson(
             _refuse_stdout_stream(
                 settings,
                 note=note,
+                sweep=sweep,
+                force=force,
                 mode_word=mode,
                 page_token=page,
                 typed_globals=typed_globals,
@@ -928,11 +1306,21 @@ def _run_ndjson(
             page_token=page,
             out=out,
             note=note,
+            sweep=sweep,
             force=force,
             typed_globals=typed_globals,
         )
         catalog = load_catalog()
-        backup_run = _BackupRun(plan, catalog, on_start=on_start, on_cv=on_cv)
+        backup_run = _BackupRun(
+            plan,
+            catalog,
+            settings=settings,
+            on_start=on_start,
+            on_cv=on_cv,
+            # The sweep's own events ride the same `event` line the station's
+            # do - one shape for a consumer to route on.
+            on_event=on_event,
+        )
         station = open_station(settings, capabilities_path=capabilities_path(), on_event=on_event)
         backup_run.execute(station, output)
         collection = backup_run.collection
@@ -981,6 +1369,7 @@ def register(app: typer.Typer) -> None:
         out: str | None = _OUT_OPT,
         note: str | None = _NOTE_OPT,
         force: bool = _FORCE_OPT,
+        sweep: bool = _ALL_OPT,
         mode: str = _MODE_OPT,
         page: str | None = _PAGE_OPT,
         target: str | None = _TARGET,
@@ -1032,6 +1421,7 @@ def register(app: typer.Typer) -> None:
                 page=page,
                 out=out,
                 note=note,
+                sweep=sweep,
                 force=force,
                 typed_globals=typed_globals,
             )
@@ -1045,6 +1435,7 @@ def register(app: typer.Typer) -> None:
                 page=page,
                 out=out,
                 note=note,
+                sweep=sweep,
                 force=force,
                 typed_globals=typed_globals,
             ),

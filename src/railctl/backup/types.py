@@ -23,9 +23,12 @@ from typing import Final
 
 BACKUP_SCHEMA: Final[str] = "railctl/backup/v1"
 
-#: `source` for a CV the curated catalog names. The `--all` sweep's "sweep"
-#: source arrives with M11; naming only what exists keeps this module honest.
+#: `source` for a CV the curated catalog names.
 SOURCE_CATALOG: Final[str] = "catalog"
+
+#: `source` for a CV no catalog entry names - only an `--all` sweep produces
+#: these rows, and `restore` refuses to write them without `--include-sweep`.
+SOURCE_SWEEP: Final[str] = "sweep"
 
 
 class ReadStatus(enum.StrEnum):

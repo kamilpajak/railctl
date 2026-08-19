@@ -36,6 +36,7 @@ from railctl.backup.plan import (
 from railctl.backup.types import (
     BACKUP_SCHEMA,
     SOURCE_CATALOG,
+    SOURCE_SWEEP,
     SUMMARY_KEYS,
     BackupDocument,
     CvRecord,
@@ -50,6 +51,7 @@ __all__ = [
     "CV_MIN",
     "NOT_ATTEMPTED_DETAIL",
     "SOURCE_CATALOG",
+    "SOURCE_SWEEP",
     "STAGES",
     "STAGE_C_ORDER",
     "STDOUT_TARGET",

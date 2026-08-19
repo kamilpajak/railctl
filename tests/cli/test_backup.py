@@ -12,6 +12,7 @@ collection path the real station never takes.
 
 from __future__ import annotations
 
+import itertools
 import json
 from pathlib import Path
 
@@ -22,7 +23,12 @@ import railctl.cli.commands.backup as backup_module
 from railctl.backup import BACKUP_SCHEMA, read_backup
 from railctl.catalog import curated_cvs, load_catalog
 from railctl.cli._meta import command_meta
-from railctl.cli.commands.backup import SET_NAME
+from railctl.cli.commands._sweep import (
+    HIGHEST_EXERCISED_CV,
+    SWEEP_ESTIMATE_AFTER,
+    SWEEP_PROGRESS_EVERY,
+)
+from railctl.cli.commands.backup import INCOMPLETE_LIST_MAX, SET_NAME
 from railctl.cli.commands.cv import PROG_TRACK_NOTICE, SILENCE_GUIDANCE
 from railctl.cli.main import app
 from railctl.errors import (
@@ -42,7 +48,7 @@ from railctl.station import (
     ProgMode,
     Station,
 )
-from railctl.xbus.cv import MAX_CV_DIRECT
+from railctl.xbus.cv import MAX_CV_DIRECT, MAX_CV_EXT
 from railctl.xbus.replies import StationStatus, StationVersion
 
 runner = CliRunner()
@@ -228,11 +234,12 @@ def _freeze_clock(monkeypatch) -> None:
 
 def test_the_backup_row_publishes_its_safety_facts():
     meta = command_meta("backup")
-    # A backup never writes the decoder - the CV31/CV32 selectors included -
-    # and never confirms; an agent reads exactly these two fields to decide
-    # whether it is safe to run unattended.
+    # A backup never writes the decoder - the CV31/CV32 selectors included.
+    # It does confirm: `--all` is always over the 60 s gate, so an agent that
+    # reads `confirms: false` here and runs a sweep unattended gets exit 2
+    # instead of a file. These are the two fields it reads to decide.
     assert meta.mutates is False
-    assert meta.confirms is False
+    assert meta.confirms is True
     assert meta.schema == BACKUP_SCHEMA
     # `cv read`'s whole set: a backup is a batch of CV reads through the same
     # station paths, and 9/16 - the codes the brief adds - were already in it.
@@ -278,6 +285,35 @@ def test_backup_json_result_is_the_file_document_plus_the_path(monkeypatch, tmp_
     assert summary["complete"] is True
     assert "interrupted" not in body
     assert PROG_TRACK_NOTICE in result.stderr
+
+
+def test_a_station_proving_only_the_z21_opcodes_still_reads_the_curated_cvs_above_255(
+    monkeypatch, tmp_path
+):
+    """The Z21 opcode lifts the curated bound, not only the extended one.
+
+    `service_read_telegram` picks the Z21 16-bit opcode FIRST when it is
+    proven, and it carries CV1..1024 in one field with no page selection - the
+    only thing the bound exists to avoid. Until 2026-08-19 `reachable_bound`
+    looked at `service_ext_cv` alone, so a station proving the Z21 opcode and
+    nothing else recorded all 14 curated CVs above 255 as skipped, with a
+    detail about extended opcodes that said nothing about the CV and was
+    wrong about whether it could be read. It stayed invisible on this bench,
+    where the doctor proves both encodings.
+    """
+    out = tmp_path / "z21.json"
+    z21_only = Capabilities(
+        link_identity="serial:7010A0001194:3", pom_read=False, z21_cv_opcodes=True
+    )
+    _install(monkeypatch, FakeBackupStation(capabilities=z21_only))
+
+    result = runner.invoke(app, ["backup", "--address", "3", "--out", str(out), "--format", "json"])
+
+    assert result.exit_code == 0, result.stderr
+    rows = {row["cv"]: row for row in json.loads(out.read_text(encoding="utf-8"))["cvs"]}
+    assert OVER_BOUND, "the curated set must contain CVs above 255 for this to mean anything"
+    assert [rows[cv]["status"] for cv in OVER_BOUND] == ["ok"] * len(OVER_BOUND)
+    assert json.loads(out.read_text(encoding="utf-8"))["summary"]["skipped"] == 0
 
 
 def test_two_backups_of_an_unchanged_decoder_are_byte_identical(monkeypatch, tmp_path):
@@ -771,6 +807,41 @@ def test_backup_an_unreadable_cv_is_a_no_response_hole_and_exit_9(monkeypatch, t
     assert "decoder_type" not in on_disk["decoder"]
     assert "serial_bytes" not in on_disk["decoder"]
     assert on_disk["decoder"]["manufacturer_id"] == DEFAULT_VALUE
+
+
+def test_the_incomplete_report_stops_naming_holes_but_never_stops_counting_them(
+    monkeypatch, tmp_path
+):
+    """Thirteen holes are reported as twelve names and "and 1 more".
+
+    A curated run has a handful of holes and naming them all IS the report.
+    `--all` changed the size of that list: most CV numbers are not implemented
+    in any decoder, so a 1024 CV sweep produces hundreds of them, and inlining
+    those puts a multi-kilobyte line on stderr and inside the JSON envelope.
+    The numbers themselves are not lost - `details` carries every one, and so
+    does the file - which is why the cap is on the prose alone.
+    """
+    out = tmp_path / "many.json"
+    silent = CURATED[: INCOMPLETE_LIST_MAX + 1]
+    _install(
+        monkeypatch,
+        FakeBackupStation(
+            read_errors={
+                cv: DecoderNotRespondingError("no answer after 3 attempts", cv=cv) for cv in silent
+            }
+        ),
+    )
+
+    result = runner.invoke(app, ["backup", "--address", "3", "--out", str(out), "--format", "json"])
+
+    assert result.exit_code == 9, result.stderr
+    warning = next(
+        w for w in json.loads(result.stdout)["warnings"] if w["name"] == "backup.incomplete"
+    )
+    named = [cv for cv in silent if f"CV{cv} (" in warning["message"]]
+    assert len(named) == INCOMPLETE_LIST_MAX
+    assert "and 1 more" in warning["message"]
+    assert warning["details"]["no_response"] == sorted(silent)
 
 
 def test_backup_a_station_error_row_also_makes_the_file_incomplete(monkeypatch, tmp_path):
@@ -1296,3 +1367,346 @@ def test_backup_reads_selectors_and_cv29_as_singletons_then_identity_then_the_re
     # Service mode reads carry no locomotive address - the address names the
     # file, not the read target.
     assert fake.batch_calls[0]["address"] is None
+
+
+# -- M11: the --all sweep ------------------------------------------------------
+#
+# The fake answers every CV, so a sweep over it is complete and exits 0. That is
+# not what the bench does - most CV numbers answer nothing and the run exits 9,
+# which the holes tests above already pin - but it is what makes the range, the
+# names, the sources and the determinism assertable without a decoder.
+
+
+def _sweep_argv(*extra: str, out: str | None = None) -> list[str]:
+    argv = ["backup", "--address", "3", "--all"]
+    if out is not None:
+        argv += ["--out", out]
+    return [*argv, *extra]
+
+
+def _asked_cvs(fake: FakeBackupStation) -> list[int]:
+    return sorted(
+        [call["cv"] for call in fake.singleton_calls]
+        + [spec.cv for call in fake.batch_calls for spec in call["specs"]]
+    )
+
+
+def _fake_clock(monkeypatch, step: float = 10.0) -> None:
+    """A monotonic clock that advances `step` seconds per reading.
+
+    The reporter reads it once when it is built and once per line it writes,
+    so the tenth CV is the second reading: 10 s for 10 CVs, exactly 1.00 s
+    per CV, and the revised estimate is a literal a test can pin.
+    """
+    ticks = itertools.count(0.0, step)
+    monkeypatch.setattr(backup_module, "monotonic_seconds", lambda: next(ticks))
+
+
+def test_backup_all_reads_every_cv_inside_the_bound_and_no_more(monkeypatch, tmp_path):
+    # SERVICE_CAPS proves the direct encoding alone, so the sweep stops at 255.
+    fake = _install(monkeypatch, FakeBackupStation(capabilities=SERVICE_CAPS))
+    out = tmp_path / "sweep.json"
+    result = runner.invoke(app, _sweep_argv("--format", "json", "--yes", out=str(out)))
+    assert result.exit_code == 0, result.stderr
+    assert _asked_cvs(fake) == list(range(1, MAX_CV_DIRECT + 1))
+    # The selectors are singletons before the plan; `cv_read_many` refuses them
+    # in a payload, so they must never reach one.
+    for call in fake.batch_calls:
+        assert all(spec.cv not in (31, 32) for spec in call["specs"])
+    body = json.loads(result.stdout)["result"]
+    assert body["summary"]["requested"] == MAX_CV_DIRECT
+    assert body["summary"]["ok"] == MAX_CV_DIRECT
+
+
+def test_backup_all_records_the_set_the_range_and_both_sources(monkeypatch, tmp_path):
+    # EXT_CAPS proves the extended encoding, so the sweep reaches 1024 and
+    # covers CV617 - a number no catalog entry names.
+    _install(monkeypatch, FakeBackupStation(capabilities=EXT_CAPS))
+    out = tmp_path / "wide.json"
+    result = runner.invoke(app, _sweep_argv("--format", "json", "--yes", out=str(out)))
+    assert result.exit_code == 0, result.stderr
+    on_disk = json.loads(out.read_text(encoding="utf-8"))
+    assert on_disk["set"] == "all"
+    assert on_disk["sweep_range"] == [1, MAX_CV_EXT]
+    rows = {row["cv"]: row for row in on_disk["cvs"]}
+    assert rows[8]["name"] == "manufacturer_id"
+    assert rows[8]["source"] == "catalog"
+    assert rows[617]["name"] == "cv0617"
+    assert rows[617]["source"] == "sweep"
+    assert rows[1024]["name"] == "cv1024"
+    # A fact about the RANGE, not about CV29 bit 4: the sweep covers CV67..94
+    # whatever the speed-table bit says, and CV29 answered 0 here.
+    assert on_disk["speed_table_included"] is True
+    # The strict reader takes the file as written.
+    assert read_backup(out).sweep_range == (1, MAX_CV_EXT)
+
+
+def test_backup_all_writes_its_own_default_file_beside_a_curated_one(monkeypatch, tmp_path):
+    backups = tmp_path / "home" / "railctl-backups"
+    _install(monkeypatch, FakeBackupStation(capabilities=SERVICE_CAPS))
+    curated = runner.invoke(app, ["backup", "--address", "3", "--format", "json"])
+    assert curated.exit_code == 0, curated.stderr
+    _install(monkeypatch, FakeBackupStation(capabilities=SERVICE_CAPS))
+    swept = runner.invoke(app, _sweep_argv("--format", "json", "--yes"))
+    assert swept.exit_code == 0, swept.stderr
+    assert json.loads(swept.stdout)["result"]["path"] == str(backups / "loco-0003-all.json")
+    # Two files, not one overwritten: a sweep can never clobber a curated backup.
+    assert sorted(p.name for p in backups.iterdir()) == [
+        "loco-0003-all.json",
+        "loco-0003-curated.json",
+    ]
+
+
+def test_two_sweeps_of_an_unchanged_decoder_are_byte_identical(monkeypatch, tmp_path):
+    _freeze_clock(monkeypatch)
+    _install(monkeypatch, FakeBackupStation(capabilities=SERVICE_CAPS))
+    out = tmp_path / "twice-all.json"
+    first = runner.invoke(app, _sweep_argv("--yes", out=str(out)))
+    assert first.exit_code == 0, first.stderr
+    first_bytes = out.read_bytes()
+    _install(monkeypatch, FakeBackupStation(capabilities=SERVICE_CAPS))
+    second = runner.invoke(app, _sweep_argv("--yes", "--force", out=str(out)))
+    assert second.exit_code == 0, second.stderr
+    assert out.read_bytes() == first_bytes
+
+
+# -- the confirmation ----------------------------------------------------------
+
+
+def test_a_sweep_past_the_minute_is_refused_on_a_non_interactive_stdin(monkeypatch, tmp_path):
+    fake = _install(monkeypatch, FakeBackupStation(capabilities=SERVICE_CAPS))
+    out = tmp_path / "asked.json"
+    result = runner.invoke(app, _sweep_argv("--format", "json", out=str(out)))
+    assert result.exit_code == 2, result.stderr
+    envelope = _stderr_envelope(result)
+    assert envelope["code"] == "confirmation_required"
+    # The question names the count and the duration a person is agreeing to.
+    assert f"{MAX_CV_DIRECT} CV" in envelope["message"]
+    assert "10 min" in envelope["message"]
+    # The retry is the whole invocation with --yes appended, and it runs.
+    assert envelope["suggestions"] == [
+        [
+            "railctl",
+            "backup",
+            "--address",
+            "3",
+            "--out",
+            str(out),
+            "--all",
+            "--format",
+            "json",
+            "--yes",
+        ]
+    ]
+    # Refused before a single CV was read, and nothing was written.
+    assert fake.singleton_calls == []
+    assert not out.exists()
+
+
+def test_the_refused_sweep_keeps_the_force_the_operator_typed(monkeypatch, tmp_path):
+    # `--force` is why the run got past the overwrite check at all, so a retry
+    # that drops it is refused by that same check instead of sweeping. The
+    # published suggestion has to be a command that RUNS.
+    _install(monkeypatch, FakeBackupStation(capabilities=SERVICE_CAPS))
+    out = tmp_path / "already-there.json"
+    out.write_text("{}", encoding="utf-8")
+    result = runner.invoke(app, _sweep_argv("--force", "--format", "json", out=str(out)))
+    assert result.exit_code == 2, result.stderr
+    envelope = _stderr_envelope(result)
+    assert envelope["code"] == "confirmation_required"
+    suggestion = envelope["suggestions"][0]
+    assert suggestion == [
+        "railctl",
+        "backup",
+        "--address",
+        "3",
+        "--out",
+        str(out),
+        "--force",
+        "--all",
+        "--format",
+        "json",
+        "--yes",
+    ]
+    # Replayed verbatim it sweeps and replaces the file, rather than exiting 2
+    # with `backup_file_exists`.
+    _install(monkeypatch, FakeBackupStation(capabilities=SERVICE_CAPS))
+    replay = runner.invoke(app, suggestion[1:])
+    assert replay.exit_code == 0, replay.stderr
+    assert json.loads(out.read_text(encoding="utf-8"))["set"] == "all"
+
+
+def test_a_sweep_past_the_minute_runs_with_yes(monkeypatch, tmp_path):
+    _install(monkeypatch, FakeBackupStation(capabilities=SERVICE_CAPS))
+    out = tmp_path / "agreed.json"
+    result = runner.invoke(app, _sweep_argv("--format", "json", "--yes", out=str(out)))
+    assert result.exit_code == 0, result.stderr
+    assert out.exists()
+
+
+def test_a_sweep_under_the_minute_never_asks(monkeypatch, tmp_path):
+    # 20 CVs at the measured 2.4 s is 48 s - under the threshold, so no
+    # question is owed and a non-interactive stdin is no obstacle.
+    monkeypatch.setattr(backup_module, "sweep_bound", lambda mode, capabilities: 20)
+    fake = _install(monkeypatch, FakeBackupStation(capabilities=SERVICE_CAPS))
+    out = tmp_path / "short.json"
+    result = runner.invoke(app, _sweep_argv("--format", "json", out=str(out)))
+    assert result.exit_code == 0, result.stderr
+    # The selectors and CV29 are singletons the run order reads whatever the
+    # bound is - a real bound is 255 or 1024 and always contains them.
+    assert _asked_cvs(fake) == sorted({*range(1, 21), 29, 31, 32})
+    assert json.loads(out.read_text(encoding="utf-8"))["sweep_range"] == [1, 20]
+
+
+# -- the revised estimate and the progress lines -------------------------------
+
+
+def test_the_revised_estimate_lands_on_stderr_after_exactly_ten_cvs(monkeypatch, tmp_path):
+    _fake_clock(monkeypatch)
+    _install(monkeypatch, FakeBackupStation(capabilities=SERVICE_CAPS))
+    out = tmp_path / "revised.json"
+    result = runner.invoke(app, _sweep_argv("--yes", out=str(out)))
+    assert result.exit_code == 0, result.stderr
+    revisions = [line for line in result.stderr.splitlines() if "revised estimate" in line]
+    # Once, never again: the operator already agreed, and a second question
+    # mid-run on a non-interactive stream is a hang.
+    assert len(revisions) == 1
+    assert revisions[0] == (
+        f"sweep: revised estimate after {SWEEP_ESTIMATE_AFTER} CVs - 1.00 s per CV, "
+        f"4 min for all {MAX_CV_DIRECT} CVs, about 4 min left"
+    )
+
+
+def test_the_sweep_reports_progress_on_stderr_and_never_on_stdout(monkeypatch, tmp_path):
+    _install(monkeypatch, FakeBackupStation(capabilities=SERVICE_CAPS))
+    out = tmp_path / "progress.json"
+    result = runner.invoke(app, _sweep_argv("--format", "json", "--yes", out=str(out)))
+    assert result.exit_code == 0, result.stderr
+    progress = [line for line in result.stderr.splitlines() if line.startswith("sweep: ")]
+    assert f"sweep: {SWEEP_PROGRESS_EVERY} of {MAX_CV_DIRECT} CVs" in progress[1]
+    # One line per 32 CVs plus the closing one, and the closing one is last.
+    assert progress[-1].startswith(f"sweep: {MAX_CV_DIRECT} of {MAX_CV_DIRECT} CVs read in ")
+    # stdout in json mode holds exactly one JSON value - nothing from the
+    # progress path leaked into it.
+    payload = json.loads(result.stdout)
+    assert payload["result"]["set"] == "all"
+    assert "sweep:" not in result.stdout
+
+
+def test_the_ndjson_sweep_carries_the_estimate_as_an_event_and_no_progress_lines(
+    monkeypatch, tmp_path
+):
+    _fake_clock(monkeypatch)
+    _install(monkeypatch, FakeBackupStation(capabilities=SERVICE_CAPS))
+    out = tmp_path / "streamed-sweep.json"
+    result = runner.invoke(app, _sweep_argv("--format", "ndjson", "--yes", out=str(out)))
+    assert result.exit_code == 0, result.stderr
+    lines = _ndjson_lines(result.stdout)
+    # The extra event lines do not break the stream's two invariants.
+    assert [line["sequence"] for line in lines] == list(range(len(lines)))
+    assert lines[-1]["type"] == "summary"
+    assert lines[0]["total"] == MAX_CV_DIRECT
+    estimate = next(line for line in lines if line.get("name") == "sweep.estimate")
+    assert estimate["type"] == "event"
+    assert estimate["details"] == {
+        "observed": SWEEP_ESTIMATE_AFTER,
+        "total": MAX_CV_DIRECT,
+        "seconds_per_cv": 1.0,
+        "remaining_seconds": 245,
+    }
+    # The stream already carries one line per CV on stdout; repeating that on
+    # stderr would be noise. The estimate itself still goes to stderr.
+    assert "revised estimate" in result.stderr
+    assert f"of {MAX_CV_DIRECT} CVs, about" not in result.stderr
+    assert "CVs read in" not in result.stderr
+
+
+# -- the unexercised range -----------------------------------------------------
+
+
+def test_the_unexercised_range_is_named_once_when_the_sweep_passes_cv511(monkeypatch, tmp_path):
+    _install(monkeypatch, FakeBackupStation(capabilities=EXT_CAPS))
+    out = tmp_path / "unexercised.json"
+    result = runner.invoke(app, _sweep_argv("--format", "json", "--yes", out=str(out)))
+    assert result.exit_code == 0, result.stderr
+    warning = next(
+        w for w in json.loads(result.stdout)["warnings"] if w["name"] == "sweep.unexercised_range"
+    )
+    assert warning["details"]["from"] == HIGHEST_EXERCISED_CV + 1
+    assert warning["details"]["to"] == MAX_CV_EXT
+    # The claim is about the evidence, not about the hardware.
+    assert "not corroborated" in warning["details"]["reason"]
+    assert "does not mean those CVs do not work" in warning["details"]["reason"]
+    said = [line for line in result.stderr.splitlines() if "not corroborated" in line]
+    assert len(said) == 1
+
+
+def test_the_unexercised_range_is_silent_when_the_sweep_stops_at_255(monkeypatch, tmp_path):
+    _install(monkeypatch, FakeBackupStation(capabilities=SERVICE_CAPS))
+    out = tmp_path / "inside.json"
+    result = runner.invoke(app, _sweep_argv("--format", "json", "--yes", out=str(out)))
+    assert result.exit_code == 0, result.stderr
+    names = [w["name"] for w in json.loads(result.stdout)["warnings"]]
+    assert "sweep.unexercised_range" not in names
+    assert "not corroborated" not in result.stderr
+
+
+def test_the_unexercised_range_rides_the_ndjson_stream_as_an_event(monkeypatch, tmp_path):
+    _install(monkeypatch, FakeBackupStation(capabilities=EXT_CAPS))
+    out = tmp_path / "unexercised-stream.json"
+    result = runner.invoke(app, _sweep_argv("--format", "ndjson", "--yes", out=str(out)))
+    assert result.exit_code == 0, result.stderr
+    lines = _ndjson_lines(result.stdout)
+    assert [line["sequence"] for line in lines] == list(range(len(lines)))
+    event = next(line for line in lines if line.get("name") == "sweep.unexercised_range")
+    assert event["details"]["from"] == HIGHEST_EXERCISED_CV + 1
+    # Before the reads start: no CV line precedes it.
+    assert event["sequence"] < min(line["sequence"] for line in lines if line["type"] == "cv")
+
+
+# -- the exit code and the human summary ---------------------------------------
+
+
+def test_a_sweep_with_silent_cvs_exits_9_like_any_other_hole(monkeypatch, tmp_path):
+    # The bench case: most CV numbers are not implemented in any decoder, and
+    # this hardware cannot tell that from silence, so the sweep ends at 9 and
+    # the file is still the product.
+    silent = {cv: DecoderNotRespondingError("no answer after 3 attempts", cv=cv) for cv in (60, 61)}
+    _install(monkeypatch, FakeBackupStation(capabilities=SERVICE_CAPS, read_errors=silent))
+    out = tmp_path / "holes-all.json"
+    result = runner.invoke(app, _sweep_argv("--yes", out=str(out)))
+    assert result.exit_code == 9, result.stderr
+    assert "a sweep normally exits 9" in result.stdout
+    assert "the file is the product either way" in result.stdout
+    assert read_backup(out).summary["no_response"] == 2
+
+
+def test_the_curated_human_summary_says_nothing_about_sweeps(monkeypatch, tmp_path):
+    _install(monkeypatch, FakeBackupStation())
+    out = tmp_path / "curated-note.json"
+    result = runner.invoke(app, ["backup", "--address", "3", "--out", str(out)])
+    assert result.exit_code == 0, result.stderr
+    assert "sweep" not in result.stdout
+
+
+# -- Ctrl-C mid-sweep ----------------------------------------------------------
+
+
+def test_ctrl_c_mid_sweep_leaves_a_partial_file_answering_for_the_whole_range(
+    monkeypatch, tmp_path
+):
+    out = tmp_path / "partial-all.json"
+    _install(monkeypatch, FakeBackupStation(capabilities=SERVICE_CAPS, interrupt_after=8))
+    result = runner.invoke(app, _sweep_argv("--format", "json", "--yes", out=str(out)))
+    assert result.exit_code == 9, result.stderr
+    assert _stderr_envelope(result)["code"] == "aborted"
+    document = read_backup(out)
+    assert document.interrupted is True
+    assert document.summary["requested"] == MAX_CV_DIRECT
+    assert document.sweep_range == (1, MAX_CV_DIRECT)
+    unreached = next(record for record in document.cvs if record.cv == 200)
+    assert unreached.status.value == "skipped"
+    assert unreached.detail == "not attempted"
+    # An unnamed CV the sweep never reached is still marked as the sweep's own.
+    assert unreached.name == "cv0200"
+    assert unreached.source == "sweep"
