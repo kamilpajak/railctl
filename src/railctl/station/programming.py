@@ -582,6 +582,12 @@ class CvProgrammer:
             # verify. And it names the wheel contact FIRST, because the M8 acceptance
             # proved a 61 13 can be the tool's own timing - now retried automatically
             # before this error is ever raised (see _retry_once_for_unknown_gap).
+            #
+            # This call always takes the track branch today: a service write is
+            # its own session and its verification read-back is another one, so
+            # no read has answered inside the session a write fails in. It asks
+            # rather than hard-coding the answer, so the day a write shares a
+            # session with a read the hint follows without being edited.
             hint = no_ack_hint(answered_in_session=self._session_answered)
             if isinstance(outcome, NoAck):
                 raise DecoderNoAckError(
