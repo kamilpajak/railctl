@@ -211,7 +211,7 @@ def test_blind_write_cvs_excludes_cv29():
     assert 29 in ADDRESS_CVS
 
 
-def test_event_names_are_exactly_the_fourteen_defined_events():
+def test_event_names_are_exactly_the_fifteen_defined_events():
     """Thirteen names from this task onward, not five: `cv.unexercised_band` is
     emitted by a later CV-programming task and `function.group_seeded` by a
     later drive/function task; `power.on`, `power.off`, `loco.emergency_stop`,
@@ -222,7 +222,10 @@ def test_event_names_are_exactly_the_fourteen_defined_events():
     `select_page`'s SERVICE branch through `_write_and_confirm`. A later CLI
     task pins that every name in this tuple has a rendering - so the tuple
     has to be complete here, before any emitter exists, or that later task
-    has nothing to render against.
+    has nothing to render against. `service.session_close_failed` (issue #38)
+    is the one name added after that: a group of CVs read inside one service
+    session can answer in full and then fail to close, and the values are
+    kept while the fault is reported beside them.
     """
     assert EVENT_NAMES == (
         "cv.stale_result",
@@ -238,6 +241,7 @@ def test_event_names_are_exactly_the_fourteen_defined_events():
         "loco.emergency_stop",
         "service.entered",
         "service.session_retried",
+        "service.session_close_failed",
         "reply.unknown",
     )
 
