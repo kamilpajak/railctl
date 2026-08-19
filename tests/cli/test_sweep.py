@@ -87,8 +87,11 @@ def test_three_measured_noes_send_the_operator_to_pom_and_not_to_the_probe():
     # Each `False` here is a `61 82` the doctor already recorded, so the probe
     # has answered and re-running it cannot change the bound. Naming it as the
     # remedy names a cause that does not exist; the remedy that does exist is
-    # the main track, which sweeps to 255 without any service-mode encoding.
-    rejected = caps(z21_cv_opcodes=False, service_ext_cv=False, service_direct_cv=False)
+    # the main track, which sweeps to 255 without any service-mode encoding -
+    # and it is offered flat only when POM reading is a MEASURED yes.
+    rejected = caps(
+        z21_cv_opcodes=False, service_ext_cv=False, service_direct_cv=False, pom_read=True
+    )
     with pytest.raises(ServiceEncodingUnknownError) as caught:
         sweep_bound(ProgMode.SERVICE, rejected)
     hint = caught.value.hint or ""
@@ -96,6 +99,27 @@ def test_three_measured_noes_send_the_operator_to_pom_and_not_to_the_probe():
     assert "--mode pom" in hint
     # The message body still reports the measured state it always did.
     assert "rejected:" in str(caught.value)
+
+
+def test_an_unprobed_pom_is_offered_as_a_question_not_as_a_remedy():
+    """The three service encodings are a measured no and nobody has tried POM.
+
+    `--mode pom` is still the only thing left to try, so it is named - but
+    naming it flat would promise a channel nobody has measured, and on the
+    reference station POM reading answers nothing at all
+    (docs/probe-results.md R1). The hint says which of the two it is, which is
+    the same distinction the capability itself keeps.
+    """
+    unknown_pom = caps(z21_cv_opcodes=False, service_ext_cv=False, service_direct_cv=False)
+    assert unknown_pom.pom_read is None
+
+    with pytest.raises(ServiceEncodingUnknownError) as caught:
+        sweep_bound(ProgMode.SERVICE, unknown_pom)
+
+    hint = caught.value.hint or ""
+    assert "--mode pom" in hint
+    assert "never been probed" in hint
+    assert "railctl doctor" in hint
 
 
 def test_one_unprobed_encoding_still_earns_the_probe_hint():

@@ -384,11 +384,26 @@ def reachable_bound(mode: ProgMode, capabilities: Capabilities) -> int:
 
     Curated CVs above 255 live behind the ZIMO CV31/CV32 index page, and
     selecting a page writes the selectors - the one thing a backup never
-    does - so they are out of reach unless the extended service opcodes are a
-    measured yes. POM shares the 255 bound for the same reason: its native
-    range is not the problem, the page selection is.
+    does. What gets past that is an encoding whose READ needs no selection,
+    and there are two: the extended opcodes, and the Z21 16-bit opcode, which
+    carries CV1..1024 in one field and is the FIRST thing
+    `service_read_telegram` picks when it is proven. Either one, measured
+    yes, lifts the bound.
+
+    Checking only `service_ext_cv` was a defect until 2026-08-19: a station
+    proving the Z21 opcode and nothing else recorded every curated CV above
+    255 as skipped, with the detail "extended opcodes not probed" - true
+    about the extended opcodes and false about the CV, which `cv read` would
+    have read on that same station. It stayed invisible on this bench, where
+    the doctor proves both. Found by the M11 review, because `sweep_bound`
+    and this function then disagreed about the same CV.
+
+    POM keeps the 255 bound: its native range is not the problem, the page
+    selection is.
     """
-    if mode is ProgMode.SERVICE and capabilities.service_ext_cv is True:
+    if mode is ProgMode.SERVICE and (
+        capabilities.z21_cv_opcodes is True or capabilities.service_ext_cv is True
+    ):
         return MAX_CV_EXT
     return MAX_CV_DIRECT
 

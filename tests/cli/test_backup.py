@@ -287,6 +287,35 @@ def test_backup_json_result_is_the_file_document_plus_the_path(monkeypatch, tmp_
     assert PROG_TRACK_NOTICE in result.stderr
 
 
+def test_a_station_proving_only_the_z21_opcodes_still_reads_the_curated_cvs_above_255(
+    monkeypatch, tmp_path
+):
+    """The Z21 opcode lifts the curated bound, not only the extended one.
+
+    `service_read_telegram` picks the Z21 16-bit opcode FIRST when it is
+    proven, and it carries CV1..1024 in one field with no page selection - the
+    only thing the bound exists to avoid. Until 2026-08-19 `reachable_bound`
+    looked at `service_ext_cv` alone, so a station proving the Z21 opcode and
+    nothing else recorded all 14 curated CVs above 255 as skipped, with a
+    detail about extended opcodes that said nothing about the CV and was
+    wrong about whether it could be read. It stayed invisible on this bench,
+    where the doctor proves both encodings.
+    """
+    out = tmp_path / "z21.json"
+    z21_only = Capabilities(
+        link_identity="serial:7010A0001194:3", pom_read=False, z21_cv_opcodes=True
+    )
+    _install(monkeypatch, FakeBackupStation(capabilities=z21_only))
+
+    result = runner.invoke(app, ["backup", "--address", "3", "--out", str(out), "--format", "json"])
+
+    assert result.exit_code == 0, result.stderr
+    rows = {row["cv"]: row for row in json.loads(out.read_text(encoding="utf-8"))["cvs"]}
+    assert OVER_BOUND, "the curated set must contain CVs above 255 for this to mean anything"
+    assert [rows[cv]["status"] for cv in OVER_BOUND] == ["ok"] * len(OVER_BOUND)
+    assert json.loads(out.read_text(encoding="utf-8"))["summary"]["skipped"] == 0
+
+
 def test_two_backups_of_an_unchanged_decoder_are_byte_identical(monkeypatch, tmp_path):
     """The M9 acceptance: with the injected clock pinned, everything else in
     the document is deterministic, so the second run reproduces the first

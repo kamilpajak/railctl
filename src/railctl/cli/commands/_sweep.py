@@ -126,8 +126,19 @@ def _no_bound_hint(unprobed: list[str], capabilities: Capabilities) -> str:
     """
     if unprobed:
         return "run `railctl doctor` to probe the service-mode encodings"
-    if capabilities.pom_read is not False:
+    if capabilities.pom_read is True:
         return f"sweep the main track instead with `--mode pom`, which reaches CV1..{MAX_CV_DIRECT}"
+    if capabilities.pom_read is None:
+        # Offered, but never as a promise: nobody has measured POM reading on
+        # this station, and on the reference hardware it answers nothing at
+        # all (docs/probe-results.md R1). Saying "use --mode pom" flat would
+        # send an operator to a channel that may be as silent as the one they
+        # were just refused.
+        return (
+            f"`--mode pom` reaches CV1..{MAX_CV_DIRECT} on the main track, but POM reading "
+            f"has never been probed on this station - run `railctl doctor` first to find "
+            f"out whether it answers at all"
+        )
     return (
         "this command station rejected every service-mode opcode (61 82) and POM reading "
         "is a measured no, so there is no channel left for a sweep to use"
