@@ -28,7 +28,7 @@ from railctl.cli.commands._sweep import (
     SWEEP_ESTIMATE_AFTER,
     SWEEP_PROGRESS_EVERY,
 )
-from railctl.cli.commands.backup import SET_NAME
+from railctl.cli.commands.backup import INCOMPLETE_LIST_MAX, SET_NAME
 from railctl.cli.commands.cv import PROG_TRACK_NOTICE, SILENCE_GUIDANCE
 from railctl.cli.main import app
 from railctl.errors import (
@@ -778,6 +778,42 @@ def test_backup_an_unreadable_cv_is_a_no_response_hole_and_exit_9(monkeypatch, t
     assert "decoder_type" not in on_disk["decoder"]
     assert "serial_bytes" not in on_disk["decoder"]
     assert on_disk["decoder"]["manufacturer_id"] == DEFAULT_VALUE
+
+
+def test_the_incomplete_report_stops_naming_holes_but_never_stops_counting_them(
+    monkeypatch, tmp_path
+):
+    """Thirteen holes are reported as twelve names and "and 1 more".
+
+    A curated run has a handful of holes and naming them all IS the report.
+    `--all` changed the size of that list: most CV numbers are not implemented
+    in any decoder, so a 1024 CV sweep produces hundreds of them, and inlining
+    those puts a multi-kilobyte line on stderr and inside the JSON envelope.
+    The numbers themselves are not lost - `details` carries every one, and so
+    does the file - which is why the cap is on the prose alone.
+    """
+    out = tmp_path / "many.json"
+    silent = CURATED[:INCOMPLETE_LIST_MAX + 1]
+    _install(
+        monkeypatch,
+        FakeBackupStation(
+            read_errors={
+                cv: DecoderNotRespondingError("no answer after 3 attempts", cv=cv)
+                for cv in silent
+            }
+        ),
+    )
+
+    result = runner.invoke(app, ["backup", "--address", "3", "--out", str(out), "--format", "json"])
+
+    assert result.exit_code == 9, result.stderr
+    warning = next(
+        w for w in json.loads(result.stdout)["warnings"] if w["name"] == "backup.incomplete"
+    )
+    named = [cv for cv in silent if f"CV{cv} (" in warning["message"]]
+    assert len(named) == INCOMPLETE_LIST_MAX
+    assert "and 1 more" in warning["message"]
+    assert warning["details"]["no_response"] == sorted(silent)
 
 
 def test_backup_a_station_error_row_also_makes_the_file_incomplete(monkeypatch, tmp_path):

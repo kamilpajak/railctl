@@ -568,7 +568,7 @@ BACKUP_OUT_OPT = Option(
     help=(
         "where the backup lands: a file path, an existing directory (the generated "
         "name is appended), or - for stdout; default ~/railctl-backups/"
-        "loco-<address>-curated.json"
+        "loco-<address>-<set>.json, where <set> is curated or all"
     ),
     type="string",
     default=None,

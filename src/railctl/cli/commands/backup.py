@@ -170,6 +170,11 @@ _UNEXERCISED_REASON: Final[str] = (
     f"CVs do not work"
 )
 
+#: How many holes the incomplete report names before it stops counting them
+#: out. Twelve fits a terminal line; the full lists live in the report's
+#: `details` and in the file, so this trims the prose and never the data.
+INCOMPLETE_LIST_MAX: Final[int] = 12
+
 #: XpressNet's short/long address boundary: 1..99 ride in one byte.
 SHORT_ADDRESS_MAX: Final[int] = 99
 
@@ -361,7 +366,8 @@ def resolve_backup_mode(mode_word: str, capabilities: Capabilities) -> ProgMode:
         if capabilities.pom_read is False:
             raise PomReadUnsupportedError(
                 "POM reading is recorded as unavailable on this command station, and a "
-                "backup will not send 77 reads down a channel measured not to answer",
+                "backup will not send a whole set of reads down a channel measured not "
+                "to answer",
                 hint=(
                     "rerun `railctl doctor` to re-probe POM reading, or put the locomotive "
                     "on the programming track and back up with --mode service"
@@ -1008,7 +1014,15 @@ def incomplete_report(
         (r for r in document.cvs if r.status in (ReadStatus.NO_RESPONSE, ReadStatus.ERROR)),
         key=lambda r: r.cv,
     )
-    listed = ", ".join(f"CV{r.cv} ({r.status.value})" for r in non_ok)
+    # Capped, because `--all` changed the size of this list: a curated run has
+    # a handful of holes and naming them all is the report, while a 1024 CV
+    # sweep has hundreds - most CV numbers are not implemented in any decoder -
+    # and inlining those is a multi-kilobyte line on stderr and inside the JSON
+    # envelope. Nothing is lost by capping: `details` below still carries every
+    # number, machine-readable, and so does the file.
+    listed = ", ".join(f"CV{r.cv} ({r.status.value})" for r in non_ok[:INCOMPLETE_LIST_MAX])
+    if len(non_ok) > INCOMPLETE_LIST_MAX:
+        listed += f", and {len(non_ok) - INCOMPLETE_LIST_MAX} more"
     message = (
         f"backup incomplete: {len(non_ok)} of {summary['requested']} CVs produced no "
         f"value - {listed}"
