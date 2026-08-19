@@ -442,6 +442,7 @@ def _typed_argv(
     out: str | None,
     note: str | None,
     sweep: bool,
+    force: bool,
     mode_word: str,
     page_token: str | None,
     typed_globals: list[str],
@@ -451,7 +452,12 @@ def _typed_argv(
     `_meta` declares them), then the global flags the operator actually
     typed, in registration order. `None` for an address not yet resolved (a
     refusal ahead of `require_address`) simply omits the flag rather than
-    inventing a value."""
+    inventing a value.
+
+    `force` is carried like every other flag because this argv is what the
+    sweep's confirmation republishes: an operator who typed `--force` did so
+    because the target file already exists, and a retry that drops the flag
+    is refused by the overwrite check instead of running."""
     argv = ["railctl", "backup"]
     if address is not None:
         argv += ["--address", str(address)]
@@ -459,6 +465,8 @@ def _typed_argv(
         argv += ["--out", out]
     if note is not None:
         argv += ["--note", note]
+    if force:
+        argv.append(BACKUP_FORCE_OPT.name)
     if sweep:
         argv.append(BACKUP_ALL_OPT.name)
     if mode_word != "auto":
@@ -498,11 +506,14 @@ def plan_backup(
         out=out,
         note=note,
         sweep=sweep,
+        force=force,
         mode_word=mode_word,
         page_token=page_token,
         typed_globals=typed_globals,
     )
     path = backup_path(address, set_name, out)
+    # `not force` guards this branch, so `argv` cannot already carry the flag
+    # and appending it here produces one `--force`, never two.
     if path is not None and not force and path.exists():
         raise UsageProblem(
             f"{path} already exists; a backup never overwrites silently - pass --force "
@@ -1153,6 +1164,7 @@ def _refuse_stdout_stream(
     *,
     note: str | None,
     sweep: bool,
+    force: bool,
     mode_word: str,
     page_token: str | None,
     typed_globals: list[str],
@@ -1168,6 +1180,7 @@ def _refuse_stdout_stream(
         out=None,
         note=note,
         sweep=sweep,
+        force=force,
         mode_word=mode_word,
         page_token=page_token,
         typed_globals=typed_globals,
@@ -1177,6 +1190,7 @@ def _refuse_stdout_stream(
         out=STDOUT_TARGET,
         note=note,
         sweep=sweep,
+        force=force,
         mode_word=mode_word,
         page_token=page_token,
         typed_globals=_json_format_globals(typed_globals),
@@ -1247,6 +1261,7 @@ def _run_ndjson(
                 settings,
                 note=note,
                 sweep=sweep,
+                force=force,
                 mode_word=mode,
                 page_token=page,
                 typed_globals=typed_globals,

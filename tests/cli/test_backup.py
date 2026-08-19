@@ -1438,6 +1438,39 @@ def test_a_sweep_past_the_minute_is_refused_on_a_non_interactive_stdin(monkeypat
     assert not out.exists()
 
 
+def test_the_refused_sweep_keeps_the_force_the_operator_typed(monkeypatch, tmp_path):
+    # `--force` is why the run got past the overwrite check at all, so a retry
+    # that drops it is refused by that same check instead of sweeping. The
+    # published suggestion has to be a command that RUNS.
+    _install(monkeypatch, FakeBackupStation(capabilities=SERVICE_CAPS))
+    out = tmp_path / "already-there.json"
+    out.write_text("{}", encoding="utf-8")
+    result = runner.invoke(app, _sweep_argv("--force", "--format", "json", out=str(out)))
+    assert result.exit_code == 2, result.stderr
+    envelope = _stderr_envelope(result)
+    assert envelope["code"] == "confirmation_required"
+    suggestion = envelope["suggestions"][0]
+    assert suggestion == [
+        "railctl",
+        "backup",
+        "--address",
+        "3",
+        "--out",
+        str(out),
+        "--force",
+        "--all",
+        "--format",
+        "json",
+        "--yes",
+    ]
+    # Replayed verbatim it sweeps and replaces the file, rather than exiting 2
+    # with `backup_file_exists`.
+    _install(monkeypatch, FakeBackupStation(capabilities=SERVICE_CAPS))
+    replay = runner.invoke(app, suggestion[1:])
+    assert replay.exit_code == 0, replay.stderr
+    assert json.loads(out.read_text(encoding="utf-8"))["set"] == "all"
+
+
 def test_a_sweep_past_the_minute_runs_with_yes(monkeypatch, tmp_path):
     _install(monkeypatch, FakeBackupStation(capabilities=SERVICE_CAPS))
     out = tmp_path / "agreed.json"
