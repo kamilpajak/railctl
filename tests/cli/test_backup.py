@@ -234,11 +234,12 @@ def _freeze_clock(monkeypatch) -> None:
 
 def test_the_backup_row_publishes_its_safety_facts():
     meta = command_meta("backup")
-    # A backup never writes the decoder - the CV31/CV32 selectors included -
-    # and never confirms; an agent reads exactly these two fields to decide
-    # whether it is safe to run unattended.
+    # A backup never writes the decoder - the CV31/CV32 selectors included.
+    # It does confirm: `--all` is always over the 60 s gate, so an agent that
+    # reads `confirms: false` here and runs a sweep unattended gets exit 2
+    # instead of a file. These are the two fields it reads to decide.
     assert meta.mutates is False
-    assert meta.confirms is False
+    assert meta.confirms is True
     assert meta.schema == BACKUP_SCHEMA
     # `cv read`'s whole set: a backup is a batch of CV reads through the same
     # station paths, and 9/16 - the codes the brief adds - were already in it.

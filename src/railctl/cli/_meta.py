@@ -651,6 +651,13 @@ _BACKUP = CommandMeta(
     # what this command refuses to touch - a non-default page is acknowledged
     # with --page or the run aborts.
     mutates=False,
+    # True since M11: `--all` always asks. The smallest bound `sweep_bound`
+    # can return is 255 CVs, about 612 s at the measured 2.4 s each, so every
+    # sweep passes the 60 s gate and a non-interactive run without `--yes`
+    # exits 2 before the first CV is read. `confirms` has no per-option
+    # granularity - `cv read` publishes True for a confirm that is just as
+    # conditional - so the curated path never asking does not make this false.
+    confirms=True,
     exit_codes=BACKUP_EXIT_CODES,
     options=(
         BACKUP_OUT_OPT,
