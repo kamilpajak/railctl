@@ -2114,3 +2114,41 @@ def test_d13_reports_the_held_layout_when_even_the_release_is_interrupted(doctor
     assert progress.layout.held is None
     assert progress.layout.must_leave_held is True
     assert progress.layout.hold_applied is True
+
+
+def test_d13_reports_the_held_layout_when_the_release_raises_on_the_way_out(doctor_bench):
+    """The release itself failing with something that is not a `RailctlError` -
+    `_d13_release` answers only for those.
+
+    Two DIFFERENT endings on purpose: the operator's `KeyboardInterrupt` is what
+    started the unwind, and the release then hit the `ValueError` `Station.exchange`
+    raises for an interface-status reply. The caller must still get the interrupt.
+    A tidy-up that replaces the answer with whatever went wrong while tidying up is
+    the failure `cli/deps.close_quietly` is written against, and the layout published
+    alongside it is the held one: nobody read the bit back, and UNKNOWN is not
+    neutral for a hold.
+    """
+    responder = doctor_bench.transport.on_write
+    responder.queue_once_for(cmd_track_power_on(), encode(0x01, 0x09))  # the release's read back
+    interrupted: list[bool] = []
+
+    def interrupt_the_read_after_the_stop(framed: bytes, transport: FakeTransport) -> None:
+        telegram = doctor_bench.unframe(framed)
+        if (
+            telegram == cmd_station_status()
+            and not interrupted
+            and cmd_emergency_stop_all() in doctor_bench.sent
+        ):
+            interrupted.append(True)
+            raise KeyboardInterrupt
+        responder(framed, transport)
+
+    doctor_bench.transport.on_write = interrupt_the_read_after_the_stop
+    progress = _ProbeProgress()
+    with pytest.raises(KeyboardInterrupt):
+        _check_d13(doctor_bench.station, progress, LAYOUT_UNTOUCHED)
+    stop = doctor_bench.sent.index(cmd_emergency_stop_all())
+    assert cmd_track_power_on() in doctor_bench.sent[stop:]
+    assert progress.layout.held is None
+    assert progress.layout.must_leave_held is True
+    assert progress.layout.hold_applied is True
