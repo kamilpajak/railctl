@@ -1854,6 +1854,40 @@ def test_d13_sends_no_stop_when_a_disputed_bit_is_already_set(doctor_bench):
     assert layout == LAYOUT_UNTOUCHED
 
 
+def test_d13_names_the_power_on_that_made_the_measurement_impossible(doctor_bench):
+    """`--power-on` and `--measure-status-bits` together can never measure anything,
+    and the operator asking for both has to be told which of their two flags is why.
+
+    D3 energises the dead track and HOLDS it, so by the time D13 looks, a disputed bit
+    is set and the precondition refuses. Advising "re-run with the layout live and
+    released" and stopping there sends that operator round the same loop: they asked
+    for the track to be energised, and energising it is what applied the hold.
+    """
+    doctor_bench.transport.on_write.set(cmd_station_status(), STATUS_REPLY_HELD_AND_LIVE)
+    energised_and_held = LayoutState(
+        energised=True, track_power=True, held=True, must_leave_held=True
+    )
+    check, layout = _check_d13(doctor_bench.station, _ProbeProgress(), energised_and_held)
+    assert check.status == "unknown"
+    assert "--power-on" in check.detail
+    # Still no stop: naming the cause must not talk the check into measuring anyway.
+    assert doctor_bench.sent == [cmd_station_status()]
+    assert layout == energised_and_held
+
+
+def test_d13_does_not_blame_power_on_for_a_hold_it_merely_found(doctor_bench):
+    """The same refusal, one cause away. A plain run on a layout somebody else left
+    held also arrives with `must_leave_held`, and there `--power-on` is not the reason
+    and dropping it changes nothing - naming it would send the operator after a flag
+    they never typed."""
+    doctor_bench.transport.on_write.set(cmd_station_status(), STATUS_REPLY_HELD_AND_LIVE)
+    found_held = LayoutState(energised=False, track_power=True, held=True, must_leave_held=True)
+    check, _layout = _check_d13(doctor_bench.station, _ProbeProgress(), found_held)
+    assert check.status == "unknown"
+    assert "--power-on" not in check.detail
+    assert "already held" in check.detail
+
+
 def test_d13_restores_the_layout_with_resume_operations(doctor_bench):
     """The hold D13 applies is released by D13, and the release is READ BACK - the
     check reports what the station says, never what it sent."""

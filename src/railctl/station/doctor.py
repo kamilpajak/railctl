@@ -442,7 +442,7 @@ def _check_d13(
     except RailctlError as exc:
         detail = f"the status could not be read before the probe ({exc}); {_D13_UNMEASURED}"
         return Check("D13", CHECK_TITLES["D13"], "unknown", detail), layout
-    refused = _d13_precondition(station, before)
+    refused = _d13_precondition(station, before, layout)
     if refused is not None:
         return refused, layout
     # Below this line, and not one line above it. Nothing so far has sent a
@@ -476,7 +476,7 @@ def _check_d13(
         raise
 
 
-def _d13_precondition(station: Station, before: StationStatus) -> Check | None:
+def _d13_precondition(station: Station, before: StationStatus, layout: LayoutState) -> Check | None:
     """`None` when D13 may send its stop; the refusal to report when it may not.
 
     Two arms, and the detail says which one fired, because they call for
@@ -484,6 +484,15 @@ def _d13_precondition(station: Station, before: StationStatus) -> Check | None:
     Both readings are taken under the order currently IN FORCE - the documented
     default until something measures this station - which is why neither message
     states what the byte means, only what it reads as.
+
+    The second arm has one sub-case worth its own sentence. A `--power-on` run
+    energises a dead track and HOLDS it, so the bit that refuses D13 is one this
+    run set two checks ago. "Re-run with the layout live and released" is true
+    and useless there: the operator asked for the track to be energised, and
+    energising it is what applied the hold. So when the hold is this run's own,
+    the message names the flag to drop rather than a state to arrive in. A hold
+    the run merely FOUND gets the plain wording - `--power-on` is not the cause
+    there, and dropping it would change nothing.
     """
     name = station.status_bit_order.name
     if not before.track_power:
@@ -494,10 +503,16 @@ def _d13_precondition(station: Station, before: StationStatus) -> Check | None:
         )
         return Check("D13", CHECK_TITLES["D13"], "unknown", detail)
     if before.raw & STATUS_DISPUTED_BITS:
+        remedy = (
+            "this run energised the track and is holding it, so drop --power-on and re-run "
+            "on a track that is already live"
+            if layout.must_leave_held and layout.energised is not False
+            else "re-run with the layout live and released"
+        )
         detail = (
             f"status 0x{before.raw:02X} already has one of the two disputed bits set, so the "
             f"layout is already held or already dead and nothing this check sets could be "
-            f"attributed to it; {_D13_UNMEASURED} - re-run with the layout live and released"
+            f"attributed to it; {_D13_UNMEASURED} - {remedy}"
         )
         return Check("D13", CHECK_TITLES["D13"], "unknown", detail)
     return None
