@@ -24,6 +24,7 @@ import railctl.cli.main as cli_main
 from railctl.cli._click_errors import ClickException, ClickUsageError
 from railctl.cli._errors import OutputContext, run
 from railctl.cli._meta import error_codes
+from railctl.cli._parse_context import ParseContextTyper
 from railctl.cli.result import ERROR_SCHEMA, INTERNAL_CODE, USAGE_CODE, USAGE_EXIT_CODE
 
 
@@ -179,6 +180,44 @@ def test_an_option_missing_its_value_suggests_the_failing_levels_help(monkeypatc
     """
     _exit_code(monkeypatch, ["--format", "json", "cv", "read", "--mode"])
     assert _envelope(capsys)["suggestions"] == [["railctl", "cv", "read", "--help"]]
+
+
+def test_a_sub_group_answers_with_its_own_level_by_being_a_parse_context_typer(monkeypatch, capsys):
+    """A GROUP inherits the context-attaching class from `ParseContextTyper.__init__`.
+
+    Two defaults carry that class, and only one of them is reachable through the real
+    tree today. `ParseContextTyper.command` covers the leaves, and `railctl cv read
+    --mode` above exercises it. `ParseContextTyper.__init__` covers the groups, and the
+    root does not exercise it - `main.app` passes its own `cls=_TreeOrderGroup`, so it
+    keeps the behaviour with the default deleted. The one group that does rely on the
+    default is `cv` (`cli/commands/cv.py` builds it as a bare `ParseContextTyper`), and
+    `cv` declares no option of its own that takes a value, so the invocation that would
+    show the loss cannot be typed against the real tree at all.
+
+    So the group here is `cv`'s construction with one such option added: a nested
+    `ParseContextTyper` added with `add_typer`, given a callback option that requires a
+    value. `--flavour` with nothing after it is refused by the raw parser, which raises
+    `BadOptionUsage` with no context - and with no context the envelope names no level
+    and sends the operator to the root's help.
+    """
+    parent = ParseContextTyper()
+    child = ParseContextTyper()
+
+    @child.callback()
+    def child_options(flavour: str = typer.Option("plain")) -> None:
+        return None
+
+    @child.command("go")
+    def go() -> None:
+        return None
+
+    parent.add_typer(child, name="sub")
+    monkeypatch.setattr(cli_main, "app", parent)
+
+    assert _exit_code(monkeypatch, ["sub", "--flavour"]) == USAGE_EXIT_CODE
+    payload = _envelope(capsys)
+    assert payload["details"]["command"] == "railctl sub"
+    assert payload["suggestions"] == [["railctl", "sub", "--help"]]
 
 
 # -- details -----------------------------------------------------------------
