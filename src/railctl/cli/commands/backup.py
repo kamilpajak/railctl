@@ -161,13 +161,18 @@ _SWEEP_EXIT_NOTE: Final[str] = (
 )
 
 #: What passing `HIGHEST_EXERCISED_CV` does and does not mean. The claim is
-#: about this bench's EVIDENCE, not about the decoder: nothing above CV511 has
-#: ever answered here, so a value read up there is uncorroborated - which is
-#: not the same as saying those CVs are absent (the project's founding rule).
+#: about this bench's EVIDENCE, not about the decoder, and what the evidence
+#: says changed on 2026-08-19: the first full sweep got an answer for every CV
+#: from 512 to 1024 through the Z21 opcode. So "never answered" is no longer
+#: true and this text no longer says it. What is still true is the part that
+#: matters - no value up there has been checked against anything, and a zero
+#: cannot be told from a CV the decoder does not implement, which is the
+#: project's founding rule applied to a number instead of a capability.
 _UNEXERCISED_REASON: Final[str] = (
-    f"no read above CV{HIGHEST_EXERCISED_CV} has ever been answered on this bench, so a "
-    f"value read past it is not corroborated by any measurement; that does not mean those "
-    f"CVs do not work"
+    f"CV{HIGHEST_EXERCISED_CV + 1} and up first answered on this bench on 2026-08-19, and no "
+    f"value read there has been checked against a known quantity, so it is not corroborated "
+    f"by any measurement and a zero cannot be told from a CV the decoder does not implement; "
+    f"that does not mean those CVs do not work"
 )
 
 #: How many holes the incomplete report names before it stops counting them

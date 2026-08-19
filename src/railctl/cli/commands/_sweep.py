@@ -33,11 +33,19 @@ if TYPE_CHECKING:
     from railctl.catalog import CatalogEntry
     from railctl.station import Capabilities
 
-#: The highest CV any read on this bench has ever answered. Only the reply
-#: bands `63 14` (CV1..255) and `63 15` (CV256..511) have been seen; `63 16`
-#: and `63 17` come from the Lenz document alone, and the Z21 16-bit opcode
-#: this station prefers has never been asked for a CV above 511 at all. A
-#: sweep may still go higher - it just may not imply the range was verified.
+#: Where this bench's CORROBORATED evidence stops, which is not where its
+#: answers stop. Only the extended reply bands `63 14` (CV1..255) and `63 15`
+#: (CV256..511) have ever been seen; `63 16` and `63 17` come from the Lenz
+#: document alone.
+#:
+#: The first full sweep (2026-08-19) then got an answer for every CV from 512
+#: to 1024 through the Z21 16-bit opcode, which carries no band byte at all -
+#: so reads up there are no longer unexercised, and the warning's text says
+#: so. The boundary stays at 511 anyway, because being answered is not the
+#: same as being right: not one value above it has been checked against a
+#: known quantity, and the 500-odd zeroes the sweep returned there are
+#: exactly what an out-of-range read would also produce. Raising this number
+#: means measuring a value up there against something, not reading it again.
 HIGHEST_EXERCISED_CV: Final[int] = 511
 
 #: Seconds per CV, measured 2026-08-19: 77 CVs in 185 s with groups of eight

@@ -1139,3 +1139,75 @@ another unproven session length without a reason.
 A 1024 CV sweep at 1.86 s per CV (the in-group rate) is about **32 minutes**, against the
 1 h 42 min the per-CV path would have cost. The >60 s confirmation still fires, and now it
 quotes a number an operator can wait out.
+
+## The first full CV sweep — M11 acceptance PASSED 2026-08-19
+
+Three gated stages against the MS450P22 on the programming track, 41 min 41 s end to end.
+
+| stage | observable | result |
+| --- | --- | --- |
+| 1 | doctor probe | all three service encodings proven, decoder family `ms` |
+| 2 | the refusal | exit 2 `confirmation_required`, no file written, retry argv published |
+| 3 | CV1..CV1024 swept | **1023 ok, 1 no_response**, 39 min, 2.29 s per CV |
+
+### Everything above CV511 answered
+
+This is the run's real finding, and it reverses an assumption the tool shipped with.
+`0x63 0x16` and `0x63 0x17` — the extended reply bands for CV512..1024 — have still never
+been seen, because the sweep never used the extended opcodes: with `z21_cv_opcodes` proven,
+`service_read_telegram` picks the **Z21 16-bit opcode**, which carries the CV in one field
+and has no band byte at all. Through that opcode every CV from 512 to 1024 produced an
+answer.
+
+Most of those answers are 0. Some are not, and they fall in blocks:
+
+| CVs | values |
+| --- | --- |
+| 508–512 | 248, 248, 248, 248, 248 |
+| 516, 519, 522, 525 | 202, 201, 185, 203 |
+| 543–549 | 195, 128, 8, 194, 181, 8, 181 |
+| 570–583 | 193, 32, 72, 197, 46, …, 196, 64, …, 214, 181, 198 |
+| 744–761 | 191, 128, 8, 190, 128, 8, 194, 128, 8, 189, 181, 72, 192, 128, 8, 215, 0, 72 |
+| 769–780 | 1, 127, 127, 127, 127, 1, 42, 26, 60, 30, 60, 30 |
+
+The repeating `x, 128, 8` and `x, 181, 8` triples look like ZIMO sound-sample assignments,
+which is where the MS decoder's manual puts CV744 and up. That is a resemblance, not a
+verification.
+
+**What is NOT established: that any of those values is the CV it is labelled with.** A read
+of a CV the decoder does not implement can return 0 just as easily, and 500-odd of these are
+0. Nothing above CV511 has been checked against a known quantity — the way CV396/CV397 were
+checked against a documented 0-29 range when the index bank was settled. So
+`HIGHEST_EXERCISED_CV` stays at 511 and the sweep still warns, with its text corrected: the
+claim is no longer "nothing has ever answered up there", it is "nothing up there has been
+corroborated".
+
+The way to settle it is to write a known value to one high CV through POM (POM covers
+CV1..1024 for writes) and read it back over the Z21 opcode. That needs a decoder we are
+willing to write to.
+
+### CV100 did not answer, and only CV100
+
+One `61 13` in 1024 reads, at CV100, with 1023 neighbours answering — including CV99 and
+CV101. Not yet reproduced; it may be a genuine non-acknowledgement for that CV or a single
+transient. Worth one targeted re-read before it is called either.
+
+### Timing
+
+39 minutes for 1024 CVs is **2.29 s per CV**, against the 2.4 s the up-front estimate quoted
+and the 2.40 s measured over the 77-CV curated backup. The constant is well calibrated for a
+long run.
+
+The estimate revised after the first ten CVs said **3.56 s per CV, 1 h 1 min** — 56 % over
+the truth. Those first ten rows are the three singleton reads (CV31, CV32, CV29, one session
+each) plus the identity group, so they carry all of the run's fixed cost and none of the
+amortisation. The periodic progress lines, which re-estimate from the running rate every 32
+CVs, converged instead: 43 min at CV32, 35 min at CV128, and 39 min actual. The early
+revision is honest about what it measured; it is just measuring the least representative
+part of the run.
+
+### The curated values did not move
+
+All 77 CVs from `~/railctl-backups/loco-0003-curated.json` appear in the sweep with the same
+name and the same value. The wider net changed nothing about what the known CVs say, which
+is what tells a working sweep from one reading off by an index.

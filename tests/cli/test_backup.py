@@ -1637,7 +1637,7 @@ def test_the_unexercised_range_is_named_once_when_the_sweep_passes_cv511(monkeyp
     # The claim is about the evidence, not about the hardware.
     assert "not corroborated" in warning["details"]["reason"]
     assert "does not mean those CVs do not work" in warning["details"]["reason"]
-    said = [line for line in result.stderr.splitlines() if "has ever been answered" in line]
+    said = [line for line in result.stderr.splitlines() if "not corroborated" in line]
     assert len(said) == 1
 
 
@@ -1648,7 +1648,7 @@ def test_the_unexercised_range_is_silent_when_the_sweep_stops_at_255(monkeypatch
     assert result.exit_code == 0, result.stderr
     names = [w["name"] for w in json.loads(result.stdout)["warnings"]]
     assert "sweep.unexercised_range" not in names
-    assert "has ever been answered" not in result.stderr
+    assert "not corroborated" not in result.stderr
 
 
 def test_the_unexercised_range_rides_the_ndjson_stream_as_an_event(monkeypatch, tmp_path):
