@@ -597,7 +597,7 @@ class _FakeStatusStation:
     def status(self) -> StationStatus:
         return StationStatus.from_raw(self.raw_status)
 
-    def cv_read(self, cv, *, address=None, mode=ProgMode.SERVICE, page=None):
+    def cv_read(self, cv, *, address=None, mode=ProgMode.SERVICE, page=None, page_selected=False):
         # `backup` reads the CV31/CV32 selectors and CV29 as singletons. The
         # selectors answer 0 - the default page - so the generic drives here
         # never hit backup's exit-17 page refusal, and `restore`'s fixture

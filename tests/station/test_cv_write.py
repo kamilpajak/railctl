@@ -170,7 +170,7 @@ def test_select_page_verifies_the_first_time_when_reads_are_available(bench, mon
     monkeypatch.setattr(
         programmer,
         "cv_read",
-        lambda cv, *, address, mode, page=None: make_cv_result(
+        lambda cv, *, address, mode, page=None, page_selected=False: make_cv_result(
             cv=cv, value={31: 10, 32: 2}[cv], mode=mode
         ),
     )
@@ -186,7 +186,9 @@ def test_select_page_raises_cv_verify_error_when_the_page_did_not_stick(bench, m
     monkeypatch.setattr(
         programmer,
         "cv_read",
-        lambda cv, *, address, mode, page=None: make_cv_result(cv=cv, value=0, mode=mode),
+        lambda cv, *, address, mode, page=None, page_selected=False: make_cv_result(
+            cv=cv, value=0, mode=mode
+        ),
     )
     with pytest.raises(CvVerifyError) as caught:
         programmer.select_page((10, 2), address=ADDRESS, mode=ProgMode.POM)
@@ -208,7 +210,7 @@ def test_select_page_verifies_a_different_page_selected_under_the_same_key(bench
     current: dict[int, int] = {}
     read_calls: list[int] = []
 
-    def fake_cv_read(cv, *, address, mode, page=None):
+    def fake_cv_read(cv, *, address, mode, page=None, page_selected=False):
         read_calls.append(cv)
         return make_cv_result(cv=cv, value=current[cv], mode=mode)
 
@@ -233,7 +235,7 @@ def test_select_page_reverifies_the_same_page_after_invalidate_caches(bench, mon
     bench.station.learn(pom_read=True)
     read_calls: list[int] = []
 
-    def fake_cv_read(cv, *, address, mode, page=None):
+    def fake_cv_read(cv, *, address, mode, page=None, page_selected=False):
         read_calls.append(cv)
         return make_cv_result(cv=cv, value={31: 10, 32: 2}[cv], mode=mode)
 
@@ -491,7 +493,9 @@ def test_pom_write_to_cv29_that_does_not_flip_bit_5_is_verified_normally(bench, 
     monkeypatch.setattr(
         programmer,
         "cv_read",
-        lambda cv, *, address, mode, page=None: make_cv_result(cv=cv, value=new_value, mode=mode),
+        lambda cv, *, address, mode, page=None, page_selected=False: make_cv_result(
+            cv=cv, value=new_value, mode=mode
+        ),
     )
     bench.expect(cmd_pom_write_byte(ADDRESS, 29, new_value, threshold=THRESHOLD), reply=ACK)
     result = programmer.pom_write(29, new_value, address=ADDRESS, verify=True)
@@ -505,7 +509,7 @@ def test_pom_write_reread_once_on_mismatch_then_succeeds(bench, monkeypatch):
     reads = [make_cv_result(cv=5, value=99), make_cv_result(cv=5, value=10)]
     seen_at: list[float] = []
 
-    def fake_cv_read(cv, *, address, mode, page=None):
+    def fake_cv_read(cv, *, address, mode, page=None, page_selected=False):
         seen_at.append(bench.station.now())
         return reads.pop(0)
 
@@ -523,7 +527,9 @@ def test_pom_write_raises_cv_verify_error_after_second_mismatch(bench, monkeypat
     monkeypatch.setattr(
         programmer,
         "cv_read",
-        lambda cv, *, address, mode, page=None: make_cv_result(cv=cv, value=99),
+        lambda cv, *, address, mode, page=None, page_selected=False: make_cv_result(
+            cv=cv, value=99
+        ),
     )
     with pytest.raises(CvVerifyError) as caught:
         programmer.pom_write(5, 10, address=ADDRESS, verify=True)
@@ -578,7 +584,9 @@ def test_pom_write_to_an_unrelated_cv_does_not_invalidate_the_cache(bench, monke
     monkeypatch.setattr(
         programmer,
         "cv_read",
-        lambda cv, *, address, mode, page=None: make_cv_result(cv=cv, value=10, mode=mode),
+        lambda cv, *, address, mode, page=None, page_selected=False: make_cv_result(
+            cv=cv, value=10, mode=mode
+        ),
     )
     bench.expect(cmd_pom_write_byte(ADDRESS, 5, 10, threshold=THRESHOLD), reply=ACK)
     programmer.pom_write(5, 10, address=ADDRESS, verify=True)
@@ -1197,7 +1205,7 @@ def test_cv_read_many_selects_each_page_once_and_reads_in_sorted_order(bench, mo
     monkeypatch.setattr(
         programmer,
         "cv_read",
-        lambda cv, *, address, mode, page=None: (
+        lambda cv, *, address, mode, page=None, page_selected=False: (
             calls.append(("read", cv)),
             make_cv_result(cv=cv, value=cv, mode=mode),
         )[1],
@@ -1238,7 +1246,7 @@ def test_cv_read_many_reads_the_cursor_pair_before_selecting_and_restores_it_aft
     calls: list[tuple[object, ...]] = []
     values = {31: 5, 32: 1}
 
-    def fake_cv_read(cv, *, address, mode, page=None):
+    def fake_cv_read(cv, *, address, mode, page=None, page_selected=False):
         calls.append(("read", cv))
         if cv == 265:
             raise DecoderNotRespondingError("no ack", cv=cv)
@@ -1271,7 +1279,7 @@ def test_cv_read_many_without_pages_never_touches_the_cursor_pair(bench, monkeyp
     monkeypatch.setattr(
         programmer,
         "cv_read",
-        lambda cv, *, address, mode, page=None: (
+        lambda cv, *, address, mode, page=None, page_selected=False: (
             calls.append(("read", cv)),
             make_cv_result(cv=cv, value=cv, mode=mode),
         )[1],
@@ -1344,7 +1352,7 @@ def test_cv_read_many_restore_puts_the_found_cursor_pair_back_on_the_wire(bench)
 def test_cv_read_many_calls_on_progress_once_per_spec_and_captures_failures(bench, monkeypatch):
     programmer = bench.station.programmer
 
-    def fake_cv_read(cv, *, address, mode, page=None):
+    def fake_cv_read(cv, *, address, mode, page=None, page_selected=False):
         if cv == 6:
             raise DecoderNotRespondingError("no ack", cv=cv)
         return make_cv_result(cv=cv, value=cv, mode=mode)
@@ -1438,7 +1446,7 @@ def test_select_page_skips_reverification_when_the_same_page_is_reselected_with_
     bench.station.learn(pom_read=True)
     read_calls: list[int] = []
 
-    def fake_cv_read(cv, *, address, mode, page=None):
+    def fake_cv_read(cv, *, address, mode, page=None, page_selected=False):
         read_calls.append(cv)
         return make_cv_result(cv=cv, value={31: 10, 32: 2}[cv], mode=mode)
 
@@ -1472,7 +1480,7 @@ def test_cv_read_many_deselects_the_current_page_when_a_later_read_carries_none(
     monkeypatch.setattr(
         programmer,
         "cv_read",
-        lambda cv, *, address, mode, page=None: (
+        lambda cv, *, address, mode, page=None, page_selected=False: (
             calls.append(("read", cv)),
             make_cv_result(cv=cv, value=cv, mode=mode),
         )[1],
