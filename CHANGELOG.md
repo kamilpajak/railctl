@@ -18,6 +18,19 @@ All notable changes to this project are documented in this file. The format foll
   as it arrives, `--format=ndjson` streams one JSON object per line and always ends with
   a `summary` line even when interrupted, and `--format=json` buffers and prints exactly
   one value. `--limit N` ends the run without an interrupt.
+- `railctl backup --all` - sweeps every CV the resolved mode can reach instead of the 77
+  the curated catalog names, so a decoder's undocumented settings are captured too. How
+  far the sweep goes comes from measured capabilities alone: an encoding nobody probed
+  never widens the range. The file records `"set": "all"` and the range it covered, keeps
+  the catalog's names where the catalog has one and calls the rest `cv0617` with
+  `source: sweep`, so `restore` can tell the two apart. A sweep estimated to take over a
+  minute asks before it starts and revises its estimate after the first ten CVs; progress
+  goes to stderr, never to stdout. Above CV511 the run says plainly that no read on this
+  bench has ever been answered there, so those values are not corroborated by any
+  measurement. A full sweep normally ends with exit 9 and a file full of `no_response`
+  rows, because most CV numbers are not implemented in any decoder and silence cannot be
+  told from "this CV does not exist". (#38 made it practical: about 40 minutes for 1024
+  CVs instead of nearly three hours.)
 - The doctor's report now says what the run left the layout doing - whether it energised
   the track, whether the layout is held, and which locomotive was sent speed 0.
 
