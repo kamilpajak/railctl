@@ -89,6 +89,7 @@ from railctl.cli._meta import (
     typer_option,
 )
 from railctl.cli.commands._sweep import (
+    CORROBORATED_HIGH_CV,
     HIGHEST_EXERCISED_CV,
     SWEEP_CONFIRM_SECONDS,
     SWEEP_ESTIMATE_AFTER,
@@ -128,7 +129,7 @@ from railctl.errors import (
     exit_code_for,
 )
 from railctl.station import CvPage, CvReadOutcome, CvResult, CvSpec, ProgMode
-from railctl.xbus.cv import MAX_CV_DIRECT, MAX_CV_EXT
+from railctl.xbus.cv import MAX_CV_DIRECT, MAX_CV_EXT, MAX_CV_Z21
 
 if TYPE_CHECKING:
     from collections.abc import Mapping
@@ -161,18 +162,60 @@ _SWEEP_EXIT_NOTE: Final[str] = (
 )
 
 #: What passing `HIGHEST_EXERCISED_CV` does and does not mean. The claim is
-#: about this bench's EVIDENCE, not about the decoder, and what the evidence
-#: says changed on 2026-08-19: the first full sweep got an answer for every CV
-#: from 512 to 1024 through the Z21 opcode. So "never answered" is no longer
-#: true and this text no longer says it. What is still true is the part that
-#: matters - no value up there has been checked against anything, and a zero
-#: cannot be told from a CV the decoder does not implement, which is the
-#: project's founding rule applied to a number instead of a capability.
+#: about this bench's EVIDENCE, not about the decoder, so it moves whenever a
+#: measurement lands - twice inside one day so far, and both moves shortened
+#: it.
+#:
+#: 2026-08-19, the first full sweep: it got an answer for every CV from 512 to
+#: 1024 through the Z21 opcode, so "never answered" stopped being true and
+#: this text stopped saying it.
+#:
+#: Later the same day, the CV523 check (`CORROBORATED_HIGH_CV`): a value
+#: written through one opcode family was read back through another, so "no
+#: value read there has been checked against a known quantity" stopped being
+#: true as well - and unlike the first move, this text did not follow. What
+#: replaced that clause is thin rather than absent, one CV out of five
+#: hundred, and that is what the text now says.
+#:
+#: Both claims stay in the past tense and named to this bench, and the opcode
+#: is named with them. A sweep that reaches this warning may be about to use
+#: the EXTENDED opcodes rather than the Z21 one - `sweep_bound` returns
+#: `MAX_CV_EXT` when `service_ext_cv` is proven and `z21_cv_opcodes` is not -
+#: and their reply bands `63 16` / `63 17` have never been seen on this bench
+#: at all (see the `HIGHEST_EXERCISED_CV` comment in `_sweep.py`). A bare
+#: "CV512 and up answer" would extend one opcode's measurement to an opcode
+#: nothing has measured, in the warning whose whole subject is how far the
+#: evidence goes.
+#:
+#: The same rewrite dropped "a zero cannot be told from a CV the decoder does
+#: not implement". It is true, but docs/probe-results.md is explicit that it
+#: applies at every CV number and is not a property of the high range, so
+#: saying it here attributed a universal caveat to this range alone. That is
+#: the whole reason it left, and it does not depend on the caveat being said
+#: anywhere else.
+#:
+#: Where it IS said, exactly: `_SWEEP_EXIT_NOTE`, on the human summary of a
+#: sweep that wrote a file - `build_backup` appends it to `CommandResult.lines`,
+#: which only the `human` renderer prints, and returns before it for `--out -`.
+#: `--format=json` and `--format=ndjson` never carry it: the envelope has no
+#: `lines`, and the ndjson summary carries counts and the path. So a machine
+#: consumer of this run hears the zero-versus-unimplemented ambiguity from
+#: `--help` (exit code 9, `cli/_meta.py`) and not from the run's own output.
+#: That gap is real and is not this string's to close - putting it back here
+#: would state a property of CV1 inside a warning about CV512, which is the
+#: misattribution above. Closing it needs a field or an event of its own.
+#:
+#: `tests/cli/test_backup.py` pins these claims against the document's
+#: section, and says in its own docstring which kind of drift that catches.
 _UNEXERCISED_REASON: Final[str] = (
-    f"CV{HIGHEST_EXERCISED_CV + 1} and up first answered on this bench on 2026-08-19, and no "
-    f"value read there has been checked against a known quantity, so it is not corroborated "
-    f"by any measurement and a zero cannot be told from a CV the decoder does not implement; "
-    f"that does not mean those CVs do not work"
+    f"CV{HIGHEST_EXERCISED_CV + 1} and up answered on this bench on 2026-08-19, through the Z21 "
+    f"opcode: the first full sweep got an answer for every CV from {HIGHEST_EXERCISED_CV + 1} to "
+    f"{MAX_CV_Z21}, and the extended opcodes have never been seen to reply above "
+    f"CV{HIGHEST_EXERCISED_CV} - and one value up there is corroborated: "
+    f"CV{CORROBORATED_HIGH_CV}, agreed on by two encodings with different field layouts and "
+    f"matching a third implementation's bytes; that is one CV out of five hundred, so the range "
+    f"is thinly measured rather than unmeasured, and a value read up there is not backed by "
+    f"anything the way CV{CORROBORATED_HIGH_CV} is; that does not mean those CVs do not work"
 )
 
 #: How many holes the incomplete report names before it stops counting them
@@ -892,7 +935,7 @@ class _BackupRun:
         open, so a sweep planned at the desk would be a guess about how many
         CVs to read. The warning goes out ahead of the question on purpose:
         an operator agreeing to half an hour of reads should already know
-        which part of the range nothing has ever corroborated.
+        which part of the range rests on a single corroborated value.
         """
         bound = sweep_bound(mode, station.capabilities)
         if bound > HIGHEST_EXERCISED_CV:

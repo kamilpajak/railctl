@@ -41,12 +41,27 @@ if TYPE_CHECKING:
 #: The first full sweep (2026-08-19) then got an answer for every CV from 512
 #: to 1024 through the Z21 16-bit opcode, which carries no band byte at all -
 #: so reads up there are no longer unexercised, and the warning's text says
-#: so. The boundary stays at 511 anyway, because being answered is not the
-#: same as being right: not one value above it has been checked against a
-#: known quantity, and the 500-odd zeroes the sweep returned there are
-#: exactly what an out-of-range read would also produce. Raising this number
-#: means measuring a value up there against something, not reading it again.
+#: so. `CORROBORATED_HIGH_CV` went further the same day and checked one of
+#: those answers against a known value. The boundary stays at 511 anyway,
+#: because ONE checked CV out of five hundred does not exercise the range:
+#: the other 500-odd answers are mostly zeroes, which is exactly what an
+#: out-of-range read would also produce. Raising this number means measuring
+#: more values up there against something, not reading them again.
 HIGHEST_EXERCISED_CV: Final[int] = 511
+
+#: The one CV above `HIGHEST_EXERCISED_CV` whose value is corroborated, and
+#: the whole of the evidence up there. Measured 2026-08-19, written up in
+#: docs/probe-results.md, "A CV above 511 checked against a known value -
+#: SETTLED 2026-08-19": 20 was written to it as POM (`E6 30`, ten-bit,
+#: zero-based) and the range CV513..530 read back with the Z21 opcode
+#: (`23 11`, sixteen-bit, zero-based) changed at this row and nowhere else.
+#: Two encodings with different field layouts therefore agree on which
+#: register this is, and JMRI's encoders produce the same bytes, so a shared
+#: compensating error would have to live in a third implementation too.
+#:
+#: Reading a RANGE is what makes it evidence: a blind write that landed
+#: elsewhere would have shown up at the wrong number.
+CORROBORATED_HIGH_CV: Final[int] = 523
 
 #: Seconds per CV, measured 2026-08-19: 77 CVs in 185 s with groups of eight
 #: (docs/probe-results.md, "Grouped service reads"). Used ONLY for the
