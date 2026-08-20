@@ -30,6 +30,7 @@ import typer
 
 from railctl.cli._errors import run
 from railctl.cli._meta import (
+    DOCTOR_MEASURE_STATUS_BITS,
     DOCTOR_NO_PROGRAMMING_TRACK,
     DOCTOR_NO_SAVE,
     DOCTOR_POWER_ON,
@@ -84,6 +85,7 @@ CAPABILITY_FIELDS: Final[tuple[tuple[str, str, str], ...]] = (
     ("pom_result_channel", "POM result channel", "text"),
     ("pom_echo_zero_based", "POM echo zero-based", "bool"),
     ("loco_address_threshold", "Long-address threshold", "text"),
+    ("status_bit_order", "Status bit order", "text"),
     ("service_direct_cv", "Service mode: direct CV", "bool"),
     ("service_ext_cv", "Service mode: extended CV", "bool"),
     ("z21_cv_opcodes", "Z21 16-bit CV opcodes", "bool"),
@@ -117,6 +119,17 @@ _NOT_TOUCHED: Final[str] = "this run did not change the track power"
 #: holding. `_layout_lines` never looked at `track_power` at all, so an untouched
 #: layout got one line saying the power was not changed and nothing saying what it is.
 _FOUND_LIVE: Final[str] = "the track was already live before this run started"
+#: For a run that stopped the whole layout and got the release confirmed - today
+#: only `--measure-status-bits`, which holds the layout to see which status bit
+#: moves and then releases it. Nothing is left held, so this is neither a hazard
+#: line nor a warning; it is here because the two lines above it, on their own,
+#: describe a run that sent `80 80` to every locomotive on the layout and then the
+#: one telegram measured (2026-08-09, run 5) to start a locomotive with a speed
+#: stored - and say it changed nothing.
+_STOPPED_AND_RELEASED: Final[str] = (
+    "this run held the whole layout with an emergency stop of its own and released it again, so "
+    "a locomotive with a stored speed may have restarted"
+)
 _FOUND_DEAD: Final[str] = "the track was off before this run started and is off now"
 _POWER_UNREAD: Final[str] = "the track power was never read, so it is unknown"
 
@@ -137,6 +150,7 @@ _NON_INTERACTIVE = global_option("--non-interactive")
 
 _POWER_ON = typer_option(DOCTOR_POWER_ON)
 _NO_PROGRAMMING_TRACK = typer_option(DOCTOR_NO_PROGRAMMING_TRACK)
+_MEASURE_STATUS_BITS = typer_option(DOCTOR_MEASURE_STATUS_BITS)
 _NO_SAVE = typer_option(DOCTOR_NO_SAVE)
 
 
@@ -184,6 +198,7 @@ def _layout_lines(layout: LayoutState) -> list[str]:
         return [
             f"  {_NOT_TOUCHED}",
             f"  {_found_power_line(layout)}",
+            *([f"  {_STOPPED_AND_RELEASED}"] if layout.hold_applied else []),
             *_idle_lines(layout),
         ]
     lines = [f"  {_opening_line(layout)}"] if layout.energised is not True else []
@@ -310,13 +325,22 @@ def _may_move(layout: LayoutState) -> bool:
 
 
 def _hold_lead(layout: LayoutState) -> str:
-    """Which run this is, in the warning's own first clause. A run that energised the
-    track made the hazard; a run that found the layout held and could not put the hold
-    back released one that was already there - a distinction an operator standing at
-    the layout needs, and the second case used to produce no warning at all."""
-    if layout.energised is False:
-        return "this run released the hold it found on the layout"
-    return "this run energised the track"
+    """Which run this is, in the warning's own first clause.
+
+    Three runs, not two, and the distinction is what an operator standing at the
+    layout acts on. A run that energised the track made the hazard. A run that found
+    the layout held and could not put the hold back released one that was already
+    there. And a run that held a FREE layout itself and could not confirm releasing
+    it - `doctor --measure-status-bits` measures the status bit order that way - made
+    the hold too, on a layout whose only hold was its own: telling that operator the
+    run "released the hold it found" sends them looking for somebody else's hold that
+    the check's own precondition guarantees was never there.
+    """
+    if layout.energised is not False:
+        return "this run energised the track"
+    if layout.hold_applied:
+        return "this run applied a hold of its own to a layout it found free"
+    return "this run released the hold it found on the layout"
 
 
 def build_doctor(report: DoctorReport, *, saved_to: Path | None) -> CommandResult:
@@ -464,6 +488,7 @@ def register(app: typer.Typer) -> None:
         non_interactive: bool = _NON_INTERACTIVE,
         power_on: bool = _POWER_ON,
         no_programming_track: bool = _NO_PROGRAMMING_TRACK,
+        measure_status_bits: bool = _MEASURE_STATUS_BITS,
         no_save: bool = _NO_SAVE,
     ) -> None:
         cli_ctx = ctx.obj
@@ -487,6 +512,7 @@ def register(app: typer.Typer) -> None:
                     address=settings.address,
                     allow_power_on=power_on,
                     use_programming_track=not no_programming_track,
+                    measure_status_bit_order=measure_status_bits,
                 )
                 saved_to, save_warning, published = _save_capabilities(
                     report.capabilities, no_save=no_save, stderr=output.stderr

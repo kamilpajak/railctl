@@ -32,6 +32,7 @@ from railctl.station.capabilities import UNKNOWN_IDENTITY, Capabilities
 from railctl.station.facade import Station
 from railctl.station.timing import TIMING
 from railctl.transport.fake import FakeClock, FakeTransport
+from railctl.xbus.codec import encode
 from railctl.xbus.commands import (
     cmd_emergency_stop_all,
     cmd_emergency_stop_loco,
@@ -40,7 +41,7 @@ from railctl.xbus.commands import (
     cmd_track_power_off,
     cmd_track_power_on,
 )
-from railctl.xbus.dialect import XPRESSNET
+from railctl.xbus.dialect import DEFAULT_STATUS_BIT_ORDER, LENZ_SPEC, XPRESSNET
 from railctl.xbus.replies import GENERIC_ACK, TRANSIENT_REPLIES
 
 CMD_STATION_VERSION = cmd_station_version()  # 21 21 00
@@ -48,6 +49,11 @@ VERSION_REPLY = b"\x63\x21\x40\x12\x10"  # measured: XpressNet 4.0, station id 0
 CMD_STATION_STATUS = cmd_station_status()  # 21 24 05
 STATUS_UNPOWERED = b"\x62\x22\x07\x47"  # measured: track power off
 STATUS_POWERED = b"\x62\x22\x04\x44"  # auto_start_mode only: track power on
+# The one byte the two documented bit orders disagree about: measured 2026-08-05
+# as an emergency stop with the track still live (green FLASHING on the front
+# panel), which is what `lenz_23151` reads it as; `lenz_spec` reads the same byte
+# as emergency off on a dead track.
+STATUS_HELD_AND_LIVE = b"\x62\x22\x05\x45"
 CMD_TRACK_POWER_ON = cmd_track_power_on()  # 21 81 A0
 CMD_TRACK_POWER_OFF = cmd_track_power_off()  # 21 80 A1
 POWER_ON_REPLY = b"\x61\x01\x60"
@@ -418,6 +424,65 @@ def test_threshold_uses_capabilities_when_measured(bench_factory):
     caps = Capabilities.unknown("fake").with_learned(loco_address_threshold=128)
     fixture = bench_factory(capabilities=caps)
     assert fixture.station.threshold == 128
+
+
+# -- the status bit order ------------------------------------------------------
+
+
+def test_status_uses_the_documented_default_order_when_nothing_measured_one(bench):
+    """`0x05`: the state `80 80` leaves behind. Under the default (`lenz_23151`,
+    the order measured on this hardware) it is an emergency stop with the track
+    still LIVE - which is what the front-panel LED said on 2026-08-05."""
+    assert bench.station.capabilities.status_bit_order is None
+    assert bench.station.status_bit_order is DEFAULT_STATUS_BIT_ORDER
+    bench.expect(CMD_STATION_STATUS, STATUS_HELD_AND_LIVE)
+    status = bench.station.status()
+    assert status.raw == 0x05
+    assert status.emergency_stop is True
+    assert status.emergency_off is False
+    assert status.track_power is True
+
+
+def test_status_uses_the_measured_order_once_capabilities_carry_one(bench_factory):
+    """The same byte, on a station D13 measured as following the Lenz spec: bit 0
+    is emergency OFF there, so `0x05` is a dead track and `track_power` is False.
+    One value changes, not a code path - the same shape as
+    `loco_address_threshold`."""
+    fixture = bench_factory(status_bit_order="lenz_spec")
+    assert fixture.station.status_bit_order is LENZ_SPEC
+    fixture.expect(CMD_STATION_STATUS, STATUS_HELD_AND_LIVE)
+    status = fixture.station.status()
+    assert status.raw == 0x05
+    assert status.emergency_off is True
+    assert status.emergency_stop is False
+    assert status.track_power is False
+
+
+def test_the_measured_order_reaches_every_status_reply_not_only_status(bench_factory):
+    """`Station.exchange` is the one place `station/` parses a reply, so it is
+    where the measured order is applied. `CvProgrammer._status_before` reads its
+    own `62 22` through `exchange` and never through `status()`, and it is what
+    decides whether `exit_service_mode` restores the power and the hold - a
+    second decode there, on the default order, would restore the opposite of what
+    it found."""
+    fixture = bench_factory(status_bit_order="lenz_spec")
+    fixture.expect(CMD_STATION_STATUS, STATUS_HELD_AND_LIVE)
+    reply = fixture.station.exchange(CMD_STATION_STATUS, timeout=TIMING.li_ack_normal)
+    assert reply.emergency_off is True
+    assert reply.track_power is False
+
+
+def test_a_measured_order_does_not_disturb_the_undisputed_bits(bench_factory):
+    """0x0C is automatic start mode and service mode, neither of them in dispute.
+    Both orders must read them identically, or a capability would be changing
+    something it was never measured about."""
+    fixture = bench_factory(status_bit_order="lenz_spec")
+    fixture.expect(CMD_STATION_STATUS, encode(0x62, 0x22, 0x0C))
+    status = fixture.station.status()
+    assert status.auto_start_mode is True
+    assert status.service_mode is True
+    assert status.emergency_off is False
+    assert status.emergency_stop is False
 
 
 # -- events() ------------------------------------------------------------------

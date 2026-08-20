@@ -91,6 +91,70 @@ and nothing suggests anyone has run it against a YD7010. It is worth recording f
 reason: a reader who checks our claim against the best-known open implementation will find it
 disagrees, and should know that was checked rather than missed.
 
+### The order is now a measured capability, not a constant
+
+Issue #13. The reading above is still the reading, and it is still the DEFAULT the tool applies
+when nothing has measured the attached station (`xbus/dialect.py`, `DEFAULT_STATUS_BIT_ORDER =
+LENZ_23151`). What changed is that it is no longer a claim about XpressNet: the two documented
+orders are named data, `capabilities.status_bit_order` records which one a station was measured
+to use, and **`railctl doctor --measure-status-bits` (check D13) is the instrument** - it repeats
+the experiment above, one `80 80` and one status read, and records the order whose emergency-stop
+bit moved.
+
+D13 is opt-in because the experiment holds the whole layout and then releases it, and the release
+is when a locomotive with a stored speed starts moving (run 5, 2026-08-09). It also refuses to
+measure unless the track is live with neither disputed bit already set, because a bit that was
+already set is a bit the stop cannot be credited with. `null` in the capabilities file means
+nobody ran it - never that the station uses the default.
+
+#### The tool reproduces the hand measurement - ACCEPTANCE PASSED 2026-08-20
+
+Run at the bench with the main track empty and the locomotive on the programming track, from
+`0x04` (live, nothing held). `tests/hardware/test_issue13_acceptance.py`, two stages, both passed.
+
+Stage 1, a plain `railctl doctor --no-programming-track`: D13 `skip`, `status_bit_order` stays
+`null`, and the layout block reads `hold_applied: false, held: false, must_leave_held: false` -
+the run did not touch the layout, and "nobody asked" is recorded as `null` rather than as the
+default.
+
+Stage 2, the same run with `--measure-status-bits`:
+
+    62 22 04   before, live and released
+    80 80      the hold
+    62 22 05   after - bit 0 went from clear to set
+    21 81      the release
+    62 22 04   confirmed clear again
+
+`status_bit_order: "lenz_23151"`, `hold_applied: true`, `held: false`, `must_leave_held: false`.
+Bit 0 is emergency stop and bit 1 is emergency off, which is what 2026-08-05 established by hand
+against the LED - now established by the tool, on its own, in 22 seconds including both gates.
+
+The whole point of the exercise: this is the same answer arrived at through an instrument rather
+than through a constant in the source. A station that answered `lenz_spec` here would be a finding
+about that station, not a bug in the default.
+
+##### The LED was checked separately, because D13 is too fast to watch
+
+D13's held window is the gap between `80 80` and `21 81` - tens of milliseconds; the whole stage-2
+run measured 73 ms end to end. Nobody can see a front-panel LED change and change back inside that,
+so asking an operator to watch it DURING the check asks for an observation that cannot be made.
+
+It was taken from a persistent hold instead, the same way 2026-08-05 did it, using the same
+telegram the check sends (`railctl stop` with no address and `station.emergency_stop(address=None)`
+are one path):
+
+    62 22 04   live, released      Track Out GREEN STEADY
+    80 80      hold, and leave it
+    62 22 05   held                Track Out GREEN FLASHING - observed 2026-08-20
+    21 81      release
+    62 22 04   released again      Track Out GREEN STEADY
+
+Green flashing is the load-bearing half. It says the track still has voltage while the layout is
+held, which is what Lenz XpressNet 2.2.4 claims and what makes the bit that moved the EMERGENCY
+STOP bit. Red there would have meant the voltage dropped, the moved bit was emergency OFF, and the
+conclusion - and `DEFAULT_STATUS_BIT_ORDER` - were backwards. The status byte alone cannot tell
+those two apart; only the LED can, which is why this observation is recorded and not assumed.
+
 ### Second finding from the same run
 
 `21 80` and `21 81` are both answered with the generic ack `01 04 05`, never `61 00` / `61 01`.
