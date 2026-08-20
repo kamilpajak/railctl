@@ -133,6 +133,28 @@ The whole point of the exercise: this is the same answer arrived at through an i
 than through a constant in the source. A station that answered `lenz_spec` here would be a finding
 about that station, not a bug in the default.
 
+##### The LED was checked separately, because D13 is too fast to watch
+
+D13's held window is the gap between `80 80` and `21 81` - tens of milliseconds; the whole stage-2
+run measured 73 ms end to end. Nobody can see a front-panel LED change and change back inside that,
+so asking an operator to watch it DURING the check asks for an observation that cannot be made.
+
+It was taken from a persistent hold instead, the same way 2026-08-05 did it, using the same
+telegram the check sends (`railctl stop` with no address and `station.emergency_stop(address=None)`
+are one path):
+
+    62 22 04   live, released      Track Out GREEN STEADY
+    80 80      hold, and leave it
+    62 22 05   held                Track Out GREEN FLASHING - observed 2026-08-20
+    21 81      release
+    62 22 04   released again      Track Out GREEN STEADY
+
+Green flashing is the load-bearing half. It says the track still has voltage while the layout is
+held, which is what Lenz XpressNet 2.2.4 claims and what makes the bit that moved the EMERGENCY
+STOP bit. Red there would have meant the voltage dropped, the moved bit was emergency OFF, and the
+conclusion - and `DEFAULT_STATUS_BIT_ORDER` - were backwards. The status byte alone cannot tell
+those two apart; only the LED can, which is why this observation is recorded and not assumed.
+
 ### Second finding from the same run
 
 `21 80` and `21 81` are both answered with the generic ack `01 04 05`, never `61 00` / `61 01`.
