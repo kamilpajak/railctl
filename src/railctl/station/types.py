@@ -158,6 +158,23 @@ class LayoutState:
     #: Not tri-state, unlike every field above: this says what this run OWES, which is
     #: decided by code and always known, not what the station reported.
     must_leave_held: bool = False
+    #: Whether this run SENT an emergency stop of its own, so any hold on the layout
+    #: may be one it applied rather than one it found.
+    #:
+    #: `must_leave_held` says what the run owes; this says what it did, and the two
+    #: come apart in both directions. A plain `railctl doctor` on a layout that was
+    #: already held owes the hold back without ever having sent a stop, and D13's
+    #: status-bit measurement sends one on a layout it found free and then releases
+    #: it again, owing nothing at the end.
+    #:
+    #: Read by the CLI for one thing: whose hold it is. "This run released the hold
+    #: it found" and "this run stopped the layout itself" send an operator to
+    #: different places, and the first one said of the second sends them looking for
+    #: somebody else's hold that was never there.
+    #:
+    #: Not tri-state either, and for the same reason as `must_leave_held`: it is a
+    #: fact about what this process wrote to the link, not a reading off the station.
+    hold_applied: bool = False
 
 
 #: The layout as a run that never touched the track power leaves it: nothing

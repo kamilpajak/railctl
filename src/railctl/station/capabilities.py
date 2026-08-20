@@ -35,6 +35,13 @@ from typing import Final, Literal
 
 from railctl.errors import RailctlError
 
+# `StatusBitOrderName` is imported rather than retyped as a `Literal` here: those
+# names and the `StatusBitOrder` instances they deserialise into are one fact,
+# and a third name added to one and not the other would load as a value no
+# lookup can resolve. `ResultChannel` and `PomReadProvenance` below have no such
+# second home, so they are declared where they are used.
+from railctl.xbus.dialect import STATUS_BIT_ORDERS, StatusBitOrderName
+
 ResultChannel = Literal["broadcast", "poll", "none"]
 
 # HOW a `pom_read=False` was reached, because the two ways are not the same
@@ -81,6 +88,10 @@ _BOOL_FIELDS: Final[frozenset[str]] = frozenset(
 _INT_FIELDS: Final[frozenset[str]] = frozenset({"command_station_id", "loco_address_threshold"})
 _STR_FIELDS: Final[frozenset[str]] = frozenset({"xpressnet_version", "probed_at"})
 _RESULT_CHANNELS: Final[frozenset[str]] = frozenset({"broadcast", "poll", "none"})
+#: Derived from the orders themselves, so the validator cannot fall behind them.
+_STATUS_BIT_ORDER_NAMES: Final[frozenset[str]] = frozenset(
+    order.name for order in STATUS_BIT_ORDERS
+)
 _POM_READ_PROVENANCES: Final[frozenset[str]] = frozenset({"unsupported", "silence"})
 
 _DELETE_AND_RERUN_HINT: Final[str] = "delete {path} and run `railctl doctor` again"
@@ -105,6 +116,15 @@ class Capabilities:
     pom_result_channel: ResultChannel | None = None
     pom_echo_zero_based: bool | None = None
     loco_address_threshold: int | None = None
+    #: WHICH of bits 0 and 1 of the `62 22` status byte this station uses for
+    #: emergency stop and which for emergency off - the two documented orders
+    #: are named data in `xbus/dialect.py`, and `railctl doctor` D13 measures
+    #: which one is in force by holding the layout and seeing which bit moves.
+    #: `None` is this file's founding rule and not a synonym for the default:
+    #: `DEFAULT_STATUS_BIT_ORDER` still supplies a reading in the meantime, but
+    #: that reading is a documented default, never a measurement of THIS
+    #: station.
+    status_bit_order: StatusBitOrderName | None = None
     service_direct_cv: bool | None = None
     service_ext_cv: bool | None = None
     z21_cv_opcodes: bool | None = None
@@ -198,6 +218,15 @@ class Capabilities:
                     f"{sorted(_POM_READ_PROVENANCES)} or null, got {value!r}",
                 )
             kwargs["pom_read_provenance"] = value
+        if "status_bit_order" in entry:
+            value = entry["status_bit_order"]
+            if value is not None and value not in _STATUS_BIT_ORDER_NAMES:
+                raise _malformed(
+                    path,
+                    f"{path}: {identity!r}.status_bit_order must be one of "
+                    f"{sorted(_STATUS_BIT_ORDER_NAMES)} or null, got {value!r}",
+                )
+            kwargs["status_bit_order"] = value
         if "notes" in entry:
             kwargs["notes"] = cls._notes_from(entry["notes"], identity, path)
         return kwargs

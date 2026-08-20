@@ -26,6 +26,7 @@ from typing import Final, Literal
 from railctl.errors import ProtocolError, XBusChecksumError
 from railctl.xbus import codec
 from railctl.xbus.cv import join_cv_field
+from railctl.xbus.dialect import DEFAULT_STATUS_BIT_ORDER, StatusBitOrder
 from railctl.xbus.speed import SPEED_STEPS, Direction, decode_speed_128
 
 HDR_INTERFACE = 0x01
@@ -74,10 +75,10 @@ STATION_FAMILIES: dict[int, str] = {
 }
 UNKNOWN_FAMILY = "unknown"
 
-# MEASURED, not taken from the spec - the two documents disagree and the
-# hardware settled it. See StationStatus's docstring and docs/probe-results.md R2.
-STATUS_EMERGENCY_STOP = 0x01
-STATUS_EMERGENCY_OFF = 0x02
+# Bits 0 and 1 are NOT here: the two documents disagree about them, so they are
+# named data in `xbus/dialect.py` (StatusBitOrder) and injected into
+# `StationStatus.from_raw`. The four below are not in dispute in either document
+# and have never needed a second reading.
 STATUS_AUTO_START = 0x04
 STATUS_SERVICE_MODE = 0x08
 STATUS_POWERING_UP = 0x40
@@ -134,30 +135,37 @@ class StationVersion:
 
 @dataclass(frozen=True, slots=True)
 class StationStatus:
-    """62 22 S. Bits 0 and 1 are the MEASURED meanings, not the Lenz ones.
+    """62 22 S, decoded under an INJECTED order for bits 0 and 1.
 
-    Lenz XpressNet 2.1.7 makes bit 0 emergency off and bit 1 emergency stop; the
-    German 23151 manual swaps them. Both readings fit the states this station
-    spends most of its time in (`0x04` powered, `0x07` on power-up), so only a
-    state that separates them decides it. That state is `80 80`, and the Lenz
-    spec is what makes it decisive: 2.2.4 says "The DCC track power remains
-    switched on". Measured 2026-08-05 on the YD7010, against the front-panel
-    Track Out LED:
+    Which of those two bits is emergency stop and which is emergency off is a
+    per-station fact this module cannot know, because two documents disagree.
+    Lenz XpressNet 2.1.7 makes bit 0 emergency off and bit 1 emergency stop
+    (`dialect.LENZ_SPEC`, and what JMRI implements); the German 23151 manual
+    swaps them (`dialect.LENZ_23151`). Both readings fit the states this bench
+    spends most of its time in (`0x04` powered, `0x07` held and dead), so only a
+    state that separates them decides it. That state is reached with `80 80`, and
+    the Lenz spec is what makes it decisive: 2.2.4 says "The DCC track power
+    remains switched on". Measured 2026-08-05 on the YD7010, against the
+    front-panel Track Out LED:
 
         21 81 -> 62 22 04   powered                    green steady
         80 80 -> 62 22 05   bit 0, track still powered green FLASHING
         21 80 -> 62 22 06   bit 1, track dead          red
 
-    So bit 0 is emergency stop and bit 1 is emergency off on this hardware - the
-    23151 order. Following Lenz here is not a cosmetic error: it makes
-    `track_power` report a dead track as powered, which made `power_off()` raise
-    on every successful call and would have let the doctor run D4 and D10 on an
-    unpowered track. Neither document defines any bit as "short circuit".
+    So on THAT station bit 0 is emergency stop and bit 1 is emergency off - the
+    23151 order, which is why it is `dialect.DEFAULT_STATUS_BIT_ORDER` and why
+    injecting the order changed no reading. It is a default, not a claim about
+    XpressNet: `railctl doctor` D13 measures the order the attached station uses,
+    `Capabilities.status_bit_order` records it, and `station/facade.py` re-derives
+    this object from `raw` with whatever was measured.
 
-    If a future station turns out to use the Lenz order, this is a per-station
-    fact and belongs in capabilities, not in a second guess here. `raw` is always
-    preserved, so that revision never has to touch the parser - which is what
-    made this one a two-line change.
+    Getting these two the wrong way round is not cosmetic: it makes `track_power`
+    report a dead track as powered, which made `power_off()` raise on every
+    successful call and would have let the doctor run D4 and D10 on an unpowered
+    track. Neither document defines any bit as "short circuit".
+
+    `raw` is always preserved, which is what lets the layer that HAS the
+    capabilities re-decode without this parser ever being asked twice.
     """
 
     raw: int
@@ -169,11 +177,13 @@ class StationStatus:
     ram_error: bool
 
     @classmethod
-    def from_raw(cls, raw: int) -> StationStatus:
+    def from_raw(cls, raw: int, order: StatusBitOrder = DEFAULT_STATUS_BIT_ORDER) -> StationStatus:
+        """Decode `raw`. The default keeps every caller that has no station to ask
+        - `parse` among them - reading exactly what it read before."""
         return cls(
             raw=raw,
-            emergency_off=bool(raw & STATUS_EMERGENCY_OFF),
-            emergency_stop=bool(raw & STATUS_EMERGENCY_STOP),
+            emergency_off=bool(raw & order.emergency_off_mask),
+            emergency_stop=bool(raw & order.emergency_stop_mask),
             auto_start_mode=bool(raw & STATUS_AUTO_START),
             service_mode=bool(raw & STATUS_SERVICE_MODE),
             powering_up=bool(raw & STATUS_POWERING_UP),
@@ -182,6 +192,9 @@ class StationStatus:
 
     @property
     def track_power(self) -> bool:
+        """A pure derivation from the decoded fields, carrying no station-specific
+        knowledge of its own: with the order injected, "the track is live unless
+        the station says emergency off" is true in both documents."""
         return not self.emergency_off
 
 

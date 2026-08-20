@@ -677,6 +677,7 @@ class _FakeStatusStation:
         address: int | None = None,
         allow_power_on: bool = False,
         use_programming_track: bool = True,
+        measure_status_bit_order: bool = False,
     ) -> DoctorReport:
         """A report whose D0-D2 all passed, so `doctor` exits 0 like every other row
         this file drives. The capabilities carry `identity` above, which is what lets

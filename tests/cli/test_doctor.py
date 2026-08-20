@@ -186,6 +186,7 @@ def test_a_run_that_changed_no_track_power_says_so_and_still_exits_zero():
         "idled": None,
         "direction_preserved": None,
         "must_leave_held": False,
+        "hold_applied": False,
     }
     assert "  this run did not change the track power" in result.lines
     assert result.exit_code == 0
@@ -305,6 +306,39 @@ def test_a_hold_this_run_found_and_could_not_put_back_is_the_loudest_ending():
     assert any("stored speed" in line for line in result.lines)
 
 
+def test_a_hold_this_run_applied_itself_is_never_called_one_it_found():
+    """The third run, and the one `_hold_lead` used to have no words for. D13's own
+    precondition refuses unless the layout is live and NOTHING is holding it, so a
+    hold present at the end of such a run is one the run applied. "This run released
+    the hold it found on the layout" sends the operator looking for somebody else's
+    hold that was never there.
+    """
+    report = _powered_on_report(
+        energised=False, track_power=True, held=False, must_leave_held=True, hold_applied=True
+    )
+    result = build_doctor(report, saved_to=None)
+    assert [w.name for w in result.warnings] == ["hold_not_confirmed"]
+    assert "applied a hold of its own to a layout it found free" in result.warnings[0].message
+    assert "released the hold it found" not in result.warnings[0].message
+    assert result.exit_code == PARTIAL_EXIT_CODE
+
+
+def test_a_run_that_stopped_the_whole_layout_and_released_it_again_says_so():
+    """`doctor --measure-status-bits` on a live, free layout, everything confirmed.
+    Nothing is left held and nothing is owed, so there is no hazard and no warning -
+    but the run sent `80 80` to every locomotive on the layout and then the one
+    telegram measured to start a locomotive with a speed stored, and the two lines
+    this branch used to print said the run changed nothing.
+    """
+    report = _powered_on_report(energised=False, track_power=True, held=False, hold_applied=True)
+    result = build_doctor(report, saved_to=None)
+    assert "  this run did not change the track power" in result.lines
+    assert "  the track was already live before this run started" in result.lines
+    assert any("emergency stop of its own and released it again" in line for line in result.lines)
+    assert result.warnings == []
+    assert result.exit_code == 0
+
+
 def test_a_live_layout_this_run_neither_energised_nor_held_gets_no_hazard_line():
     """The ordinary diagnostic on somebody else's running layout. It reports what it
     READ - the old text never mentioned the track power at all - and it does not warn:
@@ -374,11 +408,19 @@ class _FakeStation:
         self.calls: dict[str, object] = {}
         self.closed = False
 
-    def probe(self, *, address=None, allow_power_on=False, use_programming_track=True):
+    def probe(
+        self,
+        *,
+        address=None,
+        allow_power_on=False,
+        use_programming_track=True,
+        measure_status_bit_order=False,
+    ):
         self.calls = {
             "address": address,
             "allow_power_on": allow_power_on,
             "use_programming_track": use_programming_track,
+            "measure_status_bit_order": measure_status_bit_order,
         }
         return self._report
 
@@ -436,8 +478,26 @@ def test_power_on_and_no_programming_track_reach_station_probe(monkeypatch, tmp_
         "address": 3,
         "allow_power_on": True,
         "use_programming_track": False,
+        # Not passed on this invocation, and it must not travel on the back of
+        # another flag: D13 holds the layout, so the default has to be off.
+        "measure_status_bit_order": False,
     }
     assert fake_station.closed is True
+
+
+def test_measure_status_bits_reaches_station_probe_and_is_off_by_default(monkeypatch, tmp_path):
+    """The one flag that makes the doctor hold and release a layout it did not
+    energise. Both halves are pinned: it arrives when asked for, and it is absent
+    when it is not."""
+    report = _bench_report(powered=True)
+    app, fake_station = _wire(monkeypatch, tmp_path, report)
+    result = CliRunner().invoke(app, ["doctor", "--measure-status-bits", "--no-save"])
+    assert result.exit_code == 0, result.stdout + result.stderr
+    assert fake_station.calls["measure_status_bit_order"] is True
+
+    app, plain_station = _wire(monkeypatch, tmp_path, report)
+    assert CliRunner().invoke(app, ["doctor", "--no-save"]).exit_code == 0
+    assert plain_station.calls["measure_status_bit_order"] is False
 
 
 def test_doctor_saves_capabilities_json_merged_with_an_existing_station(monkeypatch, tmp_path):

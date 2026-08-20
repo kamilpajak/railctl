@@ -263,6 +263,21 @@ DOCTOR_NO_PROGRAMMING_TRACK = Option(
         "capabilities as unknown, never as false"
     ),
 )
+#: Opt-in because the measurement HOLDS the layout and then releases it. The
+#: doctor otherwise holds only a layout it energised or found held, and never
+#: releases one at all - the release is the moment stored speeds start
+#: locomotives (measured 2026-08-09, run 5), and a diagnostic must not be what
+#: chooses that moment. With this flag the operator chooses it.
+DOCTOR_MEASURE_STATUS_BITS = Option(
+    name="--measure-status-bits",
+    type="boolean",
+    default=False,
+    help=(
+        "measure which status bit is emergency stop and which is emergency off (D13); "
+        "HOLDS the whole layout for one telegram and then releases it, so run it on a "
+        "track that is live with nothing held"
+    ),
+)
 DOCTOR_NO_SAVE = Option(
     name="--no-save",
     type="boolean",
@@ -277,7 +292,12 @@ _DOCTOR = CommandMeta(
     schema="railctl/doctor/v1",
     mutates=True,  # --power-on energises the track and holds the layout
     exit_codes=DOCTOR_EXIT_CODES,
-    options=(DOCTOR_POWER_ON, DOCTOR_NO_PROGRAMMING_TRACK, DOCTOR_NO_SAVE),
+    options=(
+        DOCTOR_POWER_ON,
+        DOCTOR_NO_PROGRAMMING_TRACK,
+        DOCTOR_MEASURE_STATUS_BITS,
+        DOCTOR_NO_SAVE,
+    ),
 )
 
 _STATUS = CommandMeta(

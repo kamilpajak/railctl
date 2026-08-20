@@ -45,12 +45,13 @@ runner = CliRunner()
 # tests/cli/test_schema.py already runs CliRunner() plain and reads `.stderr`.
 
 # Raw status bytes are fine in a test file - test_layering.py only scans
-# src/railctl, not tests/. STATUS_EMERGENCY_STOP=0x01, STATUS_EMERGENCY_OFF=0x02,
-# STATUS_AUTO_START=0x04, STATUS_SERVICE_MODE=0x08 (railctl/xbus/replies.py).
-# Bits 0 and 1 are the MEASURED order on this hardware, the reverse of the Lenz
-# spec - see docs/probe-results.md. These constants are built through
-# `from_raw`, never by naming the flags, so a future correction to that mapping
-# reaches this file without an edit.
+# src/railctl, not tests/. STATUS_AUTO_START=0x04, STATUS_SERVICE_MODE=0x08
+# (railctl/xbus/replies.py); bits 0 and 1 are the disputed pair and live in
+# `xbus/dialect.py` as `LENZ_23151` (emergency stop 0x01, emergency off 0x02),
+# the order MEASURED on this hardware and the reverse of the Lenz spec - see
+# docs/probe-results.md. These constants are built through `from_raw` with its
+# default order, never by naming the flags, so a future correction to that
+# mapping reaches this file without an edit.
 CLEAR_STATUS = StationStatus.from_raw(0x00)
 AUTO_START_STATUS = StationStatus.from_raw(0x04)
 EMERGENCY_STOP_STATUS = StationStatus.from_raw(0x01)
