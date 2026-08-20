@@ -86,9 +86,29 @@ def _isolated(monkeypatch, bench_config):
         monkeypatch.delenv(key)
 
 
-def _gate(question: str) -> None:
+def _gate(question: str, config: pytest.Config) -> None:
+    """Stop until the operator confirms. Skips rather than guesses when it cannot ask.
+
+    Two different things make stdin unanswerable here and the message has to say which,
+    because one looks exactly like the other and the remedies are opposite. Without `-s`
+    pytest has captured stdin and the fix is the flag. WITH `-s`, but launched from
+    something that is not a terminal - an agent shell, a CI job, a pipe - the flag is
+    already there and no flag will help: what this gate wants is a person looking at the
+    track, and there is nobody on the other end of a pipe to look.
+
+    The first is read off pytest's own `capture` option rather than sniffed off
+    `sys.stdin`. Sniffing was the first attempt and it was wrong: pytest replaces stdin
+    with a `DontReadFromInput` that carries a `buffer` attribute like a real stream, so
+    every duck-typed test for "is this captured" answers no while it is captured.
+    """
+    if config.getoption("capture") != "no":
+        pytest.skip("run with -s: pytest has captured stdin and the gate cannot read it")
     if not sys.stdin.isatty():
-        pytest.skip("run with -s: this file gates every stage on a human pressing Enter")
+        pytest.skip(
+            "stdin is not a terminal, so nobody can answer the gate - `-s` does not help "
+            "here. Run this file from a real terminal: every stage waits for a human to "
+            "confirm the track before it moves the layout"
+        )
     print(f"\n{'=' * 78}\n{question}\n{'=' * 78}")
     input("press Enter when ready, or Ctrl-C to stop here: ")
 
@@ -104,7 +124,7 @@ def _check(payload: dict, check_id: str) -> dict:
 
 
 def test_1_a_plain_doctor_run_does_not_measure_the_order_and_does_not_hold_the_layout(
-    bench_config,
+    bench_config, pytestconfig
 ):
     """Stage 1. The default, which must leave the layout exactly as it found it.
 
@@ -119,7 +139,8 @@ def test_1_a_plain_doctor_run_does_not_measure_the_order_and_does_not_hold_the_l
         "  - the Track Out LED is GREEN STEADY (live, nothing held)\n"
         "  - nothing on the main track that could run away\n"
         "\n"
-        "The layout must not so much as twitch during this stage."
+        "The layout must not so much as twitch during this stage.",
+        pytestconfig,
     )
     result = _run("doctor", "--no-programming-track", "--format", "json")
     assert result.exit_code == 0, result.stderr
@@ -130,7 +151,7 @@ def test_1_a_plain_doctor_run_does_not_measure_the_order_and_does_not_hold_the_l
     print(f"\nD13: {d13['detail']}")
 
 
-def test_2_the_measured_order_is_the_one_the_led_showed_on_2026_08_05(bench_config):
+def test_2_the_measured_order_is_the_one_the_led_showed_on_2026_08_05(bench_config, pytestconfig):
     """Stage 2. THE ISSUE #13 ACCEPTANCE SENTENCE.
 
     One emergency stop, one status read, one resume. The bit that moves is the
@@ -149,7 +170,8 @@ def test_2_the_measured_order_is_the_one_the_led_showed_on_2026_08_05(bench_conf
         "  - nothing on the main track that could run away\n"
         "\n"
         "WATCH THE LED: green steady -> green FLASHING -> green steady.\n"
-        "Red at any point is a finding, not a retry."
+        "Red at any point is a finding, not a retry.",
+        pytestconfig,
     )
     result = _run("doctor", "--measure-status-bits", "--no-programming-track", "--format", "json")
     assert result.exit_code == 0, result.stderr
