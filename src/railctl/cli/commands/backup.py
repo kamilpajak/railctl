@@ -177,22 +177,45 @@ _SWEEP_EXIT_NOTE: Final[str] = (
 #: replaced that clause is thin rather than absent, one CV out of five
 #: hundred, and that is what the text now says.
 #:
+#: Both claims stay in the past tense and named to this bench, and the opcode
+#: is named with them. A sweep that reaches this warning may be about to use
+#: the EXTENDED opcodes rather than the Z21 one - `sweep_bound` returns
+#: `MAX_CV_EXT` when `service_ext_cv` is proven and `z21_cv_opcodes` is not -
+#: and their reply bands `63 16` / `63 17` have never been seen on this bench
+#: at all (see the `HIGHEST_EXERCISED_CV` comment in `_sweep.py`). A bare
+#: "CV512 and up answer" would extend one opcode's measurement to an opcode
+#: nothing has measured, in the warning whose whole subject is how far the
+#: evidence goes.
+#:
 #: The same rewrite dropped "a zero cannot be told from a CV the decoder does
 #: not implement". It is true, but docs/probe-results.md is explicit that it
-#: applies at every CV number and is not a property of the high range, and
-#: `_SWEEP_EXIT_NOTE` already tells the operator once per run, whatever the
-#: bound. Saying it here attributed a universal caveat to this range alone.
+#: applies at every CV number and is not a property of the high range, so
+#: saying it here attributed a universal caveat to this range alone. That is
+#: the whole reason it left, and it does not depend on the caveat being said
+#: anywhere else.
+#:
+#: Where it IS said, exactly: `_SWEEP_EXIT_NOTE`, on the human summary of a
+#: sweep that wrote a file - `build_backup` appends it to `CommandResult.lines`,
+#: which only the `human` renderer prints, and returns before it for `--out -`.
+#: `--format=json` and `--format=ndjson` never carry it: the envelope has no
+#: `lines`, and the ndjson summary carries counts and the path. So a machine
+#: consumer of this run hears the zero-versus-unimplemented ambiguity from
+#: `--help` (exit code 9, `cli/_meta.py`) and not from the run's own output.
+#: That gap is real and is not this string's to close - putting it back here
+#: would state a property of CV1 inside a warning about CV512, which is the
+#: misattribution above. Closing it needs a field or an event of its own.
 #:
 #: `tests/cli/test_backup.py` pins these claims against the document's
 #: section, and says in its own docstring which kind of drift that catches.
 _UNEXERCISED_REASON: Final[str] = (
-    f"CV{HIGHEST_EXERCISED_CV + 1} and up answer - the first full sweep, on 2026-08-19, got an "
-    f"answer for every CV from {HIGHEST_EXERCISED_CV + 1} to {MAX_CV_Z21} through the Z21 opcode "
-    f"- and one value up there is corroborated: CV{CORROBORATED_HIGH_CV}, agreed on by two "
-    f"encodings with different field layouts and matching a third implementation's bytes; that "
-    f"is one CV out of five hundred, so the range is thinly measured rather than unmeasured, and "
-    f"a value read up there is not backed by anything the way CV{CORROBORATED_HIGH_CV} is; that "
-    f"does not mean those CVs do not work"
+    f"CV{HIGHEST_EXERCISED_CV + 1} and up answered on this bench on 2026-08-19, through the Z21 "
+    f"opcode: the first full sweep got an answer for every CV from {HIGHEST_EXERCISED_CV + 1} to "
+    f"{MAX_CV_Z21}, and the extended opcodes have never been seen to reply above "
+    f"CV{HIGHEST_EXERCISED_CV} - and one value up there is corroborated: "
+    f"CV{CORROBORATED_HIGH_CV}, agreed on by two encodings with different field layouts and "
+    f"matching a third implementation's bytes; that is one CV out of five hundred, so the range "
+    f"is thinly measured rather than unmeasured, and a value read up there is not backed by "
+    f"anything the way CV{CORROBORATED_HIGH_CV} is; that does not mean those CVs do not work"
 )
 
 #: How many holes the incomplete report names before it stops counting them

@@ -1238,17 +1238,23 @@ The repeating `x, 128, 8` and `x, 181, 8` triples look like ZIMO sound-sample as
 which is where the MS decoder's manual puts CV744 and up. That is a resemblance, not a
 verification.
 
-**What is NOT established: that any of those values is the CV it is labelled with.** A read
-of a CV the decoder does not implement can return 0 just as easily, and 500-odd of these are
-0. Nothing above CV511 has been checked against a known quantity — the way CV396/CV397 were
-checked against a documented 0-29 range when the index bank was settled. So
-`HIGHEST_EXERCISED_CV` stays at 511 and the sweep still warns, with its text corrected: the
-claim is no longer "nothing has ever answered up there", it is "nothing up there has been
-corroborated".
+**What this run did NOT establish: that any of those values is the CV it is labelled with.**
+A read of a CV the decoder does not implement can return 0 just as easily, and 500-odd of
+these are 0. When this run ended, nothing above CV511 had been checked against a known
+quantity — the way CV396/CV397 were checked against a documented 0-29 range when the index
+bank was settled.
 
-The way to settle it is to write a known value to one high CV through POM (POM covers
-CV1..1024 for writes) and read it back over the Z21 opcode. That needs a decoder we are
-willing to write to.
+That changed hours later. The section "A CV above 511 checked against a known value —
+SETTLED 2026-08-19" below did what this run could not: a known value was written to CV523
+through POM (POM covers CV1..1024 for writes) and read back over the Z21 opcode, and exactly
+that row changed. So one CV up there is corroborated and the rest are not.
+
+`HIGHEST_EXERCISED_CV` stays at 511 anyway — one checked CV out of five hundred does not
+exercise the range — and the sweep still warns, but the warning no longer says nothing up
+there has been checked. It says the range answered on this bench through the Z21 opcode,
+names CV523 as the one corroborated value, and calls the range thinly measured rather than
+unmeasured. It also keeps naming the opcode, because a sweep with only `service_ext_cv`
+proven uses the extended opcodes, whose reply bands are still unseen.
 
 ### CV100 did not answer, and only CV100
 

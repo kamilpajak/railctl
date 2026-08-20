@@ -1674,11 +1674,23 @@ def test_the_unexercised_reason_still_has_its_document_section_behind_it():
 
 def test_the_unexercised_reason_claims_exactly_what_the_section_settled():
     # Each assertion below is one claim of the cited section, in the order the
-    # section makes them: the range answers, one value in it is corroborated,
-    # and one value is all there is.
-    assert f"CV{HIGHEST_EXERCISED_CV + 1} and up answer" in _UNEXERCISED_REASON
-    assert "2026-08-19" in _UNEXERCISED_REASON
-    assert f"to {MAX_CV_Z21} through the Z21 opcode" in _UNEXERCISED_REASON
+    # section makes them: the range answered on this bench, through the opcode
+    # that answered, one value in it is corroborated, and one value is all
+    # there is.
+    #
+    # The first phrase is pinned WHOLE, date and opcode included. "CV512 and up
+    # answer" on its own would be a claim about the hardware, and this sweep may
+    # run the extended opcodes, which have never been seen to reply up there.
+    assert (
+        f"CV{HIGHEST_EXERCISED_CV + 1} and up answered on this bench on 2026-08-19, "
+        f"through the Z21 opcode"
+    ) in _UNEXERCISED_REASON
+    # Both ends of the range, in one phrase: pinning only the upper end lets the
+    # lower end drift away from the first clause and from details["from"].
+    assert f"every CV from {HIGHEST_EXERCISED_CV + 1} to {MAX_CV_Z21}" in _UNEXERCISED_REASON
+    assert (
+        f"extended opcodes have never been seen to reply above CV{HIGHEST_EXERCISED_CV}"
+    ) in _UNEXERCISED_REASON
     assert f"corroborated: CV{CORROBORATED_HIGH_CV}" in _UNEXERCISED_REASON
     assert "two encodings with different field layouts" in _UNEXERCISED_REASON
     assert "a third implementation" in _UNEXERCISED_REASON
@@ -1698,6 +1710,29 @@ def test_the_unexercised_reason_does_not_claim_the_two_things_it_may_not():
     assert "does not implement" not in _UNEXERCISED_REASON
     assert "cannot be told" not in _UNEXERCISED_REASON
     assert "cannot tell that from silence" in _SWEEP_EXIT_NOTE
+
+
+def test_the_document_does_not_still_deny_the_check_its_own_section_records():
+    """The M11 sweep section predates the CV523 check by hours and said, in flat
+    present tense, that nothing above CV511 had been checked against a known
+    quantity. The settled section below it disproves that, and probe-results.md
+    is the authority - it may not contradict itself, or the next reader takes
+    the earlier sentence for the current state of the bench.
+
+    Same for the CLI it describes: a document that quotes the warning has to
+    quote what the warning says.
+    """
+    doc = PROBE_RESULTS.read_text(encoding="utf-8")
+    assert "Nothing above CV511 has been checked against a known quantity" not in doc
+    for quoted in ('"nothing up there has been corroborated"', '"not corroborated"'):
+        assert quoted not in doc, (
+            f"probe-results.md quotes {quoted} as the sweep warning's claim, and the "
+            f"warning does not say it; reread _UNEXERCISED_REASON and requote"
+        )
+    # The M11 section has to hand the reader on to the check that settled it,
+    # rather than leaving its own open question looking open.
+    swept = doc.split("### Everything above CV511 answered", 1)[1].split("\n### ", 1)[0]
+    assert f"CV{CORROBORATED_HIGH_CV}" in swept
 
 
 def test_the_unexercised_range_is_named_once_when_the_sweep_passes_cv511(monkeypatch, tmp_path):
