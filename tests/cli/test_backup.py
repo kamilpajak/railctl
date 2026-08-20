@@ -1694,6 +1694,12 @@ def test_the_unexercised_reason_claims_exactly_what_the_section_settled():
     assert f"corroborated: CV{CORROBORATED_HIGH_CV}" in _UNEXERCISED_REASON
     assert "two encodings with different field layouts" in _UNEXERCISED_REASON
     assert "a third implementation" in _UNEXERCISED_REASON
+    # "one value is all there is" - the QUANTITY, not only the adjective that
+    # follows from it. "thinly measured" on its own is a soft word a reader can
+    # size however they like; one CV out of five hundred is the reason the
+    # boundary did not move, and the comment above the string says this is what
+    # the text now says. Drop the count and "thinly" stops being backed.
+    assert "one CV out of five hundred" in _UNEXERCISED_REASON
     assert "thinly measured rather than unmeasured" in _UNEXERCISED_REASON
     assert f"not backed by anything the way CV{CORROBORATED_HIGH_CV} is" in _UNEXERCISED_REASON
     assert "does not mean those CVs do not work" in _UNEXERCISED_REASON
