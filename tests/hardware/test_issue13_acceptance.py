@@ -9,9 +9,19 @@ pytest owns stdin, the gate cannot read it, and the whole file skips.
 
 WHAT YOU NEED AT THE BENCH
     * the YD7010 connected over USB, nothing else driving the layout
-    * the track LIVE and NOTHING HELD - `railctl power resume` if the front-panel
-      Track Out LED is flashing green, `railctl power on` if it is red. D13 refuses
-      to measure from any other state, and says which half of that it found
+    * the track LIVE and NOTHING HELD, which is status 0x04. D13 refuses to measure
+      from any other state and says which half of that it found. Getting there:
+
+          LED green steady   -> already right, `railctl status` to confirm 0x04
+          LED green flashing -> `railctl power resume`
+          LED red            -> `railctl power on` AND THEN `railctl power resume`
+
+      Both commands, not just the first: `power on` energises the track and then
+      holds it (measured 2026-08-09, "`power on`'s stop-all was in the wrong
+      order"), so it leaves status 0x05 - live, with the emergency-stop bit set.
+      That is a disputed bit already set, and D13 refuses on it. The release is
+      the second half and it is the step that can start a locomotive, which is
+      why the next bullet is not optional
     * NOTHING STANDING ON THE MAIN TRACK THAT CAN RUN AWAY. Stage 2 holds the whole
       layout with an emergency stop and then releases it, and a release is when a
       locomotive with a stored speed starts moving (measured 2026-08-09, run 5)
