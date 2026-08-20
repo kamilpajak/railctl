@@ -24,11 +24,17 @@ from railctl.backup import BACKUP_SCHEMA, read_backup
 from railctl.catalog import curated_cvs, load_catalog
 from railctl.cli._meta import command_meta
 from railctl.cli.commands._sweep import (
+    CORROBORATED_HIGH_CV,
     HIGHEST_EXERCISED_CV,
     SWEEP_ESTIMATE_AFTER,
     SWEEP_PROGRESS_EVERY,
 )
-from railctl.cli.commands.backup import INCOMPLETE_LIST_MAX, SET_NAME
+from railctl.cli.commands.backup import (
+    _SWEEP_EXIT_NOTE,
+    _UNEXERCISED_REASON,
+    INCOMPLETE_LIST_MAX,
+    SET_NAME,
+)
 from railctl.cli.commands.cv import PROG_TRACK_NOTICE, SILENCE_GUIDANCE
 from railctl.cli.main import app
 from railctl.errors import (
@@ -48,7 +54,7 @@ from railctl.station import (
     ProgMode,
     Station,
 )
-from railctl.xbus.cv import MAX_CV_DIRECT, MAX_CV_EXT
+from railctl.xbus.cv import MAX_CV_DIRECT, MAX_CV_EXT, MAX_CV_Z21
 from railctl.xbus.replies import StationStatus, StationVersion
 
 runner = CliRunner()
@@ -1624,6 +1630,76 @@ def test_the_ndjson_sweep_carries_the_estimate_as_an_event_and_no_progress_lines
 # -- the unexercised range -----------------------------------------------------
 
 
+#: The document the unexercised warning cites, found from the repo root
+#: relative to this file so a checkout anywhere still resolves it.
+PROBE_RESULTS = Path(__file__).resolve().parents[2] / "docs" / "probe-results.md"
+
+#: The heading of the section that settled CV523. The date is part of the
+#: citation: a section rewritten under a new date is a new measurement, and
+#: this text has to be reread when that happens.
+SETTLED_SECTION = "## A CV above 511 checked against a known value — SETTLED 2026-08-19"
+
+
+def _settled_section() -> str:
+    """The cited section alone, so a CV523 mentioned elsewhere in the document
+    cannot stand in for the one this warning rests on."""
+    doc = PROBE_RESULTS.read_text(encoding="utf-8")
+    assert SETTLED_SECTION in doc, (
+        f"{PROBE_RESULTS.name} no longer carries the section the sweep warning "
+        f"cites; reread the warning's text before renaming or redating it"
+    )
+    return doc.split(SETTLED_SECTION, 1)[1].split("\n## ", 1)[0]
+
+
+def test_the_unexercised_reason_still_has_its_document_section_behind_it():
+    """Binds the warning's text to the measurement it cites.
+
+    What this CAN catch: the evidence going away. Delete the settled section,
+    rename it, redate it, or take CV523 out of it, and this turns red instead
+    of the CLI going on claiming a corroboration the document no longer
+    records.
+
+    What this CANNOT catch: new evidence ARRIVING. Nothing automatable
+    notices that a fresh bench result has made a sentence too strong, and
+    that is exactly how this one went stale twice - the first full sweep made
+    "never answered" false, and the CV523 check below made "no value has been
+    checked against a known quantity" false. Both times the suite stayed
+    green. A new measurement above CV511 still needs a
+    person to come back and reread this text; the drift is NOT covered.
+    """
+    section = _settled_section()
+    assert f"CV{CORROBORATED_HIGH_CV}" in section
+    assert CORROBORATED_HIGH_CV > HIGHEST_EXERCISED_CV
+
+
+def test_the_unexercised_reason_claims_exactly_what_the_section_settled():
+    # Each assertion below is one claim of the cited section, in the order the
+    # section makes them: the range answers, one value in it is corroborated,
+    # and one value is all there is.
+    assert f"CV{HIGHEST_EXERCISED_CV + 1} and up answer" in _UNEXERCISED_REASON
+    assert "2026-08-19" in _UNEXERCISED_REASON
+    assert f"to {MAX_CV_Z21} through the Z21 opcode" in _UNEXERCISED_REASON
+    assert f"corroborated: CV{CORROBORATED_HIGH_CV}" in _UNEXERCISED_REASON
+    assert "two encodings with different field layouts" in _UNEXERCISED_REASON
+    assert "a third implementation" in _UNEXERCISED_REASON
+    assert "thinly measured rather than unmeasured" in _UNEXERCISED_REASON
+    assert f"not backed by anything the way CV{CORROBORATED_HIGH_CV} is" in _UNEXERCISED_REASON
+    assert "does not mean those CVs do not work" in _UNEXERCISED_REASON
+
+
+def test_the_unexercised_reason_does_not_claim_the_two_things_it_may_not():
+    # 1. That nothing up there has been checked. The section is the check.
+    assert "known quantity" not in _UNEXERCISED_REASON
+    assert "not corroborated" not in _UNEXERCISED_REASON
+    # 2. That zero-versus-unimplemented is a property of the high range. The
+    #    document says it applies at every CV number, and the run already says
+    #    it once, on every sweep, whatever the bound - so it is not repeated
+    #    here and this pins where it does live.
+    assert "does not implement" not in _UNEXERCISED_REASON
+    assert "cannot be told" not in _UNEXERCISED_REASON
+    assert "cannot tell that from silence" in _SWEEP_EXIT_NOTE
+
+
 def test_the_unexercised_range_is_named_once_when_the_sweep_passes_cv511(monkeypatch, tmp_path):
     _install(monkeypatch, FakeBackupStation(capabilities=EXT_CAPS))
     out = tmp_path / "unexercised.json"
@@ -1635,9 +1711,9 @@ def test_the_unexercised_range_is_named_once_when_the_sweep_passes_cv511(monkeyp
     assert warning["details"]["from"] == HIGHEST_EXERCISED_CV + 1
     assert warning["details"]["to"] == MAX_CV_EXT
     # The claim is about the evidence, not about the hardware.
-    assert "not corroborated" in warning["details"]["reason"]
+    assert "thinly measured rather than unmeasured" in warning["details"]["reason"]
     assert "does not mean those CVs do not work" in warning["details"]["reason"]
-    said = [line for line in result.stderr.splitlines() if "not corroborated" in line]
+    said = [line for line in result.stderr.splitlines() if "thinly measured" in line]
     assert len(said) == 1
 
 
@@ -1648,7 +1724,7 @@ def test_the_unexercised_range_is_silent_when_the_sweep_stops_at_255(monkeypatch
     assert result.exit_code == 0, result.stderr
     names = [w["name"] for w in json.loads(result.stdout)["warnings"]]
     assert "sweep.unexercised_range" not in names
-    assert "not corroborated" not in result.stderr
+    assert "thinly measured" not in result.stderr
 
 
 def test_the_unexercised_range_rides_the_ndjson_stream_as_an_event(monkeypatch, tmp_path):

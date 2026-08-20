@@ -89,6 +89,7 @@ from railctl.cli._meta import (
     typer_option,
 )
 from railctl.cli.commands._sweep import (
+    CORROBORATED_HIGH_CV,
     HIGHEST_EXERCISED_CV,
     SWEEP_CONFIRM_SECONDS,
     SWEEP_ESTIMATE_AFTER,
@@ -128,7 +129,7 @@ from railctl.errors import (
     exit_code_for,
 )
 from railctl.station import CvPage, CvReadOutcome, CvResult, CvSpec, ProgMode
-from railctl.xbus.cv import MAX_CV_DIRECT, MAX_CV_EXT
+from railctl.xbus.cv import MAX_CV_DIRECT, MAX_CV_EXT, MAX_CV_Z21
 
 if TYPE_CHECKING:
     from collections.abc import Mapping
@@ -161,18 +162,37 @@ _SWEEP_EXIT_NOTE: Final[str] = (
 )
 
 #: What passing `HIGHEST_EXERCISED_CV` does and does not mean. The claim is
-#: about this bench's EVIDENCE, not about the decoder, and what the evidence
-#: says changed on 2026-08-19: the first full sweep got an answer for every CV
-#: from 512 to 1024 through the Z21 opcode. So "never answered" is no longer
-#: true and this text no longer says it. What is still true is the part that
-#: matters - no value up there has been checked against anything, and a zero
-#: cannot be told from a CV the decoder does not implement, which is the
-#: project's founding rule applied to a number instead of a capability.
+#: about this bench's EVIDENCE, not about the decoder, so it moves whenever a
+#: measurement lands - twice inside one day so far, and both moves shortened
+#: it.
+#:
+#: 2026-08-19, the first full sweep: it got an answer for every CV from 512 to
+#: 1024 through the Z21 opcode, so "never answered" stopped being true and
+#: this text stopped saying it.
+#:
+#: Later the same day, the CV523 check (`CORROBORATED_HIGH_CV`): a value
+#: written through one opcode family was read back through another, so "no
+#: value read there has been checked against a known quantity" stopped being
+#: true as well - and unlike the first move, this text did not follow. What
+#: replaced that clause is thin rather than absent, one CV out of five
+#: hundred, and that is what the text now says.
+#:
+#: The same rewrite dropped "a zero cannot be told from a CV the decoder does
+#: not implement". It is true, but docs/probe-results.md is explicit that it
+#: applies at every CV number and is not a property of the high range, and
+#: `_SWEEP_EXIT_NOTE` already tells the operator once per run, whatever the
+#: bound. Saying it here attributed a universal caveat to this range alone.
+#:
+#: `tests/cli/test_backup.py` pins these claims against the document's
+#: section, and says in its own docstring which kind of drift that catches.
 _UNEXERCISED_REASON: Final[str] = (
-    f"CV{HIGHEST_EXERCISED_CV + 1} and up first answered on this bench on 2026-08-19, and no "
-    f"value read there has been checked against a known quantity, so it is not corroborated "
-    f"by any measurement and a zero cannot be told from a CV the decoder does not implement; "
-    f"that does not mean those CVs do not work"
+    f"CV{HIGHEST_EXERCISED_CV + 1} and up answer - the first full sweep, on 2026-08-19, got an "
+    f"answer for every CV from {HIGHEST_EXERCISED_CV + 1} to {MAX_CV_Z21} through the Z21 opcode "
+    f"- and one value up there is corroborated: CV{CORROBORATED_HIGH_CV}, agreed on by two "
+    f"encodings with different field layouts and matching a third implementation's bytes; that "
+    f"is one CV out of five hundred, so the range is thinly measured rather than unmeasured, and "
+    f"a value read up there is not backed by anything the way CV{CORROBORATED_HIGH_CV} is; that "
+    f"does not mean those CVs do not work"
 )
 
 #: How many holes the incomplete report names before it stops counting them
@@ -892,7 +912,7 @@ class _BackupRun:
         open, so a sweep planned at the desk would be a guess about how many
         CVs to read. The warning goes out ahead of the question on purpose:
         an operator agreeing to half an hour of reads should already know
-        which part of the range nothing has ever corroborated.
+        which part of the range rests on a single corroborated value.
         """
         bound = sweep_bound(mode, station.capabilities)
         if bound > HIGHEST_EXERCISED_CV:

@@ -228,7 +228,7 @@ def test_3_a_full_sweep_completes_and_agrees_with_the_curated_backup(bench_confi
     )
     # The claim about the unexercised range is published, not just printed.
     warning = next((w for w in payload["warnings"] if w["name"] == "sweep.unexercised_range"), None)
-    assert warning is not None, "a sweep past CV511 must say nothing has been read there"
+    assert warning is not None, "a sweep past CV511 must publish how thin the evidence is there"
     assert warning["details"]["to"] == EXPECTED_BOUND
     # The reader is strict, and a file it refuses is a defect in the writer.
     assert read_backup(swept).loco["address"] == int(ACCEPTANCE_ADDRESS)

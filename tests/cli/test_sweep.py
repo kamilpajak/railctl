@@ -19,6 +19,7 @@ from hypothesis import strategies as st
 from railctl.backup import SOURCE_CATALOG, SOURCE_SWEEP
 from railctl.catalog import load_catalog
 from railctl.cli.commands._sweep import (
+    CORROBORATED_HIGH_CV,
     HIGHEST_EXERCISED_CV,
     SWEEP_CONFIRM_SECONDS,
     SWEEP_ESTIMATE_AFTER,
@@ -268,3 +269,11 @@ def test_the_constants_are_the_measured_and_agreed_values():
     assert SWEEP_PROGRESS_EVERY == 32
     assert SWEEP_SET_NAME == "all"
     assert HIGHEST_EXERCISED_CV == 511
+    assert CORROBORATED_HIGH_CV == 523
+
+
+def test_the_corroborated_cv_sits_above_the_boundary_it_is_evidence_about():
+    # A CV at or below the boundary would say nothing about the swept range,
+    # and the warning that names it would be citing the wrong measurement.
+    assert CORROBORATED_HIGH_CV > HIGHEST_EXERCISED_CV
+    assert CORROBORATED_HIGH_CV <= MAX_CV_Z21
