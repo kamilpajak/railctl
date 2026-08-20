@@ -107,6 +107,32 @@ measure unless the track is live with neither disputed bit already set, because 
 already set is a bit the stop cannot be credited with. `null` in the capabilities file means
 nobody ran it - never that the station uses the default.
 
+#### The tool reproduces the hand measurement - ACCEPTANCE PASSED 2026-08-20
+
+Run at the bench with the main track empty and the locomotive on the programming track, from
+`0x04` (live, nothing held). `tests/hardware/test_issue13_acceptance.py`, two stages, both passed.
+
+Stage 1, a plain `railctl doctor --no-programming-track`: D13 `skip`, `status_bit_order` stays
+`null`, and the layout block reads `hold_applied: false, held: false, must_leave_held: false` -
+the run did not touch the layout, and "nobody asked" is recorded as `null` rather than as the
+default.
+
+Stage 2, the same run with `--measure-status-bits`:
+
+    62 22 04   before, live and released
+    80 80      the hold
+    62 22 05   after - bit 0 went from clear to set
+    21 81      the release
+    62 22 04   confirmed clear again
+
+`status_bit_order: "lenz_23151"`, `hold_applied: true`, `held: false`, `must_leave_held: false`.
+Bit 0 is emergency stop and bit 1 is emergency off, which is what 2026-08-05 established by hand
+against the LED - now established by the tool, on its own, in 22 seconds including both gates.
+
+The whole point of the exercise: this is the same answer arrived at through an instrument rather
+than through a constant in the source. A station that answered `lenz_spec` here would be a finding
+about that station, not a bug in the default.
+
 ### Second finding from the same run
 
 `21 80` and `21 81` are both answered with the generic ack `01 04 05`, never `61 00` / `61 01`.
