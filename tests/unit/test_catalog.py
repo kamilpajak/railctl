@@ -130,11 +130,23 @@ def test_the_verified_entry_counts():
 # --- the smoke generator (MS manual 3.21, bench 2026-08-21) ----------------
 
 
+#: What each of the three smoke CVs is, as the ZIMO MS450P22 manual, 3.21,
+#: denominates it: a DRIVING STATE, not a point on a speed axis. Slug and
+#: description are pinned together, because the slug is what `cv read` and a
+#: backup row publish and the description is what the reader of this catalog
+#: gets - they must not be allowed to drift apart.
+SMOKE_DRIVING_STATES = {
+    137: ("smoke_pwm_standstill", "at standstill"),
+    138: ("smoke_pwm_steady_speed", "at steady speed"),
+    139: ("smoke_pwm_acceleration", "while accelerating"),
+}
+
+
 def test_the_three_smoke_curve_cvs_are_named_and_grouped():
     assert [CATALOG[cv].slug for cv in (137, 138, 139)] == [
         "smoke_pwm_standstill",
-        "smoke_pwm_min_speed",
-        "smoke_pwm_max_speed",
+        "smoke_pwm_steady_speed",
+        "smoke_pwm_acceleration",
     ]
     # `lights` and not a group of its own: the curve is inert without an
     # effect code in CV127-132, which is already `lights`, so splitting them
@@ -142,34 +154,71 @@ def test_the_three_smoke_curve_cvs_are_named_and_grouped():
     assert {CATALOG[cv].group for cv in (137, 138, 139)} == {"lights"}
 
 
+def test_each_smoke_cv_names_the_driving_state_it_governs():
+    """The manual indexes these three by driving state, not by speed.
+
+    Section 3.21 denominates them "PWM at stand still", "PWM at steady speed"
+    ("PWM of FOx at steady speed", in force from speed step 1 for all constant
+    driving) and "PWM during acceleration". JMRI's ENGLISH labels in
+    `zimo/CV107-CV199_MS-MN-FS.xml` say "at minimum speed" and "at max speed",
+    which is a translation slip - the German labels in the same variables read
+    "Rauch bei Fahrt" and "Rauch bei Beschleunigung", agreeing with the manual.
+
+    Reading CV139 as a top-speed setting costs an afternoon: a cruising plume
+    is governed by CV138 whatever the speed, so writing 255 to CV139 changes
+    nothing until the locomotive accelerates. Both halves are asserted per CV,
+    so swapping two descriptions or moving one word off the driving state
+    fails here rather than shipping.
+    """
+    for cv, (slug, state) in SMOKE_DRIVING_STATES.items():
+        assert CATALOG[cv].slug == slug, cv
+        assert state in CATALOG[cv].desc, cv
+        assert "minimum speed" not in CATALOG[cv].desc, cv
+        assert "maximum speed" not in CATALOG[cv].desc, cv
+
+
 def test_the_smoke_curve_says_which_decoder_family_it_describes():
     """CV137-139 do not mean the same thing across the two families this
-    catalog covers, and `cv read 137` prints one description for both.
+    catalog covers, and this file is read by hand by an operator who has one
+    of them in front of them. (No command renders `desc`; `cv read` and a
+    backup row publish the slug. The reader this protects is the reader of
+    the TOML.)
 
     JMRI's own definitions disagree with each other on these three numbers:
     `zimo/CV107-CV199_MS-MN-FS.xml` (which lists MS450 version 5+) calls
     CV137 "Smoke PWM at standstill", and `Zimo_MX62_v22+.xml` and
     `Zimo_MX63_MX64H_v22-30.xml` call the same CV "Deactivating HLU direction
-    bits". A description that stated one meaning flat would tell the reader of
-    the other decoder something false, so each of the three names its family
-    the way CV144 already does.
+    bits". Those two files are the whole of the HLU reading in the checkout,
+    and between them they declare MX62, MX63, MX64 and MX64H - so the
+    discriminator is the MODEL, not a software boundary, and each of the four
+    has to be named or its owner finds their decoder in neither clause.
     """
     for cv in (137, 138, 139):
         desc = CATALOG[cv].desc
         assert "MS family:" in desc, cv
         assert "MX family:" in desc, cv
+        # The full list, as one phrase: "MX64" alone is a substring of
+        # "MX64H", so a per-model containment check cannot see it missing.
+        assert "MX62, MX63, MX64 and MX64H" in desc, cv
+        # No software boundary on the smoke side. zimo/CV100-CV152.xml gives
+        # the smoke meaning at software 25, Zimo_MX640_v4.xml at software 4,
+        # and Zimo_MX69MX690.xml with no version gate at all.
+        assert "from software 30" not in desc, cv
 
 
 def test_the_effect_range_names_both_smoke_codes_and_the_curve_trap():
     """The one fact about CV127-132 that costs an afternoon: the effect code
     alone does nothing. The ZIMO MS manual, 3.21, is explicit that CV137-139
-    must be given values or smoke stays off for good."""
+    must be given values, or the generator produces no smoke - a condition
+    that ends the moment they are written, so the text must not read as
+    permanent."""
     for index, cv in enumerate(range(127, 133), start=1):
         desc = CATALOG[cv].desc
         assert desc.startswith(f"Effect for output FA{index}:"), cv
         assert "72 = steam" in desc, cv
         assert "80 = diesel" in desc, cv
         assert "CV137-139" in desc, cv
+        assert "for good" not in desc, cv
 
 
 def test_the_range_expansions_read_back_by_slug():

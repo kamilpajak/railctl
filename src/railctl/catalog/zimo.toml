@@ -256,39 +256,58 @@ first = 127
 last = 132
 index_start = 1
 slug_template = "effect_fa{i}"
-desc_template = "Effect for output FA{i}: lighting effects, smoke generator or uncoupler by effect code (MS manual 3.21); 72 = steam smoke, 80 = diesel smoke, and an effect code with no curve in CV137-139 leaves smoke switched off for good"
+desc_template = "Effect for output FA{i}: lighting effects, smoke generator or uncoupler by effect code (MS manual 3.21); 72 = steam smoke, 80 = diesel smoke, and an effect code produces no smoke at all until CV137-139 are given values (they default to 0)"
 group = "lights"
 
-# The smoke generator curve. Established 2026-08-21 from two sources that agree:
-# the ZIMO MS450P22 manual, 3.21 "Konfiguration von Rauchgeneratoren" (whose
+# The smoke generator characteristic, CV137-139. Established 2026-08-21 from
+# the ZIMO MS450P22 manual, 3.21 "Konfiguration von Rauchgeneratoren", whose
 # worked example is a Seuthe 18 V generator on a 20 V track - CV137 = 70..90,
-# CV138 = 200, CV139 = 255), and JMRI's MS-family definition
-# xml/decoders/zimo/CV107-CV199_MS-MN-FS.xml, which lists MS450 version 5+.
+# CV138 = 200, CV139 = 255.
+#
+# Named by DRIVING STATE, because that is how the manual denominates them in
+# both of its CV tables: #137 "PWM at stand still", #138 "PWM at steady speed"
+# ("PWM of FOx at steady speed", in force from speed step 1 for all constant
+# driving), #139 "PWM during acceleration". They are three states, not three
+# points on a speed axis, and the difference is not cosmetic: a plume held at
+# a constant speed is governed by CV138 however fast the locomotive is going,
+# so a value written to CV139 changes nothing until it accelerates.
+#
+# JMRI is a second source but not an agreeing one. The ENGLISH labels in
+# xml/decoders/zimo/CV107-CV199_MS-MN-FS.xml read "Smoke PWM at minimum speed"
+# and "Smoke PWM at max speed"; the GERMAN labels on the same two variables
+# read "Rauch bei Fahrt" and "Rauch bei Beschleunigung", which is the manual's
+# wording. The English labels are the translation slip, and the manual wins.
 #
 # The three numbers are NOT family-neutral, so each description says whose
-# meaning it gives. JMRI's own files disagree: the MS-family fragment and the
-# MX6xx fragments from software 30 (zimo/CV100-CV152*.xml) call them the smoke
-# curve, while Zimo_MX62_v22+.xml and Zimo_MX63_MX64H_v22-30.xml give CV137-139
-# to HLU direction settings on those older decoders.
+# meaning it gives. In the JMRI checkout the smoke meaning is the rule across
+# the MX family too, with no software boundary: zimo/CV100-CV152.xml carries it
+# for 58 MX6xx definitions at software 25, 27 and 28, Zimo_MX640_v4.xml carries
+# it at software 4, and Zimo_MX69MX690.xml carries it with no version gate at
+# all. The HLU meaning lives in exactly two files, Zimo_MX62_v22+.xml and
+# Zimo_MX63_MX64H_v22-30.xml, which between them declare MX62, MX63, MX64 and
+# MX64H at software 22-34. The discriminator is the MODEL, not a version, so
+# all four are named - an MX64 owner reading a list of MX62 and MX63/MX64H
+# would find their decoder in neither clause.
 #
 # Plain on/off smoke through a function output needs none of these - the effect
-# code and this curve exist only to make the plume follow speed.
+# code and this characteristic exist only to make the plume follow the driving
+# state.
 [[cv]]
 num = 137
 slug = "smoke_pwm_standstill"
-desc = "MS family: smoke generator PWM at standstill, first point of the CV137-139 curve. MX family: the same on MX6xx from software 30, but HLU direction bits on MX62 and MX63/MX64H software 22-34"
+desc = "MS family: smoke generator PWM at standstill, first of the three CV137-139 driving states. MX family: the same, except on the MX62, MX63, MX64 and MX64H (software 22-34), where CV137 is the HLU direction bits"
 group = "lights"
 
 [[cv]]
 num = 138
-slug = "smoke_pwm_min_speed"
-desc = "MS family: smoke generator PWM at minimum speed, second point of the CV137-139 curve. MX family: the same on MX6xx from software 30, but the HLU stop-section conversion on MX62 and MX63/MX64H software 22-34"
+slug = "smoke_pwm_steady_speed"
+desc = "MS family: smoke generator PWM at steady speed, in force from speed step 1 for all constant driving rather than at the low end of a speed curve. MX family: the same, except on the MX62, MX63, MX64 and MX64H (software 22-34), where CV138 is the HLU stop-section conversion"
 group = "lights"
 
 [[cv]]
 num = 139
-slug = "smoke_pwm_max_speed"
-desc = "MS family: smoke generator PWM at maximum speed, third point of the CV137-139 curve. MX family: the same on MX6xx from software 30, but the HLU F/L/U conversion on MX62 and MX63/MX64H software 22-34"
+slug = "smoke_pwm_acceleration"
+desc = "MS family: smoke generator PWM while accelerating; a plume at a constant speed stays on the CV138 value however fast it is going. MX family: the same, except on the MX62, MX63, MX64 and MX64H (software 22-34), where CV139 is the HLU F/L/U conversion"
 group = "lights"
 
 [[cv]]
