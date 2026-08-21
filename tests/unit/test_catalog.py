@@ -221,6 +221,23 @@ def test_the_effect_range_names_both_smoke_codes_and_the_curve_trap():
         assert "for good" not in desc, cv
 
 
+def test_the_m10_bench_text_states_the_curated_size_the_catalog_produces():
+    """The M10 acceptance script tells the operator at the bench how many CVs
+    stage 2 will read and how long to wait for it. That number is a property
+    of this catalog, and it drifted silently when three CVs were added -
+    nothing ran the file, because it is deselected without the hardware. So
+    the prose is checked here, where it runs on every commit.
+
+    The 6 s per CV is a measurement from 2026-08-13 and stays as it is; only
+    the count is derived.
+    """
+    curated = len(curated_cvs(CATALOG, CV29_THREE_POINT))
+    text = (Path(__file__).parents[1] / "hardware" / "test_m10_acceptance.py").read_text()
+    stated = {int(n) for n in re.findall(r"(\d+)[ -]CVs? at 6 s each", text)}
+    stated |= {int(n) for n in re.findall(r"real (\d+)-CV backup", text)}
+    assert stated == {curated}, stated
+
+
 def test_the_range_expansions_read_back_by_slug():
     assert CATALOG[35].slug == "fn_map_f01"
     assert CATALOG[46].slug == "fn_map_f12"
