@@ -8,7 +8,7 @@ ascending through `Station.cv_read_many`. Nothing read in an earlier step is
 re-read.
 
 `--all` (M11) changes exactly one thing about that: the planned list is every
-CV inside `_sweep.sweep_bound` instead of the 77 the catalog names, so a
+CV inside `_sweep.sweep_bound` instead of the 80 the catalog names, so a
 decoder's undocumented settings land in the file too. Everything else holds -
 the same order, the same page gate, the same three-valued rows - and the file
 says which set it is (`"set": "all"`, `sweep_range`, `source: sweep` on the
@@ -26,7 +26,7 @@ Three properties are load-bearing here rather than emergent:
   neutral is a set and not the single pair 0:0 this once assumed;
 * **`--mode auto` never gambles on POM.** It resolves to the programming
   track unless `pom_read` is MEASURED working - on this station a silent POM
-  attempt costs 6.7 s per CV (docs/probe-results.md R1), and 77 of those is
+  attempt costs 6.7 s per CV (docs/probe-results.md R1), and 80 of those is
   not a backup, it is a nine-minute timeout;
 * **the file is the product, the exit code is its label.** A hole
   (`no_response`/`error`) still delivers the document - the file (or the
@@ -410,7 +410,7 @@ def resolve_backup_mode(mode_word: str, capabilities: Capabilities) -> ProgMode:
 
     `auto` resolves to POM only when `pom_read` is a MEASURED yes; `None`
     (unprobed) falls to the programming track, where `cv read`'s AUTO would
-    try POM and record the outcome. One exploratory read is a fair probe; 77
+    try POM and record the outcome. One exploratory read is a fair probe; 80
     silent POM attempts at 6.7 s each is not a backup. An explicit
     `--mode pom` is refused only on a measured no (exit 16), naming both
     remedies - the re-probe, and the programming track.
@@ -564,8 +564,8 @@ def plan_backup(
     """Validate the invocation and resolve the target path, station untouched.
 
     The overwrite refusal lives here on purpose: `backup_path` only resolves
-    the path, and refusing AFTER the station opened would cost the operator a
-    77-read run - or a sweep's half hour - to learn the file already existed.
+    the path, and refusing AFTER the station opened would cost the operator
+    an 80-read run - or a sweep's half hour - to learn the file already existed.
     The set name is decided here for the same reason: it is what names the
     file, so `--all` writes `loco-0003-all.json` and can never land on top of
     a curated backup.

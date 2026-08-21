@@ -1,7 +1,7 @@
 # src/railctl/cli/commands/_sweep.py
 """The arithmetic behind `railctl backup --all` (design C6, milestone M11).
 
-A sweep reads every CV the resolved mode can reach instead of the 77 the
+A sweep reads every CV the resolved mode can reach instead of the 80 the
 curated catalog names, so a decoder's undocumented settings land in the file
 too. Four decisions have to be made before a single byte goes down the wire -
 how far the sweep may go, what each swept CV is called, how long the whole

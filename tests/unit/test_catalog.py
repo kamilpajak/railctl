@@ -122,9 +122,54 @@ def test_the_three_rows_with_explicit_ranges_carry_them():
 
 
 def test_the_verified_entry_counts():
-    """The spec's counts (77 default / 105 with the speed table) hold post-dedup."""
-    assert len(CATALOG) == 105
+    """The counts hold post-dedup: 80 default, 108 with the speed table."""
+    assert len(CATALOG) == 108
     assert len([e for e in CATALOG.values() if e.needs_speed_table]) == 28
+
+
+# --- the smoke generator (MS manual 3.21, bench 2026-08-21) ----------------
+
+
+def test_the_three_smoke_curve_cvs_are_named_and_grouped():
+    assert [CATALOG[cv].slug for cv in (137, 138, 139)] == [
+        "smoke_pwm_standstill",
+        "smoke_pwm_min_speed",
+        "smoke_pwm_max_speed",
+    ]
+    # `lights` and not a group of its own: the curve is inert without an
+    # effect code in CV127-132, which is already `lights`, so splitting them
+    # would put one setting's two halves in two groups.
+    assert {CATALOG[cv].group for cv in (137, 138, 139)} == {"lights"}
+
+
+def test_the_smoke_curve_says_which_decoder_family_it_describes():
+    """CV137-139 do not mean the same thing across the two families this
+    catalog covers, and `cv read 137` prints one description for both.
+
+    JMRI's own definitions disagree with each other on these three numbers:
+    `zimo/CV107-CV199_MS-MN-FS.xml` (which lists MS450 version 5+) calls
+    CV137 "Smoke PWM at standstill", and `Zimo_MX62_v22+.xml` and
+    `Zimo_MX63_MX64H_v22-30.xml` call the same CV "Deactivating HLU direction
+    bits". A description that stated one meaning flat would tell the reader of
+    the other decoder something false, so each of the three names its family
+    the way CV144 already does.
+    """
+    for cv in (137, 138, 139):
+        desc = CATALOG[cv].desc
+        assert "MS family:" in desc, cv
+        assert "MX family:" in desc, cv
+
+
+def test_the_effect_range_names_both_smoke_codes_and_the_curve_trap():
+    """The one fact about CV127-132 that costs an afternoon: the effect code
+    alone does nothing. The ZIMO MS manual, 3.21, is explicit that CV137-139
+    must be given values or smoke stays off for good."""
+    for index, cv in enumerate(range(127, 133), start=1):
+        desc = CATALOG[cv].desc
+        assert desc.startswith(f"Effect for output FA{index}:"), cv
+        assert "72 = steam" in desc, cv
+        assert "80 = diesel" in desc, cv
+        assert "CV137-139" in desc, cv
 
 
 def test_the_range_expansions_read_back_by_slug():
@@ -146,13 +191,13 @@ def test_the_family_and_schema_constants():
 
 def test_curated_cvs_without_bit_4_excludes_the_speed_table():
     cvs = curated_cvs(CATALOG, CV29_THREE_POINT)
-    assert len(cvs) == 77
+    assert len(cvs) == 80
     assert not SPEED_TABLE_CVS & set(cvs)
 
 
 def test_curated_cvs_with_bit_4_includes_the_speed_table():
     cvs = curated_cvs(CATALOG, CV29_SPEED_TABLE)
-    assert len(cvs) == 105
+    assert len(cvs) == 108
     assert SPEED_TABLE_CVS <= set(cvs)
 
 

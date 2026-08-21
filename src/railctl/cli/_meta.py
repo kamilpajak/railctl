@@ -608,7 +608,7 @@ BACKUP_FORCE_OPT = Option(
 )
 #: Same three words as `cv read`'s `--mode`, but backup's `auto` is stricter:
 #: it resolves to the programming track unless POM reading is MEASURED working
-#: - `auto` on an unprobed station must not gamble a 77-CV run on a channel
+#: - `auto` on an unprobed station must not gamble an 80-CV run on a channel
 #: nobody has seen answer (docs/probe-results.md R1: POM silence costs 6.7 s
 #: per CV on this station).
 BACKUP_MODE_OPT = Option(

@@ -1,7 +1,8 @@
 # Curated ZIMO MS/MX CV catalog. Transcribed from the C3 table of the approved
 # design spec (docs/superpowers/specs/2026-08-03-railctl-design.md); the spec
-# table is the only source of these facts. A wrong description here is a
-# documentation bug - correct it against the sheet that came with the decoder.
+# table is the source of every entry that carries no comment of its own, and an
+# entry added since then names its source above it. A wrong description here is
+# a documentation bug - correct it against the sheet that came with the decoder.
 #
 # Defaults when a key is absent: min = 0, max = 255, address = false,
 # restorable = true, needs_speed_table = false.
@@ -255,7 +256,39 @@ first = 127
 last = 132
 index_start = 1
 slug_template = "effect_fa{i}"
-desc_template = "Effect for output FA{i}: lighting effects, smoke generator or uncoupler by effect code (MS manual 3.21)"
+desc_template = "Effect for output FA{i}: lighting effects, smoke generator or uncoupler by effect code (MS manual 3.21); 72 = steam smoke, 80 = diesel smoke, and an effect code with no curve in CV137-139 leaves smoke switched off for good"
+group = "lights"
+
+# The smoke generator curve. Established 2026-08-21 from two sources that agree:
+# the ZIMO MS450P22 manual, 3.21 "Konfiguration von Rauchgeneratoren" (whose
+# worked example is a Seuthe 18 V generator on a 20 V track - CV137 = 70..90,
+# CV138 = 200, CV139 = 255), and JMRI's MS-family definition
+# xml/decoders/zimo/CV107-CV199_MS-MN-FS.xml, which lists MS450 version 5+.
+#
+# The three numbers are NOT family-neutral, so each description says whose
+# meaning it gives. JMRI's own files disagree: the MS-family fragment and the
+# MX6xx fragments from software 30 (zimo/CV100-CV152*.xml) call them the smoke
+# curve, while Zimo_MX62_v22+.xml and Zimo_MX63_MX64H_v22-30.xml give CV137-139
+# to HLU direction settings on those older decoders.
+#
+# Plain on/off smoke through a function output needs none of these - the effect
+# code and this curve exist only to make the plume follow speed.
+[[cv]]
+num = 137
+slug = "smoke_pwm_standstill"
+desc = "MS family: smoke generator PWM at standstill, first point of the CV137-139 curve. MX family: the same on MX6xx from software 30, but HLU direction bits on MX62 and MX63/MX64H software 22-34"
+group = "lights"
+
+[[cv]]
+num = 138
+slug = "smoke_pwm_min_speed"
+desc = "MS family: smoke generator PWM at minimum speed, second point of the CV137-139 curve. MX family: the same on MX6xx from software 30, but the HLU stop-section conversion on MX62 and MX63/MX64H software 22-34"
+group = "lights"
+
+[[cv]]
+num = 139
+slug = "smoke_pwm_max_speed"
+desc = "MS family: smoke generator PWM at maximum speed, third point of the CV137-139 curve. MX family: the same on MX6xx from software 30, but the HLU F/L/U conversion on MX62 and MX63/MX64H software 22-34"
 group = "lights"
 
 [[cv]]

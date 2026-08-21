@@ -61,7 +61,7 @@ runner = CliRunner()
 
 CATALOG = load_catalog()
 #: The curated set a CV29 of 0 selects (bit 4 clear: no speed table) - the
-#: design's 77-CV run, read off the shipped catalog rather than retyped.
+#: 80-CV curated run, read off the shipped catalog rather than retyped.
 CURATED = curated_cvs(CATALOG, 0)
 OVER_BOUND = [cv for cv in CURATED if cv > MAX_CV_DIRECT]
 
@@ -635,7 +635,7 @@ def test_backup_auto_resolves_pom_only_on_a_measured_yes(monkeypatch, tmp_path):
     assert result.exit_code == 0, result.stderr
     assert yes.batch_calls[0]["mode"] is ProgMode.POM
 
-    # Unknown is NOT yes: `cv read`'s AUTO would gamble on POM here; a 77-CV
+    # Unknown is NOT yes: `cv read`'s AUTO would gamble on POM here; an 80-CV
     # backup resolves to the programming track instead.
     unknown = _install(monkeypatch, FakeBackupStation(capabilities=POM_UNKNOWN_CAPS))
     result = runner.invoke(app, ["backup", "--address", "3", "--out", "-", "--format", "json"])
