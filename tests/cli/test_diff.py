@@ -22,7 +22,13 @@ from pathlib import Path
 import pytest
 from typer.testing import CliRunner
 
-from railctl.backup import BackupDocument, CvRecord, ReadStatus, write_backup_to
+from railctl.backup import (
+    SWEEP_CAVEATS,
+    BackupDocument,
+    CvRecord,
+    ReadStatus,
+    write_backup_to,
+)
 from railctl.cli._meta import command_meta
 from railctl.cli.commands.cv import PROG_TRACK_NOTICE, SILENCE_GUIDANCE
 from railctl.cli.commands.diff import (
@@ -321,6 +327,18 @@ def test_two_files_compare_with_a_station_open_that_raises(monkeypatch, tmp_path
     assert body["source"] == SOURCE_FILE
     assert body["other"] == str(right)
     assert rows_by_cv(body)[3]["live_value"] == 99
+
+
+def test_a_document_carrying_caveats_compares_unchanged(monkeypatch, tmp_path):
+    """Same as restore: `diff` reads the file through `read_backup`, never
+    looks at `caveats`, and must not refuse a file that carries one."""
+    boom_open(monkeypatch)
+    left = file_a(tmp_path, set_name="all", sweep_range=(1, 255), caveats=SWEEP_CAVEATS)
+    right = file_b(tmp_path, cvs=(record(3, 99, name="accel_rate"), record(4, 18)))
+    result = invoke(str(left), str(right))
+    assert result.exit_code == 0, result.stderr
+    row = rows_by_cv(payload(result))[3]
+    assert (row["live_value"], row["file_value"]) == (99, 20)
 
 
 def test_the_offline_form_reports_the_differing_cv(monkeypatch, tmp_path):

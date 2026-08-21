@@ -79,6 +79,46 @@ class CvRecord:
             )
 
 
+@dataclass(frozen=True, slots=True)
+class Caveat:
+    """One statement the document makes about what its own rows can prove.
+
+    The split is the error envelope's: `code` is the machine-stable token a
+    script branches on and may never be renamed or repurposed within a major
+    version, `message` is prose and is free to be reworded. A caveat is not a
+    warning about the run - it is a property of the file, and it is written
+    into the file so the reader who asks the question months later gets the
+    answer without the run that produced it.
+    """
+
+    code: str
+    message: str
+
+
+#: The one caveat this tool writes today. A CV row that answered `0` is
+#: recorded exactly like a CV that genuinely holds zero, because on this
+#: hardware the two are indistinguishable - docs/probe-results.md, "What is
+#: still open", is explicit that no read can settle it and that it applies at
+#: every CV number rather than in any particular range.
+CAVEAT_ZERO_IS_NOT_PROOF: Final[str] = "zero_is_not_proof"
+
+#: What a swept document carries, whatever its rows turned out to hold. Keyed
+#: off the set rather than off the values: a key whose presence depended on
+#: whether the decoder happened to answer zero somewhere would make the shape
+#: of the file depend on the decoder's mood, and a consumer could not tell a
+#: sweep with no zeroes from a sweep written by an older tool.
+SWEEP_CAVEATS: Final[tuple[Caveat, ...]] = (
+    Caveat(
+        code=CAVEAT_ZERO_IS_NOT_PROOF,
+        message=(
+            "a row that answered 0 may be an implemented CV holding zero or a CV the decoder "
+            "does not implement answering zero; this hardware cannot tell the two apart at "
+            "any CV number, and no read can settle it"
+        ),
+    ),
+)
+
+
 #: `summary`'s fixed key order. The reader compares a file's stored summary
 #: against the recomputed one key by key, tolerating extra keys, because
 #: within a major version optional fields may be added but these six may not
@@ -101,9 +141,11 @@ class BackupDocument:
     `schema` is not a field: it can only ever hold `BACKUP_SCHEMA`, and a
     field would let a caller construct a document that lies about it.
     `set_name` serializes under the key `"set"`, which shadows a builtin
-    here. `interrupted` is the one key outside the fixed order: absent from
-    a file a run wrote to the end, `true` in the partial file a Ctrl-C
-    leaves behind.
+    here. `interrupted` and `caveats` are the keys outside the fixed
+    order: `interrupted` is absent from a file a run wrote to the end and
+    `true` in the partial file a Ctrl-C leaves behind, and `caveats` is
+    absent unless the document has something to say about what its rows can
+    prove.
     """
 
     created_utc: str
@@ -122,6 +164,7 @@ class BackupDocument:
     decoder: dict[str, object]
     cvs: tuple[CvRecord, ...]
     interrupted: bool = False
+    caveats: tuple[Caveat, ...] = ()
 
     @property
     def summary(self) -> dict[str, object]:

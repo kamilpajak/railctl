@@ -20,7 +20,7 @@ import pytest
 from typer.testing import CliRunner
 
 import railctl.cli.commands.backup as backup_module
-from railctl.backup import BACKUP_SCHEMA, read_backup
+from railctl.backup import BACKUP_SCHEMA, CAVEAT_ZERO_IS_NOT_PROOF, SWEEP_CAVEATS, read_backup
 from railctl.catalog import curated_cvs, load_catalog
 from railctl.cli._meta import command_meta
 from railctl.cli.commands._sweep import (
@@ -1625,6 +1625,90 @@ def test_the_ndjson_sweep_carries_the_estimate_as_an_event_and_no_progress_lines
     assert "revised estimate" in result.stderr
     assert f"of {MAX_CV_DIRECT} CVs, about" not in result.stderr
     assert "CVs read in" not in result.stderr
+
+
+# -- the caveat the document carries ------------------------------------------
+#
+# `_SWEEP_EXIT_NOTE` says the same thing to a person, on the human summary of a
+# run. These tests are about the FILE: the question "is this zero real" is
+# asked of a saved document long after the run that wrote it, and a run-scoped
+# line never reaches that reader.
+
+
+def test_a_sweep_document_carries_the_zero_is_not_proof_caveat(monkeypatch, tmp_path):
+    _install(monkeypatch, FakeBackupStation(capabilities=SERVICE_CAPS))
+    out = tmp_path / "swept.json"
+    result = runner.invoke(app, _sweep_argv("--format", "json", "--yes", out=str(out)))
+    assert result.exit_code == 0, result.stderr
+    on_disk = json.loads(out.read_text(encoding="utf-8"))
+    # The token a script branches on, spelled out rather than read off the
+    # constant: a rename is a break of the published contract, and a test that
+    # imports the name would rename with it.
+    assert [caveat["code"] for caveat in on_disk["caveats"]] == ["zero_is_not_proof"]
+    assert on_disk["caveats"][0]["message"]
+    # The envelope is the document plus `path`, so the same caveat reaches
+    # --format json without a second channel.
+    assert json.loads(result.stdout)["result"]["caveats"] == on_disk["caveats"]
+
+
+def test_a_curated_backup_carries_no_caveats(monkeypatch, tmp_path):
+    # Decided from the SET, not from what the rows hold: this fake answers 0
+    # for most CVs, and a curated file still carries no caveat.
+    _install(monkeypatch, FakeBackupStation(capabilities=SERVICE_CAPS))
+    out = tmp_path / "curated.json"
+    result = runner.invoke(app, ["backup", "--address", "3", "--out", str(out), "--format", "json"])
+    assert result.exit_code == 0, result.stderr
+    assert "caveats" not in json.loads(out.read_text(encoding="utf-8"))
+    assert "caveats" not in json.loads(result.stdout)["result"]
+
+
+def test_the_swept_document_carries_the_caveat_to_stdout(monkeypatch):
+    # `--out -` writes no file, and the document IS the output; the reader of
+    # a piped sweep gets the caveat the same way a reader of a file does.
+    _install(monkeypatch, FakeBackupStation(capabilities=SERVICE_CAPS))
+    result = runner.invoke(app, _sweep_argv("--yes", out="-"))
+    assert result.exit_code == 0, result.stderr
+    # The human rendering of `--out -` is the status line and then the
+    # document itself, exactly as it would have gone to a file.
+    document = json.loads("\n".join(result.stdout.splitlines()[1:]))
+    assert document["caveats"][0]["code"] == "zero_is_not_proof"
+
+
+def test_the_caveat_message_says_what_the_human_note_says_and_blames_no_range():
+    message = next(
+        caveat.message for caveat in SWEEP_CAVEATS if caveat.code == CAVEAT_ZERO_IS_NOT_PROOF
+    )
+    # The two halves of the probe document's open question: the ambiguity
+    # itself, and that it is not a property of any range.
+    assert "does not implement" in message
+    assert "any CV number" in message
+    # `_UNEXERCISED_REASON` owns the CV511 boundary and #52 separated the two
+    # on purpose; a caveat that named the boundary would put the universal
+    # ambiguity back inside a claim about one range.
+    assert str(HIGHEST_EXERCISED_CV) not in message
+    assert "511" not in message
+
+
+def test_the_ndjson_summary_carries_counts_and_the_path_but_no_document_keys(monkeypatch, tmp_path):
+    """What the stream summary does NOT carry, pinned rather than assumed.
+
+    The summary is built from `_summary_counts` plus `complete`, `path` and
+    `exit_code`; it never reads the document's top-level keys, so `caveats`
+    does not ride along and neither would the next key added beside it. A
+    streaming consumer that wants the caveat reads the file the summary names.
+    """
+    _install(monkeypatch, FakeBackupStation(capabilities=SERVICE_CAPS))
+    out = tmp_path / "streamed.json"
+    result = runner.invoke(app, _sweep_argv("--format", "ndjson", "--yes", out=str(out)))
+    assert result.exit_code == 0, result.stderr
+    summary = _ndjson_lines(result.stdout)[-1]
+    assert summary["type"] == "summary"
+    assert "caveats" not in summary
+    # The file the summary points at is where the caveat is.
+    assert summary["path"] == str(out)
+    assert json.loads(out.read_text(encoding="utf-8"))["caveats"][0]["code"] == (
+        "zero_is_not_proof"
+    )
 
 
 # -- the unexercised range -----------------------------------------------------

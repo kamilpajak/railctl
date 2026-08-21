@@ -14,6 +14,7 @@ import json
 import pytest
 
 from railctl.backup import (
+    SWEEP_CAVEATS,
     TOP_LEVEL_KEYS,
     CvRecord,
     ReadStatus,
@@ -203,6 +204,24 @@ def test_interrupted_is_absent_when_false_and_sits_before_cvs_when_true():
     keys = list(json.loads(partial))
     assert keys == [*TOP_LEVEL_KEYS[:-1], "interrupted", "cvs"]
     assert json.loads(partial)["interrupted"] is True
+
+
+def test_caveats_are_absent_when_the_document_carries_none():
+    # Same rule as `interrupted`: a key that does not apply is not written at
+    # all, so a curated file keeps the design example's shape key for key.
+    assert "caveats" not in json.loads(write_backup(make_document()))
+
+
+def test_caveats_are_written_between_interrupted_and_cvs():
+    partial = make_document(interrupted=True, caveats=SWEEP_CAVEATS)
+    keys = list(json.loads(write_backup(partial)))
+    assert keys == [*TOP_LEVEL_KEYS[:-1], "interrupted", "caveats", "cvs"]
+
+
+def test_a_caveat_is_written_as_a_code_and_a_message():
+    caveats = json.loads(write_backup(make_document(caveats=SWEEP_CAVEATS)))["caveats"]
+    assert caveats == [{"code": caveat.code, "message": caveat.message} for caveat in SWEEP_CAVEATS]
+    assert [list(entry) for entry in caveats] == [["code", "message"]] * len(SWEEP_CAVEATS)
 
 
 def test_nested_block_order_does_not_depend_on_caller_insertion_order():

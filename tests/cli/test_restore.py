@@ -21,7 +21,13 @@ from pathlib import Path
 import pytest
 from typer.testing import CliRunner
 
-from railctl.backup import BackupDocument, CvRecord, ReadStatus, write_backup_to
+from railctl.backup import (
+    SWEEP_CAVEATS,
+    BackupDocument,
+    CvRecord,
+    ReadStatus,
+    write_backup_to,
+)
 from railctl.cli._meta import command_meta
 from railctl.cli.commands.cv import PROG_TRACK_NOTICE, SILENCE_GUIDANCE
 from railctl.cli.commands.restore import (
@@ -399,6 +405,24 @@ def test_a_dry_run_and_the_real_run_produce_the_same_plan(monkeypatch, tmp_path)
     assert payload(dry)["cvs"] == payload(real)["cvs"]
     # And the dry run wrote nothing at all - not a CV, not a page selector.
     assert dry_station.writes == []
+
+
+def test_a_document_carrying_caveats_restores_unchanged(monkeypatch, tmp_path):
+    """`caveats` is a statement about the file, not an instruction to restore.
+
+    The reader hands it to the document and nothing on the restore path reads
+    it, so the same rows produce the same writes whether it is there or not.
+    A file carrying a key this command does not act on must not make it fail.
+    """
+    plain = backup_file(tmp_path)
+    install(monkeypatch, FakeRestoreStation())
+    without = invoke(plain, "--yes")
+    assert without.exit_code == 0, without.stderr
+    swept = backup_file(tmp_path, set_name="all", sweep_range=(1, 255), caveats=SWEEP_CAVEATS)
+    install(monkeypatch, FakeRestoreStation())
+    with_caveats = invoke(swept, "--yes")
+    assert with_caveats.exit_code == 0, with_caveats.stderr
+    assert payload(with_caveats)["cvs"] == payload(without)["cvs"]
 
 
 def test_a_changed_cv_is_restored_and_verified(monkeypatch, tmp_path):

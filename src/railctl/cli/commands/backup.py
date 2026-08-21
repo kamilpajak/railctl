@@ -66,6 +66,7 @@ from railctl.backup import (
     NOT_ATTEMPTED_DETAIL,
     SOURCE_CATALOG,
     STDOUT_TARGET,
+    SWEEP_CAVEATS,
     BackupDocument,
     CvRecord,
     ReadStatus,
@@ -194,16 +195,20 @@ _SWEEP_EXIT_NOTE: Final[str] = (
 #: the whole reason it left, and it does not depend on the caveat being said
 #: anywhere else.
 #:
-#: Where it IS said, exactly: `_SWEEP_EXIT_NOTE`, on the human summary of a
-#: sweep that wrote a file - `build_backup` appends it to `CommandResult.lines`,
-#: which only the `human` renderer prints, and returns before it for `--out -`.
-#: `--format=json` and `--format=ndjson` never carry it: the envelope has no
-#: `lines`, and the ndjson summary carries counts and the path. So a machine
-#: consumer of this run hears the zero-versus-unimplemented ambiguity from
-#: `--help` (exit code 9, `cli/_meta.py`) and not from the run's own output.
-#: That gap is real and is not this string's to close - putting it back here
-#: would state a property of CV1 inside a warning about CV512, which is the
-#: misattribution above. Closing it needs a field or an event of its own.
+#: Where it IS said, exactly. On the human path, `_SWEEP_EXIT_NOTE`, on the
+#: summary of a sweep that wrote a file - `build_backup` appends it to
+#: `CommandResult.lines`, which only the `human` renderer prints, and returns
+#: before it for `--out -`. On the machine path, the document's own `caveats`
+#: key (`backup/types.py`, `SWEEP_CAVEATS`), written into every swept file and
+#: therefore into `--format=json`'s `result`, which is the document plus the
+#: path. Issue #53 added that second channel because the envelope has no
+#: `lines` and the question is asked of the FILE long after the run. The
+#: ndjson summary still carries counts, `complete`, the path and the exit code
+#: only, so a streaming consumer reads the caveat off the file that line names.
+#:
+#: None of that belongs in this string: putting it back here would state a
+#: property of CV1 inside a warning about CV512, which is the misattribution
+#: above.
 #:
 #: `tests/cli/test_backup.py` pins these claims against the document's
 #: section, and says in its own docstring which kind of drift that catches.
@@ -856,6 +861,13 @@ def _document(
         decoder=_decoder_block(records),
         cvs=tuple(records.values()),
         interrupted=interrupted,
+        # Off the SET, not off the rows. A sweep's zeroes are the reason the
+        # caveat exists, but a sweep that happened to read no zero at all is
+        # still a document whose zeroes would have been unprovable - and a
+        # key that came and went with the values would leave a consumer
+        # unable to tell a sweep without zeroes from a file written before
+        # the key existed.
+        caveats=SWEEP_CAVEATS if set_name == SWEEP_SET_NAME else (),
     )
 
 
