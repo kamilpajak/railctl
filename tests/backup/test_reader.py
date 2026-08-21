@@ -14,7 +14,15 @@ from pathlib import Path
 
 import pytest
 
-from railctl.backup import CvRecord, ReadStatus, read_backup, write_backup, write_backup_to
+from railctl.backup import (
+    SWEEP_CAVEATS,
+    Caveat,
+    CvRecord,
+    ReadStatus,
+    read_backup,
+    write_backup,
+    write_backup_to,
+)
 from railctl.errors import BackupFileError
 from tests.backup.documents import make_document
 
@@ -78,6 +86,119 @@ def test_an_unknown_top_level_key_is_tolerated(tmp_path):
         parsed["added_in_a_later_v1"] = "tolerated"
 
     assert read_backup(_write_mutated(tmp_path, add_key)) == make_document()
+
+
+#: A `railctl/backup/v1` sweep exactly as the writer produced it BEFORE
+#: `caveats` existed - typed out rather than generated, because a fixture the
+#: current writer produces with the field cleared would follow the writer
+#: wherever it goes and stop being evidence about old files.
+PRE_CAVEAT_SWEEP = """\
+{
+  "schema": "railctl/backup/v1",
+  "created_utc": "2026-08-19T11:04:07Z",
+  "tool": "railctl 0.1.0",
+  "note": null,
+  "loco": {
+    "address": 3,
+    "kind": "short"
+  },
+  "catalog": {
+    "family": "zimo-ms-mx",
+    "schema": 1
+  },
+  "set": "all",
+  "mode": "service",
+  "cv_encoding": "SERVICE_DIRECT",
+  "page": [
+    0,
+    0
+  ],
+  "speed_table_included": true,
+  "sweep_range": [
+    1,
+    255
+  ],
+  "link": {
+    "identity": "serial:7010A0001194:3",
+    "protocol": "xpressnet",
+    "protocol_version": "4.0",
+    "command_station_id": 18
+  },
+  "capabilities": {
+    "pom_read": false,
+    "pom_result_channel": null,
+    "pom_echo_zero_based": null,
+    "service_direct_cv": true,
+    "service_ext_cv": null,
+    "z21_cv_opcodes": null
+  },
+  "decoder": {
+    "manufacturer_id": 145
+  },
+  "summary": {
+    "requested": 1,
+    "ok": 1,
+    "no_response": 0,
+    "error": 0,
+    "skipped": 0,
+    "complete": true
+  },
+  "cvs": [
+    {
+      "cv": 1,
+      "name": "primary_address",
+      "status": "ok",
+      "value": 3,
+      "source": "catalog"
+    }
+  ]
+}
+"""
+
+
+def test_a_sweep_written_before_caveats_existed_still_loads(tmp_path):
+    # The compatibility claim the whole addition rests on: `caveats` is not in
+    # `TOP_LEVEL_KEYS`, which is only consulted for the missing-key check, so a
+    # file from before the key existed is not missing anything.
+    target = tmp_path / "loco-0003-all.json"
+    target.write_text(PRE_CAVEAT_SWEEP, encoding="utf-8", newline="")
+    document = read_backup(target)
+    assert document.set_name == "all"
+    assert document.caveats == ()
+
+
+def test_a_document_with_caveats_round_trips(tmp_path):
+    target = tmp_path / "swept.json"
+    write_backup_to(make_document(set_name="all", caveats=SWEEP_CAVEATS), target)
+    assert read_backup(target) == make_document(set_name="all", caveats=SWEEP_CAVEATS)
+
+
+def test_a_caveat_the_reader_has_never_heard_of_loads_as_written(tmp_path):
+    # `code` is the token a script branches on, and this reader is not the
+    # place that decides which tokens exist: a v1 file may carry a caveat
+    # added after this reader was written.
+    def add_caveat(parsed: dict) -> None:
+        parsed["caveats"] = [{"code": "added_in_a_later_v1", "message": "something new"}]
+
+    document = read_backup(_write_mutated(tmp_path, add_caveat))
+    assert document.caveats == (Caveat(code="added_in_a_later_v1", message="something new"),)
+
+
+@pytest.mark.parametrize(
+    "bad",
+    [
+        {"code": "zero_is_not_proof"},
+        {"message": "no code"},
+        {"code": 7, "message": "a number is not a token"},
+        {"code": "zero_is_not_proof", "message": None},
+        "a bare string",
+    ],
+)
+def test_a_malformed_caveat_entry_is_rejected(tmp_path, bad: object):
+    def add_caveat(parsed: dict) -> None:
+        parsed["caveats"] = [bad]
+
+    assert "caveats[0]" in _rejection(tmp_path, add_caveat)
 
 
 def test_boundary_cv_numbers_and_values_are_accepted(tmp_path):
@@ -177,6 +298,7 @@ def test_every_missing_top_level_key_is_rejected_by_name(tmp_path, key: str):
         ("decoder", []),
         ("summary", []),
         ("interrupted", "yes"),
+        ("caveats", {}),
         ("cvs", {}),
     ],
 )

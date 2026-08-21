@@ -8,9 +8,9 @@ Deselected by default; `-s` is not optional, because every stage waits at a gate
 WHAT YOU NEED AT THE BENCH
     * the YD7010 connected over USB, nothing else driving the layout
     * the ZIMO MS450P22 (locomotive 3) on the PROGRAMMING track, good wheel contact
-    * about 20 minutes: stage 2 reads the whole curated set (77 CVs at 6 s each,
-      measured 2026-08-13), the rest work on a five-CV subset and take under a
-      minute apiece
+    * about 20 minutes: stage 2 reads the whole curated set (80 CVs at 6 s each,
+      from the 6 s measured over 77 CVs on 2026-08-13), the rest work on a
+      five-CV subset and take under a minute apiece
 
 THIS IS THE FIRST ACCEPTANCE THAT WRITES FROM A FILE. Stage 4 changes CV3, proves
 the tools notice, and puts it back through `restore`. CV3 is the acceleration rate:
@@ -19,7 +19,7 @@ record, not to retry away. The change and the restore live in one stage with a
 `finally` that puts CV3 back by hand if anything between them fails, so no ending
 leaves the decoder altered.
 
-WHY A SUBSET FILE. Stage 2 takes a real 77-CV backup - that is the artifact worth
+WHY A SUBSET FILE. Stage 2 takes a real 80-CV backup - that is the artifact worth
 keeping, and the last stage prints the command to copy it somewhere durable. The
 later stages then work from a five-CV file DERIVED from it through the project's
 own writer, because a `diff` reads every CV its file names: at 6 s each, three
@@ -51,8 +51,9 @@ CHANGED_CV = 3
 #: change is always a change.
 CHANGED_VALUE = 20
 ALTERNATE_VALUE = 21
-#: Exit 9 is `backup_incomplete`; on 2026-08-13 the full set came back 77 of 77,
-#: so it is accepted here rather than expected.
+#: Exit 9 is `backup_incomplete`; on 2026-08-13 the full set came back 77 of 77
+#: (the curated set was 77 CVs then and is 80 now), so it is accepted here
+#: rather than expected.
 INCOMPLETE_EXIT_CODE = 9
 
 runner = CliRunner()
@@ -150,7 +151,7 @@ def test_1_doctor_populates_the_capabilities(bench_config):
 
 
 def test_2_a_full_backup_becomes_the_input_and_the_keeper(bench_config, files):
-    """Stage 2. The real 77-CV backup: the artifact worth keeping, and the parent
+    """Stage 2. The real 80-CV backup: the artifact worth keeping, and the parent
     of the subset the later stages use. Reads only; nothing is written."""
     _require_stage_1(bench_config)
     if (files / "subset.json").exists():
@@ -160,7 +161,8 @@ def test_2_a_full_backup_becomes_the_input_and_the_keeper(bench_config, files):
         )
     _gate(
         "STAGE 2 of 5 - a full backup. Reads only, about EIGHT MINUTES with no\n"
-        "output until it finishes (77 CVs at 6 s each, measured 2026-08-13).\n"
+        "output until it finishes (80 CVs at 6 s each, from the 6 s measured\n"
+        "over 77 CVs on 2026-08-13).\n"
         "\n"
         "Exit 9 is a pass if some CVs stay silent; the file lists its own holes."
     )

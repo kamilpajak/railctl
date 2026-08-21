@@ -27,6 +27,7 @@ from railctl.backup.types import (
     BACKUP_SCHEMA,
     SUMMARY_KEYS,
     BackupDocument,
+    Caveat,
     CvRecord,
     ReadStatus,
 )
@@ -49,9 +50,14 @@ VALUE_MAX: Final[int] = 255
 
 #: The fixed top-level key order - the writer emits exactly these, in this
 #: order, and the reader rejects a file missing any of them. `interrupted`
-#: is not here on purpose: it is emitted between `summary` and `cvs` only
-#: when true, so a run that finished produces a file matching the design
-#: example key for key.
+#: and `caveats` are not here on purpose: they are emitted between `summary`
+#: and `cvs` only when they apply, so a run that finished produces a file
+#: matching the design example key for key.
+#:
+#: This tuple drives the missing-key check and nothing else - the reader has
+#: no unknown-key rejection - so a reader built before a v1 addition still
+#: loads a file that carries it, and this reader still loads every file
+#: written before `caveats` existed.
 TOP_LEVEL_KEYS: Final[tuple[str, ...]] = (
     "schema",
     "created_utc",
@@ -203,6 +209,13 @@ def write_backup(document: BackupDocument) -> str:
     }
     if document.interrupted:
         top["interrupted"] = True
+    if document.caveats:
+        # Order as given: the document decides which caveats it carries and in
+        # which order, and sorting them here would make the bytes depend on
+        # the spelling of a code rather than on the decision that produced it.
+        top["caveats"] = [
+            {"code": caveat.code, "message": caveat.message} for caveat in document.caveats
+        ]
     top["cvs"] = [_cv_row(record) for record in sorted(document.cvs, key=lambda r: r.cv)]
     return json.dumps(top, indent=2, ensure_ascii=False) + "\n"
 
@@ -265,6 +278,7 @@ def read_backup(path: Path) -> BackupDocument:
         decoder=_object_of(parsed, "decoder", path),
         cvs=_records_of(parsed["cvs"], path),
         interrupted=interrupted,
+        caveats=_caveats_of(parsed.get("caveats", []), path),
     )
     stored_summary = _object_of(parsed, "summary", path)
     for key, expected in document.summary.items():
@@ -278,6 +292,31 @@ def read_backup(path: Path) -> BackupDocument:
     _check_capabilities(document.capabilities, path)
     _check_page_agrees_with_rows(document, path)
     return document
+
+
+def _caveats_of(raw: object, path: Path) -> tuple[Caveat, ...]:
+    """The `caveats` array, absent in every file written before the key
+    existed - hence the `parsed.get(..., [])` at the call site.
+
+    The shape is checked and the vocabulary is not: an entry must be an
+    object with a string `code` and a string `message`, but an unrecognised
+    `code` loads as written. This reader is not the place that decides which
+    caveats exist, and refusing a token added after it was written would make
+    a forward-compatible v1 file unreadable.
+    """
+    if not isinstance(raw, list):
+        raise BackupFileError(f"{path}: caveats must be an array, got {type(raw).__name__}")
+    caveats: list[Caveat] = []
+    for index, item in enumerate(raw):
+        code = item.get("code") if isinstance(item, Mapping) else None
+        message = item.get("message") if isinstance(item, Mapping) else None
+        if not isinstance(code, str) or not isinstance(message, str):
+            raise BackupFileError(
+                f"{path}: caveats[{index}] must be an object with a string code and a "
+                f"string message, got {item!r}"
+            )
+        caveats.append(Caveat(code=code, message=message))
+    return tuple(caveats)
 
 
 def _check_loco(block: Mapping[str, object], path: Path) -> None:

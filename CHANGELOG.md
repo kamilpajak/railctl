@@ -20,6 +20,21 @@ All notable changes to this project are documented in this file. The format foll
   found already there. The human report now says when a run stopped the whole layout and
   released it again, and the "hold not confirmed" warning no longer tells the operator that
   such a run released a hold it found - the hold was its own. (#13)
+- A swept backup document now says in the file what the sweep only said to the person
+  running it: an optional top-level `caveats` array, each entry `{"code", "message"}`,
+  carrying `zero_is_not_proof`. A row that answered `0` may be an implemented CV holding
+  zero or a CV the decoder does not implement answering zero, and no read can settle it -
+  so the file that is read months later now states that itself rather than leaving it in
+  the run's console output. The key is absent from documents that have nothing to say, and
+  `restore` and `diff` ignore it, so files written before this change still load and older
+  readers still accept files that carry it. (#53)
+- The catalog learned the ZIMO smoke generator characteristic: CV137, CV138 and CV139, in
+  the `lights` group, named by the driving state the MS manual gives each one -
+  `smoke_pwm_standstill`, `smoke_pwm_steady_speed` and `smoke_pwm_acceleration`. The
+  CV127-132 effect entries now name the two effect codes (72 for steam, 80 for diesel) and
+  the trap behind them: an effect code produces no smoke at all until CV137-139 are given
+  values, and they default to 0. A curated backup therefore reads 80 CVs where it read 77,
+  and 108 with the speed table.
 
 ### Fixed
 
