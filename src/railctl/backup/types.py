@@ -111,7 +111,7 @@ SWEEP_CAVEATS: Final[tuple[Caveat, ...]] = (
     Caveat(
         code=CAVEAT_ZERO_IS_NOT_PROOF,
         message=(
-            "a row that answered 0 may be an implemented CV holding zero or a CV the decoder "
+            "any row that answered 0 may be an implemented CV holding zero or a CV the decoder "
             "does not implement answering zero; this hardware cannot tell the two apart at "
             "any CV number, and no read can settle it"
         ),
