@@ -44,7 +44,10 @@ All notable changes to this project are documented in this file. The format foll
   envelope. All three routes now publish the same envelope with the same wording and the
   same exit code, so a caller asking "did the operator stop this?" always has a `code` to
   read. This also removes exit 130, a status typer produced that `railctl schema` never
-  published. (#50)
+  published. `railctl schema` now publishes exit 9 in its manifest row and on its `--help`
+  page, with the meaning it has there: it opens no station, but it can still be stopped by
+  the operator, and a published set that left out the one non-zero code it could really
+  reach sent callers into their unknown-exit-code branch. (#50)
 - `railctl cv read --page` no longer contradicts itself. It asks the operator to approve
   writing CV31/CV32, performs that selection, and then used to report `page.not_selected`
   for the very read the selection was made for. The warning now fires only when nothing

@@ -544,3 +544,28 @@ def test_no_published_exit_code_collides_with_the_interrupt_sentinel():
         command["path"] for command in manifest()["commands"] if sentinel in command["exit_codes"]
     ] == []
     assert [row["code"] for row in error_codes() if row["exit_code"] == sentinel] == []
+
+
+# -- what the three routes must share ----------------------------------------
+
+def test_every_command_publishes_the_exit_code_an_interrupt_leaves():
+    """A published set that omits a reachable code is the documented lie
+    `_meta.STATION_EXIT_CODES`'s comment warns about, and `schema` was one.
+
+    It opens no station and reads no port, so its row published 0, 1 and 2 - while a
+    Ctrl-C ends it with the `aborted` envelope and its exit code, exactly like every
+    other command. A caller reading the manifest to decide which statuses it must handle
+    was told a status it can really see could not happen.
+
+    The code is read off `run()`'s own envelope rather than typed here, so this follows
+    the exit-code table instead of becoming a second copy of it.
+    """
+    aborted = _keyboard_interrupt_envelope()["exit_code"]
+
+    missing = [
+        command["path"]
+        for command in manifest()["commands"]
+        if aborted not in command["exit_codes"]
+    ]
+
+    assert missing == []
