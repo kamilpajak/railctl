@@ -21,6 +21,7 @@ import pytest
 import typer
 from typer.testing import CliRunner
 
+import railctl
 import railctl.cli.main as cli_main
 from railctl.cli._errors import OutputContext, run, usage_report
 from railctl.cli.commands import basics
@@ -881,7 +882,10 @@ def test_version_command_json_output_is_one_value_with_station_facts(monkeypatch
     payload = json.loads(result.stdout)
     assert payload["station"]["protocol_version"] == "4.0"
     assert payload["station"]["command_station_id"] == 18
-    assert payload["result"]["tool_version"] == "0.1.0"
+    # Read off `railctl.__version__`, never typed out: this assertion exists to prove the
+    # command reports THE tool's version, and a literal here turns every release into a
+    # test edit - which is how a release ships with the previous number still asserted.
+    assert payload["result"]["tool_version"] == railctl.__version__
 
 
 def test_version_command_human_output_contains_the_same_facts(monkeypatch):
@@ -889,7 +893,7 @@ def test_version_command_human_output_contains_the_same_facts(monkeypatch):
     runner = CliRunner()
     result = runner.invoke(cli_main.app, ["version"])
     assert result.exit_code == 0
-    for fact in ("4.0", "18", "0.1.0"):
+    for fact in ("4.0", "18", railctl.__version__):
         assert fact in result.stdout
 
 

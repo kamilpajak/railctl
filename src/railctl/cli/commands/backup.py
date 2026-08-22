@@ -55,12 +55,12 @@ import sys
 import time
 from collections.abc import Callable
 from datetime import UTC, datetime
-from importlib import metadata
 from pathlib import Path
 from typing import TYPE_CHECKING, Final, NoReturn, TextIO
 
 import typer
 
+from railctl import __version__
 from railctl.backup import (
     BACKUP_SCHEMA,
     NOT_ATTEMPTED_DETAIL,
@@ -615,7 +615,13 @@ class _Context:
         info = station_info(station)
         caps = station.capabilities
         self.created_utc = utc_timestamp()
-        self.tool = f"railctl {metadata.version('railctl')}"
+        # `__version__`, not `metadata.version('railctl')`. The two agree only while the
+        # installed distribution matches the source tree, and they stop agreeing the moment
+        # the version is bumped in a checkout nobody has reinstalled - measured on the
+        # 0.2.0 bump, where `railctl version` said 0.2.0 while this line stamped every file
+        # `railctl 0.1.0`. A backup carries its `tool` string forward for years, so it must
+        # name the code that wrote it rather than whatever wheel happens to be installed.
+        self.tool = f"railctl {__version__}"
         self.note = note
         self.address = address
         self.link: dict[str, object] = {

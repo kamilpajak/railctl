@@ -6,6 +6,8 @@ All notable changes to this project are documented in this file. The format foll
 
 ## [Unreleased]
 
+## [0.2.0] - 2026-08-22
+
 ### Added
 
 - The status byte's bit order is now something the tool measures rather than something it
@@ -37,6 +39,22 @@ All notable changes to this project are documented in this file. The format foll
   and 108 with the speed table.
 
 ### Fixed
+
+- Every way of typing the command wrong now answers like everything else. An unknown command,
+  an unknown option, a bad option value and a missing argument used to leave Click's own boxed
+  text on stderr - escape codes included, even when stderr was a file - so a script doing
+  `json.loads(stderr)` on a non-zero exit got a parse error and no `code` to branch on, for the
+  two most common script bugs there are. They now publish the same `railctl/error/v1` envelope
+  with `"code": "usage"`, and the one runnable suggestion names the level that refused the
+  invocation: `railctl cv read --help`, not the root's. (#30)
+
+- The sweep's `sweep.unexercised_range` warning no longer claims more than the bench
+  established. It said no value above CV511 had been checked against a known quantity, which
+  stopped being true once CV523 was corroborated across two encodings; and it blamed the high
+  range for the zero-versus-unimplemented ambiguity, which applies at every CV number and which
+  the run already states once. The text now names what was measured and through which opcode,
+  and calls the range thinly measured rather than unmeasured. `reason` is the only published
+  string that changed. (#52)
 
 - An interrupt is now readable however early it lands. Pressing Ctrl-C while the arguments
   were still being parsed ended the run with nothing at all on stderr - no `code` for a
