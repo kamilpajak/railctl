@@ -222,6 +222,29 @@ def usage_report(exc: BaseException) -> ErrorReport:
     )
 
 
+#: The words this tool uses for one operator interrupt, written once. The three routes that
+#: publish it - `run()` below, and `main()`'s `typer.Abort` and parse-time branches - used to
+#: retype the string, so nothing in `src/` linked them and rewording one route would have
+#: left the same event described two ways. Pinned by
+#: `tests/cli/test_usage_envelope.py::test_the_interrupt_wording_is_written_in_exactly_one_place`.
+ABORTED_MESSAGE: Final[str] = "interrupted by the operator"
+
+
+def aborted_report(command: str) -> ErrorReport:
+    """The report for an operator interrupt - one definition, three callers.
+
+    Same reason `usage_report` above exists: `run()` builds it for a `KeyboardInterrupt`
+    inside a command body, and `cli/main.py` builds it twice more - for the `typer.Abort`
+    that an `EOFError` becomes, and for the interrupt typer catches while the parser is
+    still running. One event, so one `code`, one message and one exit code, taken from one
+    place rather than from three copies that each keep matching their own.
+
+    `command` is what `default_suggestions` is keyed on; it is `"railctl"` for both of
+    `main()`'s calls, because nothing there has resolved which command was meant.
+    """
+    return report_for(AbortedError(ABORTED_MESSAGE), command=command)
+
+
 def _refused_level(exc: ClickUsageError) -> list[str]:
     """The argv naming the level that refused the invocation: `["railctl", "cv", "read"]`.
 
@@ -355,7 +378,7 @@ def run(command: str, ctx: OutputContext, work: Callable[[], CommandResult]) -> 
     try:
         result = work()
     except KeyboardInterrupt:
-        report = report_for(AbortedError("interrupted by the operator"), command=command)
+        report = aborted_report(command)
     except typer.Exit:
         # typer.Exit inherits RuntimeError, so the generic `except Exception` below would
         # otherwise catch it and replace whatever exit code it carries with 1/"internal" -

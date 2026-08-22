@@ -16,14 +16,15 @@ from __future__ import annotations
 import io
 import json
 import sys
+from pathlib import Path
 
 import pytest
 import typer
 
 import railctl.cli.main as cli_main
 from railctl.cli._click_errors import ClickException, ClickUsageError
-from railctl.cli._errors import OutputContext, run
-from railctl.cli._meta import error_codes
+from railctl.cli._errors import OutputContext, aborted_report, run
+from railctl.cli._meta import error_codes, manifest
 from railctl.cli._parse_context import ParseContextTyper
 from railctl.cli.result import ERROR_SCHEMA, INTERNAL_CODE, USAGE_CODE, USAGE_EXIT_CODE
 
@@ -438,3 +439,209 @@ def test_typer_exit_and_abort_are_the_classes_the_vendored_click_raises():
     # And the non-standalone contract itself: an eager `--help` comes back as the int 0
     # rather than as a raised `typer.Exit`.
     assert cli_main.app(["--help"], standalone_mode=False) == 0
+
+
+# -- the third interrupt route: Ctrl-C while the parser is still running ------
+
+
+def _manifest_commands() -> list[dict]:
+    """Every row `railctl schema` publishes - the nested commands included.
+
+    The three walks below share this one population rather than each calling `manifest()`
+    themselves, so "which commands does the guard cover?" is a named thing a test can pin.
+    A walk that quietly stopped at the top level would still pass every assertion below:
+    `schema` - the one command whose published set this change widened - is top-level, and
+    every nested command inherits the interrupt code from `_meta.STATION_EXIT_CODES`
+    today. So the population is checked by `test_the_manifest_walk_reaches_nested_commands`
+    instead of assumed, the same way `test_the_interrupt_wording_is_written_in_exactly_one_place`
+    checks that its file scan read anything at all.
+    """
+    return list(manifest()["commands"])
+
+
+def test_the_manifest_walk_reaches_nested_commands():
+    """The guards below are only worth their docstrings while this holds.
+
+    Narrowing the walk to top-level commands costs nothing today and would be invisible
+    today - which is exactly when it gets done. Nested rows are what `cv read`, `cv write`
+    and the rest live in, so a guard that never sees them stops guarding them.
+    """
+    nested = [command["path"] for command in _manifest_commands() if " " in command["path"]]
+
+    assert nested
+
+
+def _published_exit_codes() -> list[int]:
+    """Every exit code any command publishes in `railctl schema`, read from the manifest."""
+    return sorted({code for command in _manifest_commands() for code in command["exit_codes"]})
+
+
+def _interrupting_app(monkeypatch) -> list[str]:
+    """A throwaway app whose OPTION CALLBACK raises `KeyboardInterrupt`, plus the list the
+    command body would append to if it ever ran.
+
+    A parameter callback runs inside `Command.make_context`, so the interrupt escapes
+    before `invoke` is called at all - that is what makes this the PARSE-time route and
+    not the command-body one `_errors.run()` already owns. The list is the evidence: it
+    stays empty on a run that goes as intended, so a change that let the invocation reach
+    the body shows up as a failed assertion instead of a still-green test.
+    """
+    reached: list[str] = []
+
+    def interrupt(value: str) -> str:
+        raise KeyboardInterrupt
+
+    app = typer.Typer()
+
+    @app.command()
+    def body(flavour: str = typer.Option("plain", callback=interrupt)) -> None:
+        reached.append(flavour)
+
+    monkeypatch.setattr(cli_main, "app", app)
+    return reached
+
+
+def test_an_interrupt_while_parsing_publishes_the_aborted_envelope_and_exits_9(monkeypatch, capsys):
+    """The route that used to publish nothing at all.
+
+    `typer.core._main` turns a `KeyboardInterrupt` into `Exit(130)` and, in
+    non-standalone mode, RETURNS 130 as a plain int - so before the fix this reached
+    `main()`'s `else:` branch, exited 130 and wrote no envelope. A caller asking "did the
+    operator stop this?" reads `code`, never the process status, and there was no `code`
+    to read.
+    """
+    expected = _keyboard_interrupt_envelope()
+    reached = _interrupting_app(monkeypatch)
+
+    code = _exit_code(monkeypatch, [])
+
+    payload = _envelope(capsys)
+    assert reached == []
+    assert payload["code"] == expected["code"]
+    assert payload["exit_code"] == expected["exit_code"]
+    assert code == expected["exit_code"]
+
+
+def test_an_interrupt_while_parsing_answers_exactly_as_one_inside_a_command_body(
+    monkeypatch, capsys
+):
+    """Whole-envelope equality, against the envelope `_errors.run()` itself builds.
+
+    Asserting `"aborted"` and `9` as literals here would let the three interrupt routes
+    drift apart the moment one of them was reworded: they would each keep matching their
+    own hardcoded copy. One event has one description, so this reads the description from
+    the route that already owned it.
+    """
+    expected = _keyboard_interrupt_envelope()
+    _interrupting_app(monkeypatch)
+
+    _exit_code(monkeypatch, [])
+
+    assert _envelope(capsys) == expected
+
+
+@pytest.mark.parametrize("published", _published_exit_codes())
+def test_a_command_that_exits_with_a_published_code_still_does(monkeypatch, published):
+    """The new branch recognises one returned int and must pass every other one through.
+
+    Walks the manifest rather than naming two codes, so a command publishing a new exit
+    code is covered the day it is added - including 0, where turning a success into an
+    interrupt envelope would be the loudest possible defect.
+    """
+
+    def boom() -> None:
+        raise typer.Exit(code=published)
+
+    _throwaway_app(monkeypatch, boom)
+    assert _exit_code(monkeypatch, []) == published
+
+
+def test_no_published_exit_code_collides_with_the_interrupt_sentinel():
+    """The assumption that makes `outcome == 130` unambiguous, pinned.
+
+    `main()` reads a returned 130 as "typer converted a KeyboardInterrupt", which is only
+    safe while no railctl command can return that value itself. If a future command ever
+    publishes 130, this test fails and tells whoever added it that the sentinel is now
+    ambiguous - instead of a Ctrl-C envelope quietly appearing on that command's ordinary
+    run.
+    """
+    sentinel = cli_main.TYPER_INTERRUPT_EXIT_CODE
+
+    assert [
+        command["path"] for command in _manifest_commands() if sentinel in command["exit_codes"]
+    ] == []
+    assert [row["code"] for row in error_codes() if row["exit_code"] == sentinel] == []
+
+
+# -- what the three routes must share ----------------------------------------
+
+SOURCE_ROOT = Path(__file__).resolve().parents[2] / "src" / "railctl"
+
+
+def test_every_command_publishes_the_exit_code_an_interrupt_leaves():
+    """A published set that omits a reachable code is the documented lie
+    `_meta.STATION_EXIT_CODES`'s comment warns about, and `schema` was one.
+
+    It opens no station and reads no port, so its row published 0, 1 and 2 - while a
+    Ctrl-C ends it with the `aborted` envelope and its exit code, exactly like every
+    other command. A caller reading the manifest to decide which statuses it must handle
+    was told a status it can really see could not happen.
+
+    The code is read off `run()`'s own envelope rather than typed here, so this follows
+    the exit-code table instead of becoming a second copy of it.
+    """
+    aborted = _keyboard_interrupt_envelope()["exit_code"]
+
+    missing = [
+        command["path"] for command in _manifest_commands() if aborted not in command["exit_codes"]
+    ]
+
+    assert missing == []
+
+
+def test_the_interrupt_envelope_does_not_depend_on_which_command_was_meant():
+    """The remaining way the three routes could still answer differently.
+
+    `aborted_report` takes a `command`, and `default_suggestions` is keyed on it: `run()`
+    passes the resolved name (`"backup"`), while both of `main()`'s callers pass
+    `"railctl"`, because at neither of those points has anything resolved which command was
+    meant. Today `default_suggestions` returns `[]` for an `AbortedError` whatever the
+    command, so the three envelopes are identical - but nothing said so, and a suggestion
+    added for `aborted` later would split the routes silently while every other test stayed
+    green.
+
+    Asserted at the builder rather than by driving all three routes: this is the single
+    place the difference could enter, and a report built here is the report each route
+    publishes.
+    """
+    from_main = aborted_report("railctl")
+    from_run = aborted_report("backup")
+
+    assert from_main == from_run
+
+
+def test_the_interrupt_wording_is_written_in_exactly_one_place():
+    """One event, one description - held by the source, not by this file.
+
+    The three interrupt routes each built `AbortedError("...")` with the same words typed
+    out again, so nothing in `src/` linked them: rewording one route left the other two
+    describing the same event differently, and only a test comparing the routes would
+    have noticed. The wording is read out of `run()`'s envelope, so this scan cannot
+    become the fourth copy it exists to forbid.
+    """
+    wording = _keyboard_interrupt_envelope()["message"]
+    files = sorted(SOURCE_ROOT.rglob("*.py"))
+    assert files  # a scan that silently reads nothing must fail, not pass
+
+    hits = [
+        f"{path.relative_to(SOURCE_ROOT)}:{number}"
+        for path in files
+        for number, line in enumerate(path.read_text(encoding="utf-8").splitlines(), 1)
+        if wording in line
+    ]
+
+    # Exactly one, not "at most one": zero would mean the words no longer appear in the
+    # source as written - assembled from pieces, say - which is the same drift arriving by
+    # another route, and a scan that passes on nothing is the blind instrument this
+    # project keeps catching.
+    assert len(hits) == 1, hits

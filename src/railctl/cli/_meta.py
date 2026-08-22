@@ -197,7 +197,24 @@ GLOBAL_OPTIONS: Final[tuple[Option, ...]] = (
 
 _GLOBAL_BY_NAME: Final[dict[str, Option]] = {o.name: o for o in GLOBAL_OPTIONS}
 
-BASE_EXIT_CODES: Final[tuple[int, ...]] = (0, 1, 2)
+#: What an operator interrupt leaves the process with, in every command and on all three
+#: routes (`_errors.run()`, `main()`'s `typer.Abort` branch, and `main()`'s parse-time
+#: branch): they all publish `AbortedError`, which takes `RailctlError`'s own code because
+#: it has no row of its own. Read through `exit_code_for` rather than written as the number,
+#: so the set a command PUBLISHES is taken from the same table the envelope's `exit_code`
+#: field is.
+ABORTED_EXIT_CODE: Final[int] = errors.exit_code_for(errors.AbortedError(""))
+
+# The codes a command publishes whatever else it does: success, the internal-error safety
+# net, a refused invocation, and the interrupt. The interrupt was missing while it was
+# reachable, so `railctl schema` - the one command whose whole set this is - documented
+# three codes and could leave the process with a fourth. That is the documented-lie defect
+# `STATION_EXIT_CODES`'s comment describes: a published code that never arrives costs a
+# caller one unused branch, a code that arrives unpublished drops them into their
+# unknown-exit-code arm. Pinned by
+# `tests/cli/test_usage_envelope.py::test_every_command_publishes_the_exit_code_an_interrupt_leaves`,
+# which walks every row in the manifest.
+BASE_EXIT_CODES: Final[tuple[int, ...]] = (0, 1, 2, ABORTED_EXIT_CODE)
 
 # Every code a command that opens a `Station` and goes through `Station.exchange()` can
 # actually leave the process with: the base 0/1/2, transport 3, protocol 4, silence 5, the
@@ -319,7 +336,9 @@ _SCHEMA = CommandMeta(
     help="Machine-readable manifest of the command tree",
     schema=SCHEMA_SCHEMA,
     mutates=False,
-    # Opens no station and reads no port, so the three base codes are the whole set.
+    # Opens no station and reads no port, so the base codes are the whole set - which
+    # includes the interrupt: a command that talks to no hardware can still be stopped by
+    # the operator, and it answers that with the same `aborted` envelope as every other.
     exit_codes=BASE_EXIT_CODES,
     arguments=(
         Argument(
@@ -1280,6 +1299,18 @@ _COMMAND_EXIT_MEANINGS: Final[dict[str, dict[int, str]]] = {
             "the operator stopped the monitor with Ctrl-C. The ndjson stream still ends with "
             "its summary line, carrying complete: false - a monitor that ran until it was "
             "interrupted did its job"
+        )
+    },
+    # The only non-zero domain ending this command has. Everywhere else 9 is shared by
+    # several codes and the class summary has to stay generic, but `schema` opens no
+    # station and reads no port, so the interrupt is the whole of its 9 - and saying so is
+    # what makes the code it now publishes useful rather than merely present. Keyed by the
+    # constant `BASE_EXIT_CODES` is built from, so the override cannot name a code this
+    # command stops publishing.
+    "schema": {
+        ABORTED_EXIT_CODE: (
+            "the operator interrupted the run (error.code aborted). This command talks to "
+            "no hardware and reads no file, so it has no other way to reach this code"
         )
     },
 }
