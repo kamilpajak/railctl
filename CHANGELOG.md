@@ -38,6 +38,13 @@ All notable changes to this project are documented in this file. The format foll
 
 ### Fixed
 
+- An interrupt is now readable however early it lands. Pressing Ctrl-C while the arguments
+  were still being parsed ended the run with nothing at all on stderr - no `code` for a
+  script to branch on - while the same key press inside a command published the `aborted`
+  envelope. All three routes now publish the same envelope with the same wording and the
+  same exit code, so a caller asking "did the operator stop this?" always has a `code` to
+  read. This also removes exit 130, a status typer produced that `railctl schema` never
+  published. (#50)
 - `railctl cv read --page` no longer contradicts itself. It asks the operator to approve
   writing CV31/CV32, performs that selection, and then used to report `page.not_selected`
   for the very read the selection was made for. The warning now fires only when nothing

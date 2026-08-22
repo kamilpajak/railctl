@@ -23,7 +23,7 @@ import typer
 import railctl.cli.main as cli_main
 from railctl.cli._click_errors import ClickException, ClickUsageError
 from railctl.cli._errors import OutputContext, run
-from railctl.cli._meta import error_codes
+from railctl.cli._meta import error_codes, manifest
 from railctl.cli._parse_context import ParseContextTyper
 from railctl.cli.result import ERROR_SCHEMA, INTERNAL_CODE, USAGE_CODE, USAGE_EXIT_CODE
 
@@ -438,3 +438,109 @@ def test_typer_exit_and_abort_are_the_classes_the_vendored_click_raises():
     # And the non-standalone contract itself: an eager `--help` comes back as the int 0
     # rather than as a raised `typer.Exit`.
     assert cli_main.app(["--help"], standalone_mode=False) == 0
+
+
+# -- the third interrupt route: Ctrl-C while the parser is still running ------
+
+
+def _published_exit_codes() -> list[int]:
+    """Every exit code any command publishes in `railctl schema`, read from the manifest."""
+    commands = manifest()["commands"]
+    return sorted({code for command in commands for code in command["exit_codes"]})
+
+
+def _interrupting_app(monkeypatch) -> list[str]:
+    """A throwaway app whose OPTION CALLBACK raises `KeyboardInterrupt`, plus the list the
+    command body would append to if it ever ran.
+
+    A parameter callback runs inside `Command.make_context`, so the interrupt escapes
+    before `invoke` is called at all - that is what makes this the PARSE-time route and
+    not the command-body one `_errors.run()` already owns. The list is the evidence: it
+    stays empty on a run that goes as intended, so a change that let the invocation reach
+    the body shows up as a failed assertion instead of a still-green test.
+    """
+    reached: list[str] = []
+
+    def interrupt(value: str) -> str:
+        raise KeyboardInterrupt
+
+    app = typer.Typer()
+
+    @app.command()
+    def body(flavour: str = typer.Option("plain", callback=interrupt)) -> None:
+        reached.append(flavour)
+
+    monkeypatch.setattr(cli_main, "app", app)
+    return reached
+
+
+def test_an_interrupt_while_parsing_publishes_the_aborted_envelope_and_exits_9(monkeypatch, capsys):
+    """The route that used to publish nothing at all.
+
+    `typer.core._main` turns a `KeyboardInterrupt` into `Exit(130)` and, in
+    non-standalone mode, RETURNS 130 as a plain int - so before the fix this reached
+    `main()`'s `else:` branch, exited 130 and wrote no envelope. A caller asking "did the
+    operator stop this?" reads `code`, never the process status, and there was no `code`
+    to read.
+    """
+    expected = _keyboard_interrupt_envelope()
+    reached = _interrupting_app(monkeypatch)
+
+    code = _exit_code(monkeypatch, [])
+
+    payload = _envelope(capsys)
+    assert reached == []
+    assert payload["code"] == expected["code"]
+    assert payload["exit_code"] == expected["exit_code"]
+    assert code == expected["exit_code"]
+
+
+def test_an_interrupt_while_parsing_answers_exactly_as_one_inside_a_command_body(
+    monkeypatch, capsys
+):
+    """Whole-envelope equality, against the envelope `_errors.run()` itself builds.
+
+    Asserting `"aborted"` and `9` as literals here would let the three interrupt routes
+    drift apart the moment one of them was reworded: they would each keep matching their
+    own hardcoded copy. One event has one description, so this reads the description from
+    the route that already owned it.
+    """
+    expected = _keyboard_interrupt_envelope()
+    _interrupting_app(monkeypatch)
+
+    _exit_code(monkeypatch, [])
+
+    assert _envelope(capsys) == expected
+
+
+@pytest.mark.parametrize("published", _published_exit_codes())
+def test_a_command_that_exits_with_a_published_code_still_does(monkeypatch, published):
+    """The new branch recognises one returned int and must pass every other one through.
+
+    Walks the manifest rather than naming two codes, so a command publishing a new exit
+    code is covered the day it is added - including 0, where turning a success into an
+    interrupt envelope would be the loudest possible defect.
+    """
+
+    def boom() -> None:
+        raise typer.Exit(code=published)
+
+    _throwaway_app(monkeypatch, boom)
+    assert _exit_code(monkeypatch, []) == published
+
+
+def test_no_published_exit_code_collides_with_the_interrupt_sentinel():
+    """The assumption that makes `outcome == 130` unambiguous, pinned.
+
+    `main()` reads a returned 130 as "typer converted a KeyboardInterrupt", which is only
+    safe while no railctl command can return that value itself. If a future command ever
+    publishes 130, this test fails and tells whoever added it that the sentinel is now
+    ambiguous - instead of a Ctrl-C envelope quietly appearing on that command's ordinary
+    run.
+    """
+    sentinel = cli_main.TYPER_INTERRUPT_EXIT_CODE
+
+    assert [
+        command["path"] for command in manifest()["commands"] if sentinel in command["exit_codes"]
+    ] == []
+    assert [row["code"] for row in error_codes() if row["exit_code"] == sentinel] == []

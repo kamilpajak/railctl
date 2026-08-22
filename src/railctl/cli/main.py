@@ -11,7 +11,7 @@ from __future__ import annotations
 import os
 import sys
 from collections.abc import Callable, Sequence
-from typing import NoReturn
+from typing import Final, NoReturn
 
 import typer
 
@@ -209,6 +209,12 @@ diff.register(app)
 schema.register(app)
 
 
+#: The exit code `typer.core._main` invents for a `KeyboardInterrupt`, and the only reason
+#: railctl knows the number at all. Not a railctl exit code: nothing in `_meta` publishes it
+#: and `exit_code_for` never returns it. `main()`'s `else:` branch explains how it is read.
+TYPER_INTERRUPT_EXIT_CODE: Final[int] = 130
+
+
 def main() -> None:
     """Process entry point. Catches everything that can happen BEFORE a command's own
     `run()` gets a chance to: an invocation Click's parser refuses, a bad `config.toml`,
@@ -230,6 +236,8 @@ def main() -> None:
     `main()` that dropped the return value would turn a sweep that must exit 9 and a failed
     `cv read` into exit 0. Anything that is not an int (a command's own `None`) is success.
     There is deliberately no `except typer.Exit` branch: in this mode it never reaches one.
+    One returned int is not an exit code at all - the 130 typer invents for a Ctrl-C during
+    parsing - and the `else:` branch below says what happens to it and why.
 
     The final `except Exception` is the safety net for everything else that can go
     wrong while resolving global options - an unreadable `config.toml` raising
@@ -295,6 +303,35 @@ def main() -> None:
         # int a `typer.Exit` carried, or the command's own return value (`None`) for a run
         # that never raised one.
         #
+        # 130 is not one of railctl's exit codes and never was. It is typer's: with
+        # `standalone_mode=False`, `typer.core._main` catches a `KeyboardInterrupt` from
+        # anywhere inside `make_context`/`invoke`, raises `_click.exceptions.Exit(130)`, and
+        # its outer handler RETURNS that code as a plain int instead of raising it. So a
+        # Ctrl-C during argument parsing arrives here as the integer 130 and nothing else -
+        # which is why, before this branch existed, the one route no `except` above can see
+        # ended the process with no envelope at all, and therefore with no `code` for a
+        # caller to read. A caller asking "did the operator stop this?" reads `code`, never
+        # the process status.
+        #
+        # Comparing against the bare number is safe because no railctl command can return
+        # it: the highest exit code any command publishes in the manifest is 20, and 130
+        # appears nowhere else in `src/railctl/`. That is an assumption about future
+        # commands, so it is pinned by
+        # `tests/cli/test_usage_envelope.py::test_no_published_exit_code_collides_with_the_interrupt_sentinel`,
+        # which walks every command's published `exit_codes` and every error row's
+        # `exit_code`. Add a command that publishes 130 and that test goes red, instead of
+        # an interrupt envelope quietly appearing on that command's ordinary run.
+        #
+        # The envelope is the one `run()` publishes for a `KeyboardInterrupt` inside a
+        # command body, with the same wording, so the three interrupt routes cannot describe
+        # one event three ways. It exits 9 - `exit_code_for(AbortedError)`, the code the
+        # manifest publishes for `aborted` - and not 130: `_fail` takes the process status
+        # off the same report it just wrote, and exiting 130 next to an envelope saying
+        # `"exit_code": 9` would be two answers to one question. Exit 9 is not "interrupted"
+        # either; it is the generic domain-failure status shared with several other codes,
+        # which is exactly why the answer a caller branches on is `code: "aborted"`.
+        if outcome == TYPER_INTERRUPT_EXIT_CODE:
+            _fail(report_for(AbortedError("interrupted by the operator"), command="railctl"))
         # `isinstance(True, int)` is True, so a command RETURNING `True` would exit 1 while
         # reporting success. No command can: every one of them ends in `_errors.run()`,
         # whose only non-raising path renders the result and then raises
