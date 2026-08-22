@@ -19,6 +19,7 @@ from railctl.cli._click_errors import ClickException, ClickUsageError
 from railctl.cli._errors import (
     OutputContext,
     _internal_report,
+    aborted_report,
     parse_failure_report,
     report_for,
     usage_report,
@@ -41,7 +42,7 @@ from railctl.cli.config import VERBOSE_ENV, Config, config_path, load_config
 from railctl.cli.deps import Settings, build_settings, configure_logging, context_for
 from railctl.cli.render import render_error
 from railctl.cli.result import ErrorReport
-from railctl.errors import AbortedError, RailctlError
+from railctl.errors import RailctlError
 
 
 class _TreeOrderGroup(ParseContextGroup):
@@ -264,8 +265,9 @@ def main() -> None:
         _fail(_internal_report(exc, _entry_output(), verbose=_verbosity_in(sys.argv)))
     except typer.Abort:
         # The operator stopped the run. Deliberately the same envelope `run()` publishes for
-        # a KeyboardInterrupt inside a command body, with the same wording: one event must
-        # not answer differently depending on how far the invocation had got.
+        # a KeyboardInterrupt inside a command body, built by the same `aborted_report`: one
+        # event must not answer differently depending on how far the invocation had got, and
+        # a shared builder is what keeps the message from being reworded on one route only.
         #
         # One route in - an `EOFError` out of the command body - reaches here with a bare
         # newline already on stderr: `typer.core._main` echoes one before it converts the
@@ -276,7 +278,7 @@ def main() -> None:
         # railctl's own prompt (`deps.confirm`) reads with `readline()`, which returns `""`
         # at end of file rather than raising - so the route is one a bug takes, not one an
         # operator can reach.
-        _fail(report_for(AbortedError("interrupted by the operator"), command="railctl"))
+        _fail(aborted_report("railctl"))
     except RailctlError as exc:
         _fail(report_for(exc, command="railctl"))
     except ValueError as exc:
@@ -323,15 +325,16 @@ def main() -> None:
         # an interrupt envelope quietly appearing on that command's ordinary run.
         #
         # The envelope is the one `run()` publishes for a `KeyboardInterrupt` inside a
-        # command body, with the same wording, so the three interrupt routes cannot describe
-        # one event three ways. It exits 9 - `exit_code_for(AbortedError)`, the code the
-        # manifest publishes for `aborted` - and not 130: `_fail` takes the process status
-        # off the same report it just wrote, and exiting 130 next to an envelope saying
+        # command body, from the same `_errors.aborted_report`, so the three interrupt routes
+        # cannot describe one event three ways. It exits 9 - `exit_code_for(AbortedError)`,
+        # the code the manifest publishes for `aborted` - and not 130: `_fail` takes the
+        # process status off the same report it just wrote, and exiting 130 next to an
+        # envelope saying
         # `"exit_code": 9` would be two answers to one question. Exit 9 is not "interrupted"
         # either; it is the generic domain-failure status shared with several other codes,
         # which is exactly why the answer a caller branches on is `code: "aborted"`.
         if outcome == TYPER_INTERRUPT_EXIT_CODE:
-            _fail(report_for(AbortedError("interrupted by the operator"), command="railctl"))
+            _fail(aborted_report("railctl"))
         # `isinstance(True, int)` is True, so a command RETURNING `True` would exit 1 while
         # reporting success. No command can: every one of them ends in `_errors.run()`,
         # whose only non-raising path renders the result and then raises

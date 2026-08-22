@@ -16,6 +16,7 @@ from __future__ import annotations
 import io
 import json
 import sys
+from pathlib import Path
 
 import pytest
 import typer
@@ -548,6 +549,9 @@ def test_no_published_exit_code_collides_with_the_interrupt_sentinel():
 
 # -- what the three routes must share ----------------------------------------
 
+SOURCE_ROOT = Path(__file__).resolve().parents[2] / "src" / "railctl"
+
+
 def test_every_command_publishes_the_exit_code_an_interrupt_leaves():
     """A published set that omits a reachable code is the documented lie
     `_meta.STATION_EXIT_CODES`'s comment warns about, and `schema` was one.
@@ -569,3 +573,30 @@ def test_every_command_publishes_the_exit_code_an_interrupt_leaves():
     ]
 
     assert missing == []
+
+
+def test_the_interrupt_wording_is_written_in_exactly_one_place():
+    """One event, one description - held by the source, not by this file.
+
+    The three interrupt routes each built `AbortedError("...")` with the same words typed
+    out again, so nothing in `src/` linked them: rewording one route left the other two
+    describing the same event differently, and only a test comparing the routes would
+    have noticed. The wording is read out of `run()`'s envelope, so this scan cannot
+    become the fourth copy it exists to forbid.
+    """
+    wording = _keyboard_interrupt_envelope()["message"]
+    files = sorted(SOURCE_ROOT.rglob("*.py"))
+    assert files  # a scan that silently reads nothing must fail, not pass
+
+    hits = [
+        f"{path.relative_to(SOURCE_ROOT)}:{number}"
+        for path in files
+        for number, line in enumerate(path.read_text(encoding="utf-8").splitlines(), 1)
+        if wording in line
+    ]
+
+    # Exactly one, not "at most one": zero would mean the words no longer appear in the
+    # source as written - assembled from pieces, say - which is the same drift arriving by
+    # another route, and a scan that passes on nothing is the blind instrument this
+    # project keeps catching.
+    assert len(hits) == 1, hits
