@@ -23,7 +23,7 @@ import typer
 
 import railctl.cli.main as cli_main
 from railctl.cli._click_errors import ClickException, ClickUsageError
-from railctl.cli._errors import OutputContext, run
+from railctl.cli._errors import OutputContext, aborted_report, run
 from railctl.cli._meta import error_codes, manifest
 from railctl.cli._parse_context import ParseContextTyper
 from railctl.cli.result import ERROR_SCHEMA, INTERNAL_CODE, USAGE_CODE, USAGE_EXIT_CODE
@@ -597,6 +597,27 @@ def test_every_command_publishes_the_exit_code_an_interrupt_leaves():
     ]
 
     assert missing == []
+
+
+def test_the_interrupt_envelope_does_not_depend_on_which_command_was_meant():
+    """The remaining way the three routes could still answer differently.
+
+    `aborted_report` takes a `command`, and `default_suggestions` is keyed on it: `run()`
+    passes the resolved name (`"backup"`), while both of `main()`'s callers pass
+    `"railctl"`, because at neither of those points has anything resolved which command was
+    meant. Today `default_suggestions` returns `[]` for an `AbortedError` whatever the
+    command, so the three envelopes are identical - but nothing said so, and a suggestion
+    added for `aborted` later would split the routes silently while every other test stayed
+    green.
+
+    Asserted at the builder rather than by driving all three routes: this is the single
+    place the difference could enter, and a report built here is the report each route
+    publishes.
+    """
+    from_main = aborted_report("railctl")
+    from_run = aborted_report("backup")
+
+    assert from_main == from_run
 
 
 def test_the_interrupt_wording_is_written_in_exactly_one_place():
