@@ -444,10 +444,36 @@ def test_typer_exit_and_abort_are_the_classes_the_vendored_click_raises():
 # -- the third interrupt route: Ctrl-C while the parser is still running ------
 
 
+def _manifest_commands() -> list[dict]:
+    """Every row `railctl schema` publishes - the nested commands included.
+
+    The three walks below share this one population rather than each calling `manifest()`
+    themselves, so "which commands does the guard cover?" is a named thing a test can pin.
+    A walk that quietly stopped at the top level would still pass every assertion below:
+    `schema` - the one command whose published set this change widened - is top-level, and
+    every nested command inherits the interrupt code from `_meta.STATION_EXIT_CODES`
+    today. So the population is checked by `test_the_manifest_walk_reaches_nested_commands`
+    instead of assumed, the same way `test_the_interrupt_wording_is_written_in_exactly_one_place`
+    checks that its file scan read anything at all.
+    """
+    return list(manifest()["commands"])
+
+
+def test_the_manifest_walk_reaches_nested_commands():
+    """The guards below are only worth their docstrings while this holds.
+
+    Narrowing the walk to top-level commands costs nothing today and would be invisible
+    today - which is exactly when it gets done. Nested rows are what `cv read`, `cv write`
+    and the rest live in, so a guard that never sees them stops guarding them.
+    """
+    nested = [command["path"] for command in _manifest_commands() if " " in command["path"]]
+
+    assert nested
+
+
 def _published_exit_codes() -> list[int]:
     """Every exit code any command publishes in `railctl schema`, read from the manifest."""
-    commands = manifest()["commands"]
-    return sorted({code for command in commands for code in command["exit_codes"]})
+    return sorted({code for command in _manifest_commands() for code in command["exit_codes"]})
 
 
 def _interrupting_app(monkeypatch) -> list[str]:
@@ -542,7 +568,7 @@ def test_no_published_exit_code_collides_with_the_interrupt_sentinel():
     sentinel = cli_main.TYPER_INTERRUPT_EXIT_CODE
 
     assert [
-        command["path"] for command in manifest()["commands"] if sentinel in command["exit_codes"]
+        command["path"] for command in _manifest_commands() if sentinel in command["exit_codes"]
     ] == []
     assert [row["code"] for row in error_codes() if row["exit_code"] == sentinel] == []
 
@@ -567,9 +593,7 @@ def test_every_command_publishes_the_exit_code_an_interrupt_leaves():
     aborted = _keyboard_interrupt_envelope()["exit_code"]
 
     missing = [
-        command["path"]
-        for command in manifest()["commands"]
-        if aborted not in command["exit_codes"]
+        command["path"] for command in _manifest_commands() if aborted not in command["exit_codes"]
     ]
 
     assert missing == []
