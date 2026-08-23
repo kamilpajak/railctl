@@ -1406,8 +1406,14 @@ encoders as well.
 One difference is real but harmless: at CV256, 512, 768 and 1024 JMRI's low-byte
 expression yields `-1`, which its own `setElement` stores unmasked. It reaches the wire
 correctly anyway - the traffic controller casts to `byte`, and the parity XOR is masked -
-but the monitor displays those writes as "CV 0". Reported upstream as JMRI issue #15399.
-Our `pom_cv_fields` computes `(cv - 1) & 0xFF` and has no such intermediate.
+but the monitor displays those writes as "CV 0". Reported upstream as JMRI issue #15399
+and FIXED there on 2026-08-22. Our `pom_cv_fields` computes `(cv - 1) & 0xFF` and never had
+the intermediate.
+
+Worth keeping the distinction the report rested on: the bytes JMRI put on the wire were
+right all along, and only the monitor's rendering of them was wrong. That is why this
+paragraph never weakened the cross-check above - a display bug in the third implementation
+cannot make its encoders agree with ours by accident.
 
 ### What is still open
 
