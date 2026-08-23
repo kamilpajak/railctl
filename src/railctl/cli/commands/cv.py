@@ -45,6 +45,7 @@ from railctl.cli._meta import (
     CV_READ_MODE_OPT,
     CV_SPEC_ARG,
     CV_WRITE_CV_ARG,
+    CV_WRITE_CONFIRM_OPT,
     CV_WRITE_TRACK_OPT,
     CV_WRITE_VALUE_ARG,
     CV_WRITE_VERIFY_OPT,
@@ -75,6 +76,7 @@ from railctl.cli.deps import (
 from railctl.cli.result import PARTIAL_EXIT_CODE, CommandResult, error_code, tri_state
 from railctl.errors import (
     REASON_VALUE_OUT_OF_RANGE,
+    ConfirmationRequiredError,
     CvOutOfRangeError,
     DecoderNotRespondingError,
     IndexPageRequiredError,
@@ -128,6 +130,24 @@ VALUE_MAX: Final[int] = 255
 #: p.30, docs/vendor-references.md).
 FACTORY_RESET_CV: Final[int] = 8
 FACTORY_RESET_VALUE: Final[int] = 8
+
+#: The word `--confirm` must carry before CV8 is set to 8. Not a serial or any other token
+#: bound to the decoder, and the difference from `restore`'s `--confirm=<live serial>` is
+#: deliberate rather than an omission.
+#:
+#: `restore` is guarding against a MISMATCH - "this is not the decoder the file came from" -
+#: so its token has to name the decoder in front of the operator, and it cannot be guessed
+#: before the refusal prints it. A factory reset has nothing to mismatch against; the
+#: question is only "did you mean this". The thing that must not answer it is `--yes`, which
+#: a script carries because that is how anything is made non-interactive, not because its
+#: author considered wiping a decoder. So the token names the OPERATION, and a caller has to
+#: have written the word.
+#:
+#: A decoder-bound token would also be impossible on the main track: reading a serial needs
+#: a CV read, and POM reading answers nothing on the reference station
+#: (docs/probe-results.md R1). A gate that worked on one track and not the other would be
+#: worse than one word that works on both.
+FACTORY_RESET_TOKEN: Final[str] = "factory-reset"
 
 #: One service-mode CV read costs about this on the YD7010 - measured 2026-08-04
 #: (docs/probe-results.md). A silent POM attempt costs 6.7 s, so this is a floor.
@@ -203,6 +223,7 @@ _CV_ARG = typer_argument(CV_WRITE_CV_ARG)
 _VALUE_ARG = typer_argument(CV_WRITE_VALUE_ARG)
 _VERIFY_OPT = typer_option(CV_WRITE_VERIFY_OPT)
 _TRACK_OPT = typer_option(CV_WRITE_TRACK_OPT)
+_CONFIRM_OPT = typer_option(CV_WRITE_CONFIRM_OPT)
 
 
 def parse_page(token: str | None, *, argv_hint: Sequence[str]) -> CvPage | None:
@@ -560,6 +581,7 @@ def register(app: typer.Typer) -> None:
         value: int = _VALUE_ARG,
         verify: bool | None = _VERIFY_OPT,
         track: str = _TRACK_OPT,
+        confirm_token: str | None = _CONFIRM_OPT,
         target: str | None = _TARGET,
         address: int | None = _ADDRESS,
         format_: str | None = _FORMAT,
@@ -638,13 +660,45 @@ def register(app: typer.Typer) -> None:
                 retry = [*prefix, cv, str(value)]
                 if track == TRACK_MAIN:
                     retry += ["--track", TRACK_MAIN]
-                confirm(
-                    _confirm_question(number, value),
-                    settings=settings,
-                    stdin=sys.stdin,
-                    stderr=output.stderr,
-                    retry_argv=retry,
-                )
+                if number == FACTORY_RESET_CV and value == FACTORY_RESET_VALUE:
+                    # The one question `--yes` does not answer. See FACTORY_RESET_TOKEN for
+                    # why the token names the operation rather than the decoder. Raised
+                    # BEFORE `confirm`, so `--yes` cannot short-circuit past it, and before
+                    # the station opens - a refusal must cost no port.
+                    if confirm_token != FACTORY_RESET_TOKEN:
+                        raise ConfirmationRequiredError(
+                            f"writing {FACTORY_RESET_VALUE} to CV{FACTORY_RESET_CV} "
+                            f"FACTORY-RESETS the decoder - every setting is wiped, the "
+                            f"address included (vendor manual p.30). This one is not "
+                            f"answered by --yes",
+                            hint=(
+                                f"rerun with --confirm={FACTORY_RESET_TOKEN} if this is "
+                                f"deliberate; --yes does not answer this"
+                            ),
+                            retry_argv=[*retry, "--confirm", FACTORY_RESET_TOKEN],
+                        )
+                    # The token IS the confirmation, so no question follows it. Asking as
+                    # well would mean a caller who named the operation still needed `--yes`,
+                    # and two flags for one answer is how one of them stops being read.
+                else:
+                    if confirm_token is not None:
+                        # `--confirm` answers exactly one question. Accepting it anywhere
+                        # else turns it into a second `--yes`, which is what it exists not
+                        # to be - and a caller who passes it defensively everywhere finds
+                        # out here rather than believing it covered something.
+                        raise UsageProblem(
+                            f"--confirm answers only the CV{FACTORY_RESET_CV}="
+                            f"{FACTORY_RESET_VALUE} factory reset, and this write is not "
+                            f"one",
+                            suggestions=[[*retry, "--yes"]],
+                        )
+                    confirm(
+                        _confirm_question(number, value),
+                        settings=settings,
+                        stdin=sys.stdin,
+                        stderr=output.stderr,
+                        retry_argv=retry,
+                    )
             wanted = MODE_FOR_TRACK[track]
             effective_verify = (track == TRACK_PROG) if verify is None else verify
             events = StationEventLog()

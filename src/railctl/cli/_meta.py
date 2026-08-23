@@ -587,6 +587,16 @@ _CV_READ = CommandMeta(
     options=(CV_READ_MODE_OPT, CV_PAGE_OPT),
     confirms=True,
 )
+CV_WRITE_CONFIRM_OPT = Option(
+    name="--confirm",
+    help=(
+        "the word 'factory-reset', required before CV8 can be set to 8; --yes does not "
+        "answer that one question"
+    ),
+    type="string",
+    default=None,
+)
+
 _CV_WRITE = CommandMeta(
     path="cv write",
     help="Write one CV on the decoder, read back by default",
@@ -594,7 +604,7 @@ _CV_WRITE = CommandMeta(
     mutates=True,
     exit_codes=CV_WRITE_EXIT_CODES,
     arguments=(CV_WRITE_CV_ARG, CV_WRITE_VALUE_ARG),
-    options=(CV_WRITE_VERIFY_OPT, CV_WRITE_TRACK_OPT),
+    options=(CV_WRITE_VERIFY_OPT, CV_WRITE_TRACK_OPT, CV_WRITE_CONFIRM_OPT),
     # The confirmation set {1, 8, 17, 18, 29, 31, 32, 144} lives in
     # commands/cv.py, derived from the station layer's own constants.
     confirms=True,
