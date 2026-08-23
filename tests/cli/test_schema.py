@@ -1394,6 +1394,11 @@ def test_format_after_the_subcommand_name_is_accepted(fake_station):
     assert json.loads(result.stdout)["schema"] == "railctl/status/v1"
 
 
+def _without_elapsed(envelope: dict) -> dict:
+    """An envelope with the one field that legitimately differs between two runs removed."""
+    return {key: value for key, value in envelope.items() if key != "elapsed_ms"}
+
+
 def test_format_before_or_after_the_subcommand_produces_identical_stdout(fake_station):
     # M6's acceptance sentence in miniature: `railctl status --format json`
     # and `railctl --format json status` must be indistinguishable to a
@@ -1402,7 +1407,25 @@ def test_format_before_or_after_the_subcommand_produces_identical_stdout(fake_st
     before = runner.invoke(app, ["--format", "json", "status"])
     after = runner.invoke(app, ["status", "--format", "json"])
     assert before.exit_code == after.exit_code == 0
-    assert json.loads(before.stdout) == json.loads(after.stdout)
+
+    # `elapsed_ms` is excluded, and this is the whole reason the helper exists: it is a
+    # MEASUREMENT of two separate runs, not a property of where `--format` was typed, and
+    # comparing it for equality made this test a coin flip on the millisecond boundary. It
+    # failed on CI for the first time on 2026-08-23 with `elapsed_ms: 0` against
+    # `elapsed_ms: 1` on one Python version out of four - which is what a race with the
+    # clock looks like when it finally loses.
+    #
+    # Dropped rather than rounded or bounded: any tolerance would still be asserting
+    # something about duration, and duration is not what "the position of --format does not
+    # change the output" claims. That both envelopes CARRY the key is asserted separately,
+    # so removing the field from the envelope cannot make this test pass by accident.
+    first, second = json.loads(before.stdout), json.loads(after.stdout)
+    assert "elapsed_ms" in first and "elapsed_ms" in second
+    # Exactly one field dropped, not "at least one": a helper that stripped more would
+    # make this comparison pass on envelopes that genuinely differ, which is the failure
+    # mode of fixing a flake by widening what it ignores.
+    assert set(first) - set(_without_elapsed(first)) == {"elapsed_ms"}
+    assert _without_elapsed(first) == _without_elapsed(second)
 
 
 def test_json_alias_after_the_subcommand_name_is_accepted(fake_station):
