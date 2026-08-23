@@ -590,8 +590,9 @@ _CV_READ = CommandMeta(
 CV_WRITE_CONFIRM_OPT = Option(
     name="--confirm",
     help=(
-        "the word 'factory-reset', required before CV8 can be set to 8; --yes does not "
-        "answer that one question"
+        "the word 'factory-reset', required before CV8 can be set to 8 - which wipes every "
+        "setting including the address (vendor manual p.30); --yes does not answer that "
+        "one question"
     ),
     type="string",
     default=None,

@@ -1176,6 +1176,21 @@ def test_a_factory_reset_proceeds_with_the_token(monkeypatch):
 
     assert result.exit_code == 0
     assert [(call["cv"], call["value"]) for call in fake.write_calls] == [(8, 8)]
+    # The run has to SAY it reset the decoder. The gate makes the act deliberate; without
+    # this the record reads `CV8 manufacturer_id = 8 written`, which means nothing to
+    # anyone who does not already know what that value does.
+    assert json.loads(result.stdout)["result"]["factory_reset"] is True
+
+
+def test_an_ordinary_write_is_not_marked_as_a_factory_reset(monkeypatch):
+    """The flag must name the one write that resets, not every write to CV8 or every
+    write at all - a marker that is always present carries no information."""
+    _install(monkeypatch, FakeCvStation())
+
+    result = runner.invoke(app, ["cv", "write", "8", "145", "--yes", "--format", "json"])
+
+    assert result.exit_code == 0
+    assert "factory_reset" not in json.loads(result.stdout)["result"]
 
 
 def test_a_wrong_token_does_not_answer_the_factory_reset(monkeypatch):

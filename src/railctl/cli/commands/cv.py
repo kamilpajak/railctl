@@ -407,6 +407,14 @@ def build_cv_write(
         f"{label} = {written.value} written ({written.mode.value} mode, "
         f"verified: {tri_state(written.verified)})"
     )
+    if written.cv == FACTORY_RESET_CV and written.value == FACTORY_RESET_VALUE:
+        # The gate makes the reset deliberate; this makes it legible afterwards. Without
+        # it the run reports an ordinary CV write, and a log read months later says
+        # `CV8 manufacturer_id = 8 written` - which only means anything to someone who
+        # already knows what that value does. Both channels carry it: `factory_reset` in
+        # the result for a script, this line for a person.
+        result.result["factory_reset"] = True
+        result.say("the decoder was FACTORY-RESET: every setting is back to its default")
     if written.verified:
         return result
     if track == TRACK_MAIN:
