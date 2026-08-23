@@ -1151,6 +1151,22 @@ def test_a_factory_reset_is_not_answered_by_yes(monkeypatch):
     ]
 
 
+def test_the_slug_for_cv8_reaches_the_same_gate(monkeypatch):
+    """CV8 is `manufacturer_id` in the catalog, so `cv write manufacturer_id 8` is the
+    same irreversible write typed a different way. The gate keys on the RESOLVED number,
+    not on what the operator typed, and this is the test that says so - a gate that read
+    the raw token would be bypassed by knowing one slug."""
+    fake = _install(monkeypatch, FakeCvStation())
+
+    result = runner.invoke(
+        app, ["cv", "write", "manufacturer_id", "8", "--yes", "--format", "json"]
+    )
+
+    assert result.exit_code == 2
+    assert _stderr_envelope(result)["code"] == "confirmation_required"
+    assert fake.write_calls == []
+
+
 def test_a_factory_reset_proceeds_with_the_token(monkeypatch):
     fake = _install(monkeypatch, FakeCvStation())
 
