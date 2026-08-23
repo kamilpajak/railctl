@@ -44,8 +44,8 @@ from railctl.cli._meta import (
     CV_PAGE_OPT,
     CV_READ_MODE_OPT,
     CV_SPEC_ARG,
-    CV_WRITE_CV_ARG,
     CV_WRITE_CONFIRM_OPT,
+    CV_WRITE_CV_ARG,
     CV_WRITE_TRACK_OPT,
     CV_WRITE_VALUE_ARG,
     CV_WRITE_VERIFY_OPT,
@@ -147,7 +147,7 @@ FACTORY_RESET_VALUE: Final[int] = 8
 #: a CV read, and POM reading answers nothing on the reference station
 #: (docs/probe-results.md R1). A gate that worked on one track and not the other would be
 #: worse than one word that works on both.
-FACTORY_RESET_TOKEN: Final[str] = "factory-reset"
+FACTORY_RESET_TOKEN: Final[str] = "factory-reset"  # noqa: S105 - a confirmation word, not a secret
 
 #: One service-mode CV read costs about this on the YD7010 - measured 2026-08-04
 #: (docs/probe-results.md). A silent POM attempt costs 6.7 s, so this is a floor.
