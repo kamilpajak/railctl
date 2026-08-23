@@ -26,6 +26,7 @@ from railctl.cli.commands.cv import (
     _CONFIRM_REASONS,
     CONFIRM_CVS,
     FACTORY_RESET_CV,
+    FACTORY_RESET_TOKEN,
     MODE_FOR_TRACK,
     PROG_TRACK_NOTICE,
     SILENCE_GUIDANCE,
@@ -1126,6 +1127,117 @@ def test_cv_write_a_confirmed_cv_refuses_without_yes_when_not_interactive(monkey
     # ["railctl", "cv", "write", "--yes"], which exits 2 when run.
     assert envelope["suggestions"] == [["railctl", "cv", "write", "29", "6", "--yes"]]
     assert fake.write_calls == []
+
+
+def test_a_factory_reset_is_not_answered_by_yes(monkeypatch):
+    """`--yes` answers "are you sure" for every confirmed CV but this one.
+
+    The threat here is an accident, not an adversary: a script carries `--yes` because
+    that is how anything is made non-interactive, and a typo or a bad loop turns it into
+    `cv write 8 8`. A flag that means "do not ask me anything" must not also mean "wipe
+    this decoder", so this one question needs a word the caller had to write on purpose.
+    """
+    fake = _install(monkeypatch, FakeCvStation())
+
+    result = runner.invoke(app, ["cv", "write", "8", "8", "--yes", "--format", "json"])
+
+    assert result.exit_code == 2
+    envelope = _stderr_envelope(result)
+    assert envelope["code"] == "confirmation_required"
+    assert fake.write_calls == []
+    # The suggestion has to be the command that WORKS, not the one just refused.
+    assert envelope["suggestions"] == [
+        ["railctl", "cv", "write", "8", "8", "--confirm", FACTORY_RESET_TOKEN]
+    ]
+
+
+def test_the_slug_for_cv8_reaches_the_same_gate(monkeypatch):
+    """CV8 is `manufacturer_id` in the catalog, so `cv write manufacturer_id 8` is the
+    same irreversible write typed a different way. The gate keys on the RESOLVED number,
+    not on what the operator typed, and this is the test that says so - a gate that read
+    the raw token would be bypassed by knowing one slug."""
+    fake = _install(monkeypatch, FakeCvStation())
+
+    result = runner.invoke(
+        app, ["cv", "write", "manufacturer_id", "8", "--yes", "--format", "json"]
+    )
+
+    assert result.exit_code == 2
+    assert _stderr_envelope(result)["code"] == "confirmation_required"
+    assert fake.write_calls == []
+
+
+def test_a_factory_reset_proceeds_with_the_token(monkeypatch):
+    fake = _install(monkeypatch, FakeCvStation())
+
+    result = runner.invoke(
+        app, ["cv", "write", "8", "8", "--confirm", FACTORY_RESET_TOKEN, "--format", "json"]
+    )
+
+    assert result.exit_code == 0
+    assert [(call["cv"], call["value"]) for call in fake.write_calls] == [(8, 8)]
+    # The run has to SAY it reset the decoder. The gate makes the act deliberate; without
+    # this the record reads `CV8 manufacturer_id = 8 written`, which means nothing to
+    # anyone who does not already know what that value does.
+    assert json.loads(result.stdout)["result"]["factory_reset"] is True
+
+
+def test_an_ordinary_write_is_not_marked_as_a_factory_reset(monkeypatch):
+    """The flag must name the one write that resets, not every write to CV8 or every
+    write at all - a marker that is always present carries no information."""
+    _install(monkeypatch, FakeCvStation())
+
+    result = runner.invoke(app, ["cv", "write", "8", "145", "--yes", "--format", "json"])
+
+    assert result.exit_code == 0
+    assert "factory_reset" not in json.loads(result.stdout)["result"]
+
+
+def test_a_wrong_token_does_not_answer_the_factory_reset(monkeypatch):
+    fake = _install(monkeypatch, FakeCvStation())
+
+    result = runner.invoke(
+        app, ["cv", "write", "8", "8", "--confirm", "yes", "--yes", "--format", "json"]
+    )
+
+    assert result.exit_code == 2
+    assert _stderr_envelope(result)["code"] == "confirmation_required"
+    assert fake.write_calls == []
+
+
+def test_the_token_is_not_a_second_yes_for_every_other_confirmed_cv(monkeypatch):
+    """`--confirm` answers exactly one question, and nothing else.
+
+    Without this, the token would quietly become a synonym for `--yes` across the whole
+    confirmation set - which is the failure mode of adding a stronger flag beside a weaker
+    one and then accepting either.
+    """
+    fake = _install(monkeypatch, FakeCvStation())
+
+    result = runner.invoke(
+        app,
+        ["cv", "write", "29", "6", "--confirm", FACTORY_RESET_TOKEN, "--yes", "--format", "json"],
+    )
+
+    # `usage`, not `confirmation_required`: the flag does not apply to this write at all,
+    # and saying "you still need --yes" would hide that the token was the wrong tool. Note
+    # `--yes` is present and does NOT rescue it - a caller who passes the token defensively
+    # everywhere finds out, instead of believing it covered something.
+    assert result.exit_code == 2
+    assert _stderr_envelope(result)["code"] == "usage"
+    assert fake.write_calls == []
+
+
+def test_writing_a_non_reset_value_to_cv8_still_takes_yes(monkeypatch):
+    """Only the value that resets needs the token. CV8 with any other value is the
+    ordinary confirmed write it always was, and tightening it would be a change nobody
+    asked for."""
+    fake = _install(monkeypatch, FakeCvStation())
+
+    result = runner.invoke(app, ["cv", "write", "8", "145", "--yes", "--format", "json"])
+
+    assert result.exit_code == 0
+    assert [(call["cv"], call["value"]) for call in fake.write_calls] == [(8, 145)]
 
 
 def test_cv_write_a_blocked_confirmation_on_main_suggests_the_main_track_argv(monkeypatch):
