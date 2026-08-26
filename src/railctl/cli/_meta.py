@@ -623,9 +623,11 @@ _MONITOR = CommandMeta(
     help="Decode broadcasts and own traffic until Ctrl-C",
     schema="railctl/monitor/v1",  # matches commands/monitor.py's MONITOR_SCHEMA
     mutates=False,
-    # `STATION_EXIT_CODES` already carries 9, which is how a monitor normally ends:
+    # The interrupt code is how a monitor normally ends, and every family carries it:
     # `run()` turns the operator's Ctrl-C into `AbortedError`, and the ndjson path
-    # exits with the same 9 by hand after its stream has been closed off.
+    # leaves with the same code by hand after its stream has been closed off. Since
+    # 0.3.0 that is 130 rather than a 9 shared with real failures, which is why this
+    # command's `_COMMAND_EXIT_MEANINGS` row moved to the interrupt code with it.
     exit_codes=STATION_EXIT_CODES,
     error_codes=STATION_ERROR_CODES,
     options=(MONITOR_LIMIT,),
