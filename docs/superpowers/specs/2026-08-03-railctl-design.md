@@ -33,7 +33,7 @@ Defaults: `cv read`, `cv write`, `backup`, `restore` and `diff` all default to `
 
 Three rules that follow from the matrix:
 
-- A read requested on the main track fails with `read_needs_prog_track` (exit 16) and stdout empty. The message names the physical action first, then offers the live write as the alternative, and says plainly that the live write cannot be checked until the loco is back on the programming track.
+- A read requested on the main track fails with `read_needs_prog_track` (exit 9, code `pom_read_unsupported`) and stdout empty. The message names the physical action first, then offers the live write as the alternative, and says plainly that the live write cannot be checked until the loco is back on the programming track.
 - `--verify` together with `--track main` is a **usage error (exit 2)**, never a silent downgrade — nothing can confirm a POM write.
 - Silence on the programming track must never be reported as "the decoder is not answering". An empty or badly contacted programming track is far more likely, and the guidance says so in that order, ending with `railctl cv read 8` as the placement test because a ZIMO decoder answers 145.
 
@@ -878,7 +878,7 @@ class DoctorReport:
     def ok(self) -> bool: ...     # D0..D2 are "ok" and D3 is not "fail"
 ```
 
-Doctor exit codes: `0` when `report.ok`, regardless of capability gaps (a missing capability is information, not a failure); `3` when D0 or D1 fails. D3 reporting `unknown` because the track is unpowered without `--power-on` is the expected state of a bench setup and must not map onto the link-failure code. The human output ends with a verdict block, for example:
+Doctor exit codes: `0` when `report.ok`, regardless of capability gaps (a missing capability is information, not a failure); `9` when D0 or D1 fails - the domain-failure code, since 0.3.0, where it used to be a `3` of its own. What failed is in the report, which is this command's whole output. D3 reporting `unknown` because the track is unpowered without `--power-on` is the expected state of a bench setup and must not be read as a failure at all. The human output ends with a verdict block, for example:
 
 ```
 Primary CV path: POM (results arrive as broadcasts)
@@ -924,34 +924,54 @@ Events via `on_event(name, payload)`:
 | `loco.in_use_by_other` | `address` | another device controls this locomotive |
 | `address.band_unverified` | `address`, `threshold` | address is in 100..127 and D10 has not run |
 
-### Exit codes (`railctl/errors.py`)
+### Exit codes (`railctl/errors.py` and `railctl/exit_codes.py`)
 
-`EXIT_CODES: Final[dict[type[RailctlError], int]]` plus `exit_code_for(exc)`, which walks `type(exc).__mro__` and returns 1 for anything unmapped. The map is applied once, by the decorator in `cli/_errors.py` that wraps every command.
+**Collapsed to eight in 0.3.0 (#65).** The table below is the contract; the eleven
+per-class codes it replaced (10-20) are recorded under "What the twenty-one codes
+were" at the end of this section, because a caller may still meet them in an old
+script.
+
+`railctl/exit_codes.py` declares the eight values and their meanings.
+`errors.EXIT_CODES: Final[dict[type[RailctlError], int]]` maps seven exception classes
+onto five of them, and `exit_code_for(exc)` walks `type(exc).__mro__` and returns the
+internal-error code for anything unmapped. The map is applied once, in `cli/_errors.py`.
 
 | Exit | Condition |
 |---|---|
 | 0 | success |
-| 1 | unhandled internal error (a bug) |
-| 2 | CLI usage error (Typer default, `ValueError` from the facade, LI status `01 09 08`) |
-| 3 | `TransportError` |
-| 4 | `ProtocolError` |
-| 5 | `LinkTimeout` |
-| 6 | `UnsupportedCommandError` |
-| 7 | `UnsupportedFeatureError` |
-| 9 | `RailctlError` (base; also covers `StationError` and anything not otherwise mapped) |
-| 10 | `DecoderNoAckError` |
-| 11 | `ShortCircuitError` |
-| 12 | `StationBusyError` |
-| 13 | `DecoderNotRespondingError` |
-| 14 | `CvVerifyError` |
-| 15 | `CvOutOfRangeError` |
-| 16 | `PomReadUnsupportedError` |
-| 17 | `IndexPageRequiredError` |
-| 18 | `ServiceEncodingUnknownError` |
-| 19 | `ProgrammingError` (base) |
-| 20 | `TrackPowerError` |
+| 1 | unhandled internal error (a bug), and anything outside this project's exception tree |
+| 2 | the invocation was malformed - a bad flag, value or missing argument, plus `ConfirmationRequiredError` and LI status `01 09 08`. Fix the command line; never retry |
+| 4 | the target was named and is not there. Reserved for `PortNotFound` and nothing else |
+| 7 | transient: the same invocation may succeed later. Exactly `LinkTimeout`, `StationBusyError` and `PortBusy` - the three classes whose `code` is in `result.RETRYABLE_CODES`, and no others |
+| 8 | partial: some steps of a multi-step mutation ran and a later one failed. Names no class - a partial run is a RESULT, and the report of what completed goes to stdout |
+| 9 | the operation failed for a real reason - the hardware, the decoder, or a file. Some thirty classes share this, and `error.code` is what tells them apart |
+| 130 | the operator interrupted the run (`AbortedError`), the shell's convention for a process ended by SIGINT |
 
-A new subclass inherits its parent's code until it is given its own. `tests/test_exit_codes.py` asserts that every concrete subclass resolves to a code, that no two entries share a code, and that nothing falls through to 1.
+**What `$?` is for.** The one decision a caller can make without reading anything: 7
+means try again, every other non-zero value means it will not help. WHICH failure it
+was is `error.code`, one value per class, 39 of them, and `railctl schema` lists every
+one. Each command's row also publishes `error_codes` - the subset that command can
+produce - which is where the capability claims live now that the numbers no longer
+separate them.
+
+A new subclass inherits its parent's code until it is given its own, and after the
+collapse most of them should not be given one. `tests/unit/test_exit_codes.py` asserts
+that every class in the tree resolves to a code, that no class resolves to a value
+outside the published eight, that the set of codes classes can produce is exactly
+`{2, 4, 7, 9, 130}`, and that the classes exiting 7 are exactly those whose `code` is
+in `RETRYABLE_CODES` - the identity the naming was chosen for, checked in both
+directions.
+
+**What the twenty-one codes were.** 3 `TransportError`, 4 `ProtocolError`, 5
+`LinkTimeout`, 6 `UnsupportedCommandError`, 7 `UnsupportedFeatureError`, 10
+`DecoderNoAckError`, 11 `ShortCircuitError`, 12 `StationBusyError`, 13
+`DecoderNotRespondingError`, 14 `CvVerifyError`, 15 `CvOutOfRangeError`, 16
+`PomReadUnsupportedError`, 17 `IndexPageRequiredError`, 18
+`ServiceEncodingUnknownError`, 19 `ProgrammingError`, 20 `TrackPowerError`. Three of
+them contradicted the convention they overlapped: `4` meant framing rather than "not
+found", `7` meant a permanent refusal where the convention promises "transient, retry",
+and `130` was never emitted at all. Every one of these failures still has its own
+`error.code`, unchanged, and a script that read `code` rather than `$?` needs no edit.
 
 
 ## Curated ZIMO CV catalog and backup format
@@ -1061,11 +1081,11 @@ The file has `[[cv]]` entries and `[[range]]` blocks (`first`, `last`, `index_st
 | 396 | `volume_down_key` | Function key for volume down | |
 | 397 | `volume_up_key` | Function key for volume up | |
 
-Unspecified `range` is 0–255. `min`/`max` are **advisory on read** (a decoder value outside the range is stored as `ok` with a note; the decoder is the truth) and **enforcing on write** (`restore` refuses out-of-range file values and aborts before any write, exit 15 `CvOutOfRangeError`).
+Unspecified `range` is 0–255. `min`/`max` are **advisory on read** (a decoder value outside the range is stored as `ok` with a note; the decoder is the truth) and **enforcing on write** (`restore` refuses out-of-range file values and aborts before any write, exit 9, code `cv_out_of_range`).
 
 The 14 curated CVs above 256 (265, 266, 273–277, 287, 288, 313, 314, 395–397) are reachable only through POM (`MAX_CV_POM = 1024`), the extended opcodes (R2) or the Z21 opcodes (R4). `MAX_CV_DIRECT = 255`, so plain service mode cannot reach them; they are emitted as `skipped`. Per-sound volume CVs beyond the named block are deliberately unnamed and left to `--all`.
 
-The catalog covers indexed page (0, 0) only. `INDEXED_CV_RANGE = range(257, 513)` is the band where `PAGE_SELECTOR_CVS = (31, 32)` change what a CV number means; access inside it raises `IndexPageRequiredError` (exit 17) unless the page is known and selected.
+The catalog covers indexed page (0, 0) only. `INDEXED_CV_RANGE = range(257, 513)` is the band where `PAGE_SELECTOR_CVS = (31, 32)` change what a CV number means; access inside it raises `IndexPageRequiredError` (exit 9, code `index_page_required`) unless the page is known and selected.
 
 ### C4. Backup file format
 
@@ -1137,14 +1157,14 @@ Holes are never silent: `value` is absent (not `null`, not `0`) whenever `status
 Order of a run:
 
 1. `station.probe()` → `Capabilities`, or the cached `~/.config/railctl/capabilities.json` entry for this link identity. This is the only place that decides what the hardware can do.
-2. Read CV31 and CV32. If either is non-zero the run aborts with `IndexPageRequiredError` (exit 17) unless `--page` was given, which continues and records the page. **The tool never writes CV31/CV32 during a backup or a dry run** — a backup that changes decoder state is not a backup, and on POM the write would be blind with nothing to restore the previous page from.
-3. Read CV29. Not `ok` → abort (exit 13). The speed-table decision, `loco.kind` and the restore mask all depend on it.
+2. Read CV31 and CV32. If either is non-zero the run aborts with `IndexPageRequiredError` (exit 9, code `index_page_required`) unless `--page` was given, which continues and records the page. **The tool never writes CV31/CV32 during a backup or a dry run** — a backup that changes decoder state is not a backup, and on POM the write would be blind with nothing to restore the previous page from.
+3. Read CV29. Not `ok` → abort (exit 9, code `decoder_not_responding`). The speed-table decision, `loco.kind` and the restore mask all depend on it.
 4. Read CV7, CV8, CV250–253 into `decoder`. A failure here is a hole, not an abort; the field is omitted.
 5. Read the rest of `curated_cvs(cat, cv29)` ascending, one at a time, through `Station.cv_read_many`.
 
-If `pom_read` is false, `--mode pom` aborts with `PomReadUnsupportedError` (exit 16) and names the two remedies: enable RailCom on the decoder (CV29 bit 3 = 1, CV28 bits 0 and 1 set), or use `--mode service` with the loco on the programming track. There is no silent fallback: falling back to service mode would read a *different* locomotive if two are on the layout. **`--mode auto` never resolves to the main track for any CV operation.** It resolves to `service` unless `pom_read` has been measured `True`, which on the reference station it has not been. The previous rule resolved to `pom` when `pom_read` was true *or unprobed*, so the default silently selected the one path that returns nothing — and would keep doing so on any station that has never been probed.
+If `pom_read` is false, `--mode pom` aborts with `PomReadUnsupportedError` (exit 9, code `pom_read_unsupported`) and names the two remedies: enable RailCom on the decoder (CV29 bit 3 = 1, CV28 bits 0 and 1 set), or use `--mode service` with the loco on the programming track. There is no silent fallback: falling back to service mode would read a *different* locomotive if two are on the layout. **`--mode auto` never resolves to the main track for any CV operation.** It resolves to `service` unless `pom_read` has been measured `True`, which on the reference station it has not been. The previous rule resolved to `pom` when `pom_read` was true *or unprobed*, so the default silently selected the one path that returns nothing — and would keep doing so on any station that has never been probed.
 
-Backup exits 9 when `complete` is false and lists the non-`ok` CVs; skips are listed but do not change the exit code. Ctrl-C writes the partial file with `"interrupted": true` and exits 9.
+Backup exits 9 when `complete` is false and lists the non-`ok` CVs; skips are listed but do not change the exit code. Ctrl-C writes the partial file with `"interrupted": true` and exits 130, code `aborted`.
 
 ### C7. Restore
 
@@ -1182,8 +1202,8 @@ Preconditions, all checked before any write:
 3. `summary.complete == false` aborts (exit 9) unless `--allow-incomplete`. Non-`ok` entries are never written either way.
 4. **Only when `DECODER_TYPE_CV` says the decoder is not MS-family:** live CV144 must read 0, because on MX decoders it is the programming lock. Non-zero aborts (exit 9); the user clears it, the tool does not. On MS decoders (including the MS450P22) CV144 is the confirmation jingle and is not a precondition at all.
 5. Live CV31/CV32 equal `page`. No write is performed to reach that state.
-6. With `--mode pom` and `pom_read` false, nothing can be verified: abort (exit 16) unless `--no-verify` is passed explicitly, which acknowledges a blind restore.
-7. Every value to be written is inside the catalog `min`/`max` (exit 15 with the list otherwise).
+6. With `--mode pom` and `pom_read` false, nothing can be verified: abort (exit 9, code `pom_read_unsupported`) unless `--no-verify` is passed explicitly, which acknowledges a blind restore.
+7. Every value to be written is inside the catalog `min`/`max` (exit 9, code `cv_out_of_range` with the list otherwise).
 8. With `--with-address`: CV1, CV17, CV18 and CV29 must all be `ok` in the file (exit 9 otherwise). A partial address set produces an unreachable locomotive.
 
 Never-write set: {7, 8, 31, 32, 250, 251, 252, 253}. `source == "sweep"` entries are skipped unless `--include-sweep`, which warns that ZIMO uses several CVs as command triggers rather than stored settings.
@@ -1192,10 +1212,10 @@ Never-write set: {7, 8, 31, 32, 250, 251, 252, 253}. `source == "sweep"` entries
 
 - **A — ordinary CVs.** All `ok`, restorable, non-address CVs except 28, 29, 144, ascending.
 - **B — CV28 then CV29.** These can switch off the readback path itself. The test is on **bits, not on a whole-byte value**: RailCom is live when CV28 bits 0 and 1 are set and CV29 bit 3 is set. **Measured on the reference decoder: CV28 = 3 and CV29 = 14.** An earlier draft asserted CV28 = 67 and warned that comparing against the literal 3 would wrongly flag a factory-default decoder; that had it backwards, and as written this stage would have aborted a restore on a correctly configured decoder. 67 belongs to large scale decoders (ZIMO MS manual: "CV #28 = 3 (or = 67, if large scale decoder)"). Test the bits and never a whole-byte literal, in either direction. If the target CV28 has bit 0 or bit 1 clear, or the target CV29 has bit 3 clear, and the mode is POM, abort before stage A (exit 9) unless `--allow-railcom-off`; with that flag they are written last in the stage and the remaining CVs are reported as unverifiable rather than as mismatches. CV29 is **skipped by default** (decision 5). `--merge-cv29` opts into a masked write preserving the live long-address bit: `new = (file & ~(1 << CV29_LONG_ADDRESS_BIT)) | (live & (1 << CV29_LONG_ADDRESS_BIT))`. With `--with-address` CV29 is written whole and `--merge-cv29` is refused as contradictory.
-- **C — address CVs, only with `--with-address`: CV17, CV18, then CV1.** Last among settings because on POM every later command is addressed by loco number. Afterwards the station re-targets: new address = `((cv17 - 192) << 8) | cv18` when CV29 bit 5 is set, else `cv1`. A long address below 100 aborts *before* stage C: the XpressNet threshold is purely numeric, so a long address in 1..99 cannot be addressed distinctly on this link. Because the address writes were blind (`BLIND_WRITE_CVS` = {1, 8, 17, 18}), failure is diagnosed, not guessed: read CV8 at the new address, then at the old one. An answer at the old address means the write did not take; no answer at either means communication was lost. Both report and exit 14. Nothing is retried at a third address.
+- **C — address CVs, only with `--with-address`: CV17, CV18, then CV1.** Last among settings because on POM every later command is addressed by loco number. Afterwards the station re-targets: new address = `((cv17 - 192) << 8) | cv18` when CV29 bit 5 is set, else `cv1`. A long address below 100 aborts *before* stage C: the XpressNet threshold is purely numeric, so a long address in 1..99 cannot be addressed distinctly on this link. Because the address writes were blind (`BLIND_WRITE_CVS` = {1, 8, 17, 18}), failure is diagnosed, not guessed: read CV8 at the new address, then at the old one. An answer at the old address means the write did not take; no answer at either means communication was lost. Both report and exit 9, code `cv_verify`. Nothing is retried at a third address.
 - **D — CV144, last of all.** Kept last for the MX case, where a lock written earlier would block every subsequent write including verification retries. On MS decoders the value only controls the confirmation jingle, so the ordering is harmless rather than load-bearing. CV144 is verified by read-back only, and the report says that no retry was possible.
 
-**Verification (R3).** POM writes never have feedback in either protocol, so a write pass alone proves nothing. At the end of each stage: re-read every CV written in that stage, compare against the **intended** value (the masked value for CV29, not the raw file value), retry once on mismatch and re-read once, no further loops. Remaining mismatches are collected and reported as one table; the command raises `CvVerifyError`, exit 14. `--no-verify` skips the pass entirely, emits `cv.write_unverified` for every write, and exits 0.
+**Verification (R3).** POM writes never have feedback in either protocol, so a write pass alone proves nothing. At the end of each stage: re-read every CV written in that stage, compare against the **intended** value (the masked value for CV29, not the raw file value), retry once on mismatch and re-read once, no further loops. Remaining mismatches are collected and reported as one table; the command raises `CvVerifyError`, exit 9, code `cv_verify`. `--no-verify` skips the pass entirely, emits `cv.write_unverified` for every write, and exits 0.
 
 Nothing is rolled back. A partial rollback can leave a state worse than the observed one; the file plus the mismatch table already say which CVs disagree. Recovery is re-running `restore` (it is idempotent) or CV8 = 8 followed by a full restore.
 
@@ -1265,7 +1285,7 @@ railctl [GLOBAL] COMMAND ...
 
 **No command takes the locomotive address positionally.** `railctl drive 3 40` and `railctl drive 40 3` are indistinguishable to a human holding a running train; `railctl drive 40 -a 3` is not. Missing address is exit 2 with a suggestion of `["railctl","drive","40","--address","3"]`.
 
-`cv read` and `--only`/`--range` share one grammar, `parse_cv_spec`: `29`; `3-8`; `1,3,29`; a catalog slug such as `accel_rate`. Tokens concatenate, duplicates collapse, first-appearance order is kept. An unknown slug is exit 2 listing the three closest catalog names. A CV above the bound for the resolved mode is `CvOutOfRangeError`, exit 15, naming the bound and suggesting `["railctl","doctor"]`.
+`cv read` and `--only`/`--range` share one grammar, `parse_cv_spec`: `29`; `3-8`; `1,3,29`; a catalog slug such as `accel_rate`. Tokens concatenate, duplicates collapse, first-appearance order is kept. An unknown slug is exit 2 listing the three closest catalog names. A CV above the bound for the resolved mode is `CvOutOfRangeError`, exit 9, code `cv_out_of_range`, naming the bound and suggesting `["railctl","doctor"]`.
 
 ### L3. Configuration
 
@@ -1350,17 +1370,17 @@ The manifest is **generated from the same metadata that builds the Typer parser*
 
 ### L6. Exit codes and safety
 
-The exception-to-code mapping is `railctl.errors.EXIT_CODES` with `exit_code_for(exc)` walking the MRO, so a new subclass inherits its base's code with no table edit. `KeyboardInterrupt` derives from `BaseException` and needs its own entry.
+The exception-to-code mapping is `railctl.errors.EXIT_CODES` with `exit_code_for(exc)` walking the MRO, so a new subclass inherits its base's code with no table edit. `KeyboardInterrupt` derives from `BaseException` and needs its own entry. Eight codes since 0.3.0, down from twenty-one - see "Exit codes" above for the collapse and what the retired numbers meant.
 
-| 0 success | 1 unhandled internal error | 2 usage / `ValueError` / LI `01 09 08` | 3 `TransportError` | 4 `ProtocolError` | 5 `LinkTimeout` | 6 `UnsupportedCommandError` | 7 `UnsupportedFeatureError` | 9 `RailctlError` base (covers `StationError`) | 10 `DecoderNoAckError` | 11 `ShortCircuitError` | 12 `StationBusyError` | 13 `DecoderNotRespondingError` | 14 `CvVerifyError` | 15 `CvOutOfRangeError` | 16 `PomReadUnsupportedError` | 17 `IndexPageRequiredError` | 19 `ProgrammingError` base | 20 `TrackPowerError` |
+| 0 success | 1 unhandled internal error | 2 usage / `ValueError` / `ConfirmationRequiredError` / LI `01 09 08` | 4 `PortNotFound` | 7 transient: `LinkTimeout`, `StationBusyError`, `PortBusy` | 8 partial (names no class) | 9 every other real failure - read `error.code` | 130 `AbortedError` |
 
-Consequences: a partial backup exits **9** (`BackupIncompleteError(StationError)`); a restore whose read-back disagrees exits **14**; `diff` exits **0** when it completed and reports `differences` in the payload — it does **not** mirror `diff(1)`, because every non-zero code in this tool is an exception and inventing an exception for "the answer is yes" makes the table lie. Ctrl-C runs cleanup and exits 9 via `AbortedError(RailctlError)`.
+Consequences: a partial backup exits **9** (`BackupIncompleteError(StationError)`, code `backup_incomplete`); a restore whose read-back disagrees exits **9** with code `cv_verify`; `diff` exits **0** when it completed and reports `differences` in the payload — it does **not** mirror `diff(1)`, because every non-zero code in this tool is an exception and inventing an exception for "the answer is yes" makes the table lie. Ctrl-C runs cleanup and exits 130 via `AbortedError(RailctlError)`.
 
 **Each command publishes the exit codes it can produce, and errs towards publishing.** `railctl schema` reports an `exit_codes` tuple per command, and `--help` prints the same list. It is a "can produce" claim about our own code paths, not a measurement of the hardware — so the project's rule that a capability must never be recorded without measuring it does not govern it, and the two errors are not symmetric. A published code that never arrives costs a caller one unused branch. A code that arrives unpublished drops them into their unknown-exit-code arm on a failure this tool documents everywhere else. So when a code is arguable, publish it, and never tighten a tuple to only the codes a test happens to drive. This was learned the hard way: `status` and `version` shipped a hand-written tuple omitting 6 and 7 while both were reachable, and `railctl status --target z21:...` exited 7 against a manifest saying it could not. The guard against the dangerous direction is `tests/cli/test_schema.py`'s reachability tests, which drive a command and assert the observed code is one its own row advertises; a command that adds an error path must add a drive for it.
 
 Safety rules:
 
-- `power` has three states. **`power on` comes up HELD**: it sends `cmd_track_power_on`, then `cmd_emergency_stop_all` (`80 80`), then sends speed 0 to `--address` when one is resolvable, and reads the status back LAST — after the final mutation, so what it claims is confirmed against the state it leaves. It stays held. **`power resume`** sends `cmd_track_power_on` (`21 81` RESUME_OPS) and nothing else, which is the release. `power off` is unchanged. Every step of that order is measured: see `docs/probe-results.md`, "`power on`'s stop-all was in the wrong order — SETTLED 2026-08-09". The prefix sent *before* energising did nothing (the locomotive resumed its stored speed in the control run and the test run alike); sent *after*, it held stored steps 15 and 80; the release started a locomotive whose stored speed the hold had never cleared (`loco_info` read 80 throughout); a speed telegram lands while the layout is held, which is why the idle may follow the hold; and the hold SURVIVES that telegram — the status still read `0x05` afterwards, which is what makes "the layout is held" true at the moment the command says it. Two caveats travel with those runs and must not be dropped when this paragraph is summarised. **The 0.51 s gap between energising and holding is railctl's own**, not the station's: `power_on()` pays `power_settle` plus a status round trip because the YD7010 never answers `21 81` with `61 01`, and sending the stop straight after the power-on telegram would cut it to milliseconds. **It was harmless only because this decoder's acceleration curve is several seconds long** — watched directly, a locomotive released from stored step 80 spent several seconds winding up. That is a fact about this decoder's CV3, not about the window being inherently safe, and a decoder with a short ramp would behave differently. This is JMRI's `XNetPowerManager` state model with a safe default — our `power on` is their `IDLE` and our `power resume` is their `ON`. The cost was accepted: `power on` followed by `drive` no longer works in one go, because the pre-flight refuses on emergency stop (exit 20, `condition: emergency_stop`), and that refusal now suggests `power resume`. Status **bit 2 is start mode** (0 manual, 1 automatic), never short circuit; `status` prints the raw byte alongside the decoded names.
+- `power` has three states. **`power on` comes up HELD**: it sends `cmd_track_power_on`, then `cmd_emergency_stop_all` (`80 80`), then sends speed 0 to `--address` when one is resolvable, and reads the status back LAST — after the final mutation, so what it claims is confirmed against the state it leaves. It stays held. **`power resume`** sends `cmd_track_power_on` (`21 81` RESUME_OPS) and nothing else, which is the release. `power off` is unchanged. Every step of that order is measured: see `docs/probe-results.md`, "`power on`'s stop-all was in the wrong order — SETTLED 2026-08-09". The prefix sent *before* energising did nothing (the locomotive resumed its stored speed in the control run and the test run alike); sent *after*, it held stored steps 15 and 80; the release started a locomotive whose stored speed the hold had never cleared (`loco_info` read 80 throughout); a speed telegram lands while the layout is held, which is why the idle may follow the hold; and the hold SURVIVES that telegram — the status still read `0x05` afterwards, which is what makes "the layout is held" true at the moment the command says it. Two caveats travel with those runs and must not be dropped when this paragraph is summarised. **The 0.51 s gap between energising and holding is railctl's own**, not the station's: `power_on()` pays `power_settle` plus a status round trip because the YD7010 never answers `21 81` with `61 01`, and sending the stop straight after the power-on telegram would cut it to milliseconds. **It was harmless only because this decoder's acceleration curve is several seconds long** — watched directly, a locomotive released from stored step 80 spent several seconds winding up. That is a fact about this decoder's CV3, not about the window being inherently safe, and a decoder with a short ramp would behave differently. This is JMRI's `XNetPowerManager` state model with a safe default — our `power on` is their `IDLE` and our `power resume` is their `ON`. The cost was accepted: `power on` followed by `drive` no longer works in one go, because the pre-flight refuses on emergency stop (exit 9, code `track_power`, `condition: emergency_stop`), and that refusal now suggests `power resume`. Status **bit 2 is start mode** (0 manual, 1 automatic), never short circuit; `status` prints the raw byte alongside the decoded names.
 - `drive SPEED>0`, `function` and every POM `cv` command run a status pre-flight and refuse on emergency-off (`TrackPowerError`, 20), emergency stop (20) or an active service-mode session (12). Without the power check the speed would sit in the refresh buffer and start the train when power returns. `speed 0` skips the pre-flight and is always sent.
 - Per-locomotive stop is `92 AH AL XOR`, not `E4 13` with wire value 1.
 - `function` reads current state via `cmd_loco_info` and flips one bit, because a group command carries every bit of its group. If loco info fails, exit 9 with a `--force-group` suggestion, which clears the rest of the group.
@@ -1538,7 +1558,7 @@ Serial port setup (termios flags, DTR/RTS, settle delay after open); R1 in all i
 
 **R1, R2, R4 and R5 are unproven. Nothing in this spec may assume any of them.** Every code path that depends on one of them is guarded by a `Capabilities` field that starts as `null`, and a `null` capability never becomes a silent assumption: it either takes the conservative branch or raises with a `["railctl","doctor"]` suggestion. The verification below is milestone M1 and runs before any package code is frozen. Results go into `docs/probe-results.md` with the date and the firmware version reported by `21 21 00`, and into `~/.config/railctl/capabilities.json`.
 
-**R1 — does the YD7010 return POM read results over XpressNet?** Procedure, extending `scratchpad/probe_yd7010.py`: track powered, one ZIMO loco at address 3 with CV29 bit 3 = 1 and CV28 bits 0 and 1 set. (a) Send `FF FE E6 30 00 03 E4 07 00 36` (POM read of CV8) and log every byte for 5 s without polling — this answers whether the result arrives as an `FF FD` broadcast. (b) Repeat, this time polling `FF FE 21 10 31` every 250 ms for 5 s — this answers whether it arrives by poll. (c) Note which CV byte the `63 14` result carries: `07` means zero-based, `08` means one-based. That single byte sets `pom_echo_zero_based` and decides whether `CvMatcher` can validate the echo at all. (d) Repeat for CV265 and CV266, two CVs above 256 with known different values, and check that the returned values are not those of CV9 and CV10 — the result telegram carries only 8 bits of CV address, so a station that truncates would return a neighbour in the same 256-block with no error. Outcomes: `pom_read`, `pom_result_channel` (`broadcast`/`poll`/`none`), `pom_echo_zero_based`, plus a measured value for `pom_result`. If (a) and (b) both fail, `pom_read = false`, POM becomes unavailable, `--mode auto` resolves to `service`, and every POM path raises `PomReadUnsupportedError` (exit 16) with the RailCom and programming-track remedies. The product still works; every CV touch then needs the programming track.
+**R1 — does the YD7010 return POM read results over XpressNet?** Procedure, extending `scratchpad/probe_yd7010.py`: track powered, one ZIMO loco at address 3 with CV29 bit 3 = 1 and CV28 bits 0 and 1 set. (a) Send `FF FE E6 30 00 03 E4 07 00 36` (POM read of CV8) and log every byte for 5 s without polling — this answers whether the result arrives as an `FF FD` broadcast. (b) Repeat, this time polling `FF FE 21 10 31` every 250 ms for 5 s — this answers whether it arrives by poll. (c) Note which CV byte the `63 14` result carries: `07` means zero-based, `08` means one-based. That single byte sets `pom_echo_zero_based` and decides whether `CvMatcher` can validate the echo at all. (d) Repeat for CV265 and CV266, two CVs above 256 with known different values, and check that the returned values are not those of CV9 and CV10 — the result telegram carries only 8 bits of CV address, so a station that truncates would return a neighbour in the same 256-block with no error. Outcomes: `pom_read`, `pom_result_channel` (`broadcast`/`poll`/`none`), `pom_echo_zero_based`, plus a measured value for `pom_result`. If (a) and (b) both fail, `pom_read = false`, POM becomes unavailable, `--mode auto` resolves to `service`, and every POM path raises `PomReadUnsupportedError` (exit 9, code `pom_read_unsupported`) with the RailCom and programming-track remedies. The product still works; every CV touch then needs the programming track.
 
 **R2 — are the extended CV opcodes implemented?** Loco on the programming track. Send `FF FE 22 18 01 3B` (extended read of CV1) and compare with `FF FE 22 15 01 36` (direct read of CV1). Equal values → `service_ext_cv = true`. `61 82 E3` → `false`. Then confirm the band split with `22 19 00 3B` (CV256) and `22 19 2C 17` (CV300). If false, service mode is capped at `MAX_CV_DIRECT = 255`, the 14 curated sound CVs above 256 are emitted as `skipped` in every service-mode backup, and `cmd_service_ext_read/write` raise `UnsupportedCommandError` before touching the wire.
 
@@ -1554,7 +1574,7 @@ A positive result is worth more than it looks. On the group path (`E4 20/21/22/2
 
 **Partial mitigation available on this specific decoder.** ZIMO MS decoders implement a *confirmation jingle*: with **CV144 bit 4 = 1** the decoder plays a short sound whenever a CV is programmed. On the MS450P22 that turns an unobservable POM write into an audible one. It is not a protocol acknowledgement — nothing reaches the tool and nothing can be asserted in a test — so it does not change any code path, and read-back verification remains the mechanism the tool relies on. It is worth surfacing in the troubleshooting docs, because "I heard nothing when restore ran" is a fast human diagnosis that the writes are not landing at all. `railctl doctor` reports the current CV144 bit 4 state so the user knows whether to expect the sound.
 
-Secondary items to settle during M1, each with a one-line consequence: **status bit 2** is start mode per the Lenz spec, not short circuit — read the raw byte on a healthy powered track, and if bit 2 is set there, the label is right and the `power on` stop-first rationale loses its strongest justification; **`power on` refresh-buffer behaviour** — loco at step 30, `power off`, `power on`, observe whether it moves, which decides whether the `80 80` prefix is a real guard or decoration; **the 100..127 address band** — a decoder set to a short address in that range will silently not respond, so `address.band_unverified` is emitted once per session for addresses in it until the band is confirmed on hardware; **`function_groups_4_5`** — probe `E4 23` and `E4 28` and set `MAX_FUNCTION` behaviour accordingly, since `61 82 E3` there means F13–F28 raise `UnsupportedFeatureError` (exit 7).
+Secondary items to settle during M1, each with a one-line consequence: **status bit 2** is start mode per the Lenz spec, not short circuit — read the raw byte on a healthy powered track, and if bit 2 is set there, the label is right and the `power on` stop-first rationale loses its strongest justification; **`power on` refresh-buffer behaviour** — loco at step 30, `power off`, `power on`, observe whether it moves, which decides whether the `80 80` prefix is a real guard or decoration; **the 100..127 address band** — a decoder set to a short address in that range will silently not respond, so `address.band_unverified` is emitted once per session for addresses in it until the band is confirmed on hardware; **`function_groups_4_5`** — probe `E4 23` and `E4 28` and set `MAX_FUNCTION` behaviour accordingly, since `61 82 E3` there means F13–F28 raise `UnsupportedFeatureError` (exit 9, code `unsupported_feature`).
 
 ---
 
@@ -1580,16 +1600,16 @@ Each milestone is independently verifiable and leaves the tree green.
 
 **M4 — transport, envelope, link.** `serial_posix`, `fake`, `liusb`, `Link` with the one-command-in-flight rule, `LinkStats`, resync counters. Verify: the envelope test file passes including byte-at-a-time feeding and the checksum-resync case; `FakeTransport` raises on a pipelined write; `railctl.link.open_link("auto")` finds and identifies the real port by hand (`find_xpressnet_port()`), and opening the telemetry port instead shows `bytes_dropped` climbing with `frames_ok` stuck at 0.
 
-**M5 — station facade.** `Station.open`, power, status, version, drive, function, loco_info, `CvProgrammer` with both POM and service paths wired to whatever M1 found, `Capabilities`, `probe()`, `doctor`, `Timing`. Verify: the whole `tests/station/` suite passes under both chunk sizes and both envelope parameters; on hardware, power on / drive 30 / stop / power off moves and stops one locomotive. That sequence is the FACADE's, where `power_on()` is `21 81` alone; through the CLI it needs `railctl power resume` between the two, because `railctl power on` comes up held and the pre-flight refuses a drive on an emergency stop (exit 20).
+**M5 — station facade.** `Station.open`, power, status, version, drive, function, loco_info, `CvProgrammer` with both POM and service paths wired to whatever M1 found, `Capabilities`, `probe()`, `doctor`, `Timing`. Verify: the whole `tests/station/` suite passes under both chunk sizes and both envelope parameters; on hardware, power on / drive 30 / stop / power off moves and stops one locomotive. That sequence is the FACADE's, where `power_on()` is `21 81` alone; through the CLI it needs `railctl power resume` between the two, because `railctl power on` comes up held and the pre-flight refuses a drive on an emergency stop (exit 9, code `track_power`).
 
 **M6 — CLI core with the house output contract.** `main`, `_errors`, `deps`, plus `doctor`, `status`, `version`, `power`, `stop`, `drive`, `function`, `monitor`, and `schema` generated from the shared command metadata. Verify: the format-mode test suite passes (one JSON value on stdout, error object on stderr, NO_COLOR, non-TTY stdin); `railctl schema --format=json` round-trips against the registered Typer tree; `railctl doctor --address 3` writes `capabilities.json` matching M1 by hand.
 
 **M7 — catalog.** `zimo.toml` with the 77-CV curated set, `load_catalog`, `curated_cvs`, and the validation tests including the installed-wheel load. Verify: `tests/unit/test_catalog.py` green; the entry count is at least 60; address and non-restorable sets match exactly.
 
-**M8 — `cv read` / `cv write`.** `parse_cv_spec`, mode resolution, page handling, verify-after-write, CV-out-of-range errors with the bound named. Verify: reading CV1, CV3, CV8 and CV29 on the bench returns plausible values; writing CV3 and reading it back agrees; a CV above the mode's bound exits 15 with a `doctor` suggestion.
+**M8 — `cv read` / `cv write`.** `parse_cv_spec`, mode resolution, page handling, verify-after-write, CV-out-of-range errors with the bound named. Verify: reading CV1, CV3, CV8 and CV29 on the bench returns plausible values; writing CV3 and reading it back agrees; a CV above the mode's bound exits 9, code `cv_out_of_range` with a `doctor` suggestion.
 
 **M9 — backup.** `railctl/backup/file.py` writer and reader, the `railctl/backup/v1` schema, NDJSON event stream, partial-file-on-Ctrl-C. Verify: two consecutive backups of an unchanged decoder are byte-identical; a run with a deliberately unreadable CV produces `status: "no_response"` with no `value` key, `complete: false` and exit 9; the NDJSON stream's sequence numbers are contiguous and end in a `summary`.
 
-**M10 — restore and diff.** `plan_restore` (pure), the four-stage executor, per-stage verification, `diff` in both online and offline forms. Verify: `restore --dry-run` and the real run produce the same plan; a hand-changed CV3 is restored and verified; the report lists CV1/CV17/CV18/CV29 as skipped; `--with-address` writes them last and re-targets; a forced mismatch exits 14 with the mismatch table.
+**M10 — restore and diff.** `plan_restore` (pure), the four-stage executor, per-stage verification, `diff` in both online and offline forms. Verify: `restore --dry-run` and the real run produce the same plan; a hand-changed CV3 is restored and verified; the report lists CV1/CV17/CV18/CV29 as skipped; `--with-address` writes them last and re-targets; a forced mismatch exits 9, code `cv_verify` with the mismatch table.
 
 **M11 — `--all` sweep and release.** Sweep bounds from `Capabilities`, the >60 s confirmation with re-estimation after the first 10 reads, progress on stderr only. Verify: a full sweep completes with a recorded wall-clock time and unreadable count; the manual checklist passes end to end; CHANGELOG `## [0.1.0]` written by hand, `chore(release): v0.1.0`, tag `v0.1.0`.

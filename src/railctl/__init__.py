@@ -9,4 +9,4 @@ on the 0.2.0 bump `railctl version` said 0.2.0 while `railctl backup` stamped ev
 file `railctl 0.1.0`, because that one call site read the metadata instead.
 """
 
-__version__ = "0.2.0"
+__version__ = "0.3.0"

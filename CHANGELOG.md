@@ -6,6 +6,54 @@ All notable changes to this project are documented in this file. The format foll
 
 ## [Unreleased]
 
+## [0.3.0] - 2026-08-26
+
+### Changed
+
+- **BREAKING: `railctl` now publishes eight exit codes instead of twenty-one.** A script
+  that branches on the exit code needs updating; a script that reads `error.code` from the
+  JSON envelope needs no change at all, and that was the point. Eleven of the retired codes
+  (10-20) named one failure each and said nothing `error.code` did not already say, so an
+  agent had to carry a 21-branch table where this project's own CLI rules promise six.
+  Three of the numbers actively misled anyone following the convention: `4` meant a
+  malformed reply rather than "not found", `7` meant a permanent refusal where the
+  convention promises "transient, retry it", and `130` was documented nowhere and never
+  emitted. (#65)
+
+  The eight: `0` success, `1` a bug in railctl, `2` a malformed command line, `4` a named
+  port that is not there, `7` transient - retry may work, `8` partial, `9` the operation
+  failed for a real reason, `130` the operator interrupted the run.
+
+  **What `$?` is for now:** the one decision you can make without reading anything. `7`
+  means try again; every other non-zero value means it will not help. Which failure it was
+  is `error.code` - one value per class, 39 of them, unchanged by this release, and
+  `railctl schema` lists every one.
+
+  **Migration.** Replace a test for a specific number with a test on `error.code`. For
+  example `[ $? -eq 14 ]` becomes a check that `code` is `cv_verify`; `[ $? -eq 16 ]`
+  becomes `pom_read_unsupported`; `[ $? -eq 20 ]` becomes `track_power`. A retry loop that
+  keyed on `5`, `12` or `3` keys on `7` alone now, and that is a fix rather than a
+  translation: the old `7` was `unsupported_feature`, a permanent refusal that a retry loop
+  would have hammered forever.
+
+- **A Ctrl-C now exits 130**, the shell's convention for a run ended by SIGINT, and still
+  carries `code: aborted`. It exited 9 before, sharing a code with real failures. All three
+  interrupt routes - during parsing, inside a command body, and an `EOFError` reaching
+  typer - end the same way, with exactly one envelope on stderr. (#65)
+
+- `railctl doctor` reports a failed probe as exit 9 rather than the old exit 3. What failed
+  is in the report, which is this command's whole output. Success and "a capability came
+  back unknown" are both still exit 0. (#65)
+
+### Added
+
+- Every command's row in `railctl schema` now carries `error_codes`: the `error.code`
+  values that command can produce, alongside the `exit_codes` it can exit with. This is
+  where the detail went. Asking "can `restore` hit an index-page refusal?" used to be a
+  question about exit 17 and is now a question about `index_page_required` in this list;
+  each code's row in the manifest's top-level `error_codes` table gives its exit code and
+  whether it is worth retrying. (#65)
+
 ## [0.2.0] - 2026-08-22
 
 ### Added

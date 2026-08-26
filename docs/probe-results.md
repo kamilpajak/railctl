@@ -285,7 +285,8 @@ latched output is the mechanism, and it explains why the run could not be rescue
 - Nothing the doctor measures is persisted, so a later process finds every encoding "unknown" and
   is told to run the doctor (#15).
 - ~~`CvOutOfRangeError` is raised when no encoding has been probed, naming the wrong cause (#16).~~
-  Fixed: that case now raises `ServiceEncodingUnknownError` (exit 18), which names a state the
+  Fixed: that case now raises `ServiceEncodingUnknownError` (code `service_encoding_unknown`; exit
+  18 when this was measured, exit 9 since 0.3.0), which names a state the
   operator clears by probing rather than a CV number they would have to retype.
 
 ### Confirmed by watching the locomotive
@@ -769,8 +770,10 @@ telegram involved is a stop, a zero, or a read.
 - `drive 0` brakes along the decoder's deceleration curve; `80 80` cuts immediately. Watched:
   the same locomotive coasted to a stop under the first and stopped hard under the second.
 - The pre-flight refusal works on hardware. With emergency stop active, `railctl drive 15
-  --address 3` exits **20** with `code: track_power`, `condition: emergency_stop`, and the
-  runnable suggestion `["railctl","power","on"]` — and its message distinguishes emergency
+  --address 3` is refused with `code: track_power`, `condition: emergency_stop`, and the
+  runnable suggestion `["railctl","power","on"]`. It left the process with **20** when this
+  was measured and leaves it with **9** since 0.3.0; what was measured is the refusal and
+  its `code`, never the process status. Its message distinguishes emergency
   stop (voltage present) from emergency off (no voltage), which is the distinction the swapped
   bit order exists to preserve.
 - Status `0x06` was read while the operator measured **0.6 V** on the main track. Under the
