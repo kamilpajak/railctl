@@ -610,14 +610,14 @@ def test_backup_without_an_address_is_a_usage_error(monkeypatch):
     assert envelope["suggestions"] == [["railctl", "backup", "--address", "3"]]
 
 
-def test_backup_a_bad_mode_exits_2(monkeypatch):
+def test_backup_a_bad_mode_is_a_usage_error(monkeypatch):
     _boom_open(monkeypatch)
     result = runner.invoke(app, ["backup", "--address", "3", "--mode", "xml", "--format", "json"])
     assert result.exit_code == USAGE_EXIT_CODE
     assert "--mode must be one of" in _stderr_envelope(result)["message"]
 
 
-def test_backup_a_bad_page_exits_2(monkeypatch):
+def test_backup_a_bad_page_is_a_usage_error(monkeypatch):
     _boom_open(monkeypatch)
     result = runner.invoke(app, ["backup", "--address", "3", "--page", "145", "--format", "json"])
     assert result.exit_code == USAGE_EXIT_CODE
@@ -627,7 +627,7 @@ def test_backup_a_bad_page_exits_2(monkeypatch):
 # -- mode resolution -----------------------------------------------------------
 
 
-def test_backup_mode_pom_on_a_measured_no_exits_16(monkeypatch):
+def test_backup_mode_pom_on_a_measured_no_refuses_pom(monkeypatch):
     _install(monkeypatch, FakeBackupStation(capabilities=SERVICE_CAPS))
     result = runner.invoke(
         app, ["backup", "--address", "3", "--out", "-", "--mode", "pom", "--format", "json"]
@@ -713,7 +713,7 @@ def test_backup_explicit_service_mode_skips_the_preflight(monkeypatch):
 # -- the page rule -------------------------------------------------------------
 
 
-def test_backup_nonzero_page_without_the_flag_exits_17(monkeypatch, tmp_path):
+def test_backup_nonzero_page_without_the_flag_requires_the_index_page(monkeypatch, tmp_path):
     out = tmp_path / "never.json"
     _install(monkeypatch, FakeBackupStation(read_values={31: 145}))
     result = runner.invoke(app, ["backup", "--address", "3", "--out", str(out), "--format", "json"])
@@ -782,7 +782,7 @@ def test_backup_page_mismatch_records_the_measurement_and_warns(monkeypatch, tmp
 # -- aborts during collection --------------------------------------------------
 
 
-def test_backup_cv29_silence_aborts_13_with_the_placement_hint(monkeypatch, tmp_path):
+def test_backup_cv29_silence_is_not_responding_with_the_placement_hint(monkeypatch, tmp_path):
     out = tmp_path / "never.json"
     _install(
         monkeypatch,
@@ -810,7 +810,9 @@ def test_backup_a_selector_failure_aborts_with_its_own_code(monkeypatch):
 # -- holes: the exit-9 incomplete file ----------------------------------------
 
 
-def test_backup_an_unreadable_cv_is_a_no_response_hole_and_exit_9(monkeypatch, tmp_path):
+def test_backup_an_unreadable_cv_is_a_no_response_hole_and_an_incomplete_file(
+    monkeypatch, tmp_path
+):
     """The M9 acceptance: the row says `no_response` with NO value key, the
     summary says `complete: false`, the process exits 9 - and the document is
     still DELIVERED, on disk and in the envelope, because the file is the
@@ -963,7 +965,9 @@ def test_backup_station_events_still_reach_an_incomplete_envelope(monkeypatch):
     ],
     ids=["pom-refusal", "encoding-unknown"],
 )
-def test_backup_a_mid_run_refusal_is_an_error_row_and_exit_9(monkeypatch, tmp_path, error):
+def test_backup_a_mid_run_refusal_is_an_error_row_and_an_incomplete_file(
+    monkeypatch, tmp_path, error
+):
     """A live refusal is the instrument failing to measure, never a recorded
     decision: the row is `error`, the file incomplete, the exit code 9."""
     out = tmp_path / "refused.json"
@@ -1052,7 +1056,7 @@ def test_backup_bound_detail_names_the_page_write_a_pom_backup_never_does(monkey
     )
 
 
-def test_backup_write_failure_is_backup_file_exit_9(monkeypatch, tmp_path):
+def test_backup_write_failure_is_reported_as_backup_file(monkeypatch, tmp_path):
     blocker = tmp_path / "blocker"
     blocker.write_text("a file, not a directory", encoding="utf-8")
     _install(monkeypatch, FakeBackupStation())
@@ -1143,7 +1147,9 @@ def test_backup_ndjson_sequence_is_contiguous_and_ends_in_summary(monkeypatch, t
     assert out.exists()
 
 
-def test_backup_ndjson_incomplete_run_still_ends_in_a_summary_with_exit_9(monkeypatch, tmp_path):
+def test_backup_ndjson_incomplete_run_still_ends_in_a_summary_naming_the_code(
+    monkeypatch, tmp_path
+):
     out = tmp_path / "stream9.json"
     _install(
         monkeypatch,
@@ -1907,7 +1913,7 @@ def test_the_unexercised_range_rides_the_ndjson_stream_as_an_event(monkeypatch, 
 # -- the exit code and the human summary ---------------------------------------
 
 
-def test_a_sweep_with_silent_cvs_exits_9_like_any_other_hole(monkeypatch, tmp_path):
+def test_a_sweep_with_silent_cvs_is_incomplete_like_any_other_hole(monkeypatch, tmp_path):
     # The bench case: most CV numbers are not implemented in any decoder, and
     # this hardware cannot tell that from silence, so the sweep ends at 9 and
     # the file is still the product.

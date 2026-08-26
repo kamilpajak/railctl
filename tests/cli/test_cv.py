@@ -706,7 +706,7 @@ def test_cv_read_explicit_service_mode_skips_the_preflight(monkeypatch):
     assert fake.status_calls == 0
 
 
-def test_cv_read_auto_with_pom_ruled_out_and_nothing_proven_exits_16(monkeypatch):
+def test_cv_read_auto_with_pom_ruled_out_and_nothing_proven_refuses_pom(monkeypatch):
     _install(
         monkeypatch,
         FakeCvStation(
@@ -719,7 +719,7 @@ def test_cv_read_auto_with_pom_ruled_out_and_nothing_proven_exits_16(monkeypatch
     assert _stderr_envelope(result)["code"] == "pom_read_unsupported"
 
 
-def test_cv_read_above_the_bound_exits_15_with_the_doctor_suggestion(monkeypatch):
+def test_cv_read_above_the_bound_is_out_of_range_with_the_doctor_suggestion(monkeypatch):
     # No station is ever opened: the bound refusal comes first.
     def _boom(*_a, **_k):
         raise AssertionError("the bound refusal must come before any port is touched")
@@ -743,14 +743,14 @@ def test_cv_read_unknown_slug_is_a_usage_error_with_runnable_suggestions(monkeyp
     assert envelope["suggestions"][0] == ["railctl", "cv", "read", "accel_rate"]
 
 
-def test_cv_read_a_bad_mode_exits_2(monkeypatch):
+def test_cv_read_a_bad_mode_is_a_usage_error(monkeypatch):
     _install(monkeypatch, FakeCvStation())
     result = runner.invoke(app, ["cv", "read", "8", "--mode", "xml", "--format", "json"])
     assert result.exit_code == USAGE_EXIT_CODE
     assert "--mode must be one of" in _stderr_envelope(result)["message"]
 
 
-def test_cv_read_a_bad_page_exits_2(monkeypatch):
+def test_cv_read_a_bad_page_is_a_usage_error(monkeypatch):
     _install(monkeypatch, FakeCvStation())
     result = runner.invoke(app, ["cv", "read", "8", "--page", "145", "--format", "json"])
     assert result.exit_code == USAGE_EXIT_CODE
@@ -860,7 +860,7 @@ def test_cv_read_a_failing_selector_read_is_a_row_not_an_abort(monkeypatch):
     assert [(row["cv"], row["status"]) for row in rows] == [(31, "no_response"), (29, "ok")]
 
 
-def test_cv_read_an_indexed_cv_without_a_page_exits_17(monkeypatch):
+def test_cv_read_an_indexed_cv_without_a_page_requires_the_index_page(monkeypatch):
     error = IndexPageRequiredError(f"CV{INDEXED_CV} is behind a ZIMO index page", cv=INDEXED_CV)
     _install(monkeypatch, FakeCvStation(read_errors={INDEXED_CV: error}))
     result = runner.invoke(app, ["cv", "read", str(INDEXED_CV), "--format", "json"])
@@ -869,7 +869,7 @@ def test_cv_read_an_indexed_cv_without_a_page_exits_17(monkeypatch):
     assert _stderr_envelope(result)["code"] == "index_page_required"
 
 
-def test_cv_read_total_silence_exits_13_with_the_placement_test_hint(monkeypatch):
+def test_cv_read_total_silence_is_not_responding_with_the_placement_test_hint(monkeypatch):
     _install(
         monkeypatch,
         FakeCvStation(read_errors={253: DecoderNotRespondingError("no result for CV253", cv=253)}),
@@ -1319,7 +1319,7 @@ def test_cv_write_an_uncurated_cv_has_no_catalog_gate_and_no_name(monkeypatch):
     assert fake.write_calls[0]["cv"] == UNCURATED_CV
 
 
-def test_cv_write_a_failed_verify_exits_14(monkeypatch):
+def test_cv_write_a_failed_verify_is_a_cv_verify_error(monkeypatch):
     _install(
         monkeypatch,
         FakeCvStation(write_error=CvVerifyError("read back 19, expected 20", cv=3)),
@@ -1330,7 +1330,7 @@ def test_cv_write_a_failed_verify_exits_14(monkeypatch):
     assert _stderr_envelope(result)["code"] == "cv_verify"
 
 
-def test_cv_write_a_bad_track_exits_2(monkeypatch):
+def test_cv_write_a_bad_track_is_a_usage_error(monkeypatch):
     _install(monkeypatch, FakeCvStation())
     result = runner.invoke(app, ["cv", "write", "3", "20", "--track", "yard", "--format", "json"])
     assert result.exit_code == USAGE_EXIT_CODE
@@ -1391,7 +1391,7 @@ def test_a_confirmed_sweep_proceeds_with_yes(monkeypatch):
 # -- a damaged catalog is a catalog error, not an internal one ----------------
 
 
-def test_a_damaged_catalog_reports_catalog_exit_9_not_internal(monkeypatch):
+def test_a_damaged_catalog_reports_catalog_not_internal(monkeypatch):
     """`cv read accel_rate` is the first command whose happy path needs the catalog at
     runtime. A damaged zimo.toml raises CatalogError, which is a RailctlError - so run()
     renders code "catalog", exit 9: a data-file problem, not a railctl bug and not the

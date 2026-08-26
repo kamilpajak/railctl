@@ -503,7 +503,7 @@ def test_with_address_writes_the_address_cvs_last_in_stage_order(monkeypatch, tm
     assert [write.cv for write in fake.writes] == [3, 4, 5, 28, 29, 17, 18, 1]
 
 
-def test_a_forced_mismatch_exits_14_with_the_whole_table(monkeypatch, tmp_path):
+def test_a_forced_mismatch_is_a_cv_verify_error_with_the_whole_table(monkeypatch, tmp_path):
     path = backup_file(tmp_path)
     # CV3 and CV5 swallow every write; CV4 takes its first one.
     fake = install(monkeypatch, FakeRestoreStation(ignore_writes={3: 99, 5: 99}))

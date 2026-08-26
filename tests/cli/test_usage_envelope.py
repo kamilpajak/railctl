@@ -84,7 +84,7 @@ PARSE_FAILURES = [
 
 
 @pytest.mark.parametrize("argv", PARSE_FAILURES)
-def test_a_parse_failure_exits_2_with_one_usage_envelope_on_stderr(monkeypatch, capsys, argv):
+def test_a_parse_failure_answers_with_one_usage_envelope_on_stderr(monkeypatch, capsys, argv):
     assert _exit_code(monkeypatch, argv) == USAGE_EXIT_CODE
     payload = _envelope(capsys)
     assert payload["schema"] == ERROR_SCHEMA
@@ -298,7 +298,7 @@ def test_details_name_the_root_when_a_root_option_is_missing_its_value(monkeypat
 # -- the exit code main() now owns -------------------------------------------
 
 
-def test_a_command_that_exits_9_still_exits_9_through_main(monkeypatch):
+def test_a_commands_own_exit_code_still_reaches_the_process_through_main(monkeypatch):
     """The regression guard for `standalone_mode=False`.
 
     Every command signals its exit code by raising `typer.Exit` from `run()`. In
@@ -445,7 +445,7 @@ def test_the_click_names_still_resolve_to_the_vendored_hierarchy():
     # with - but they are two separate facts, and `tests/unit/test_exit_codes.py` is
     # where the coincidence is asserted. Written as Click's here so this test keeps
     # measuring Click.
-    assert ClickUsageError.exit_code == 2
+    assert ClickUsageError.exit_code == 2  # exit-code-literal: Click's number, not railctl's
 
 
 def test_typer_exit_and_abort_are_the_classes_the_vendored_click_raises():

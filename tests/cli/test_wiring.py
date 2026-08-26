@@ -425,7 +425,7 @@ def test_an_unknown_colour_is_rejected_naming_the_three_that_exist():
         assert known in message
 
 
-def test_an_unknown_colour_exits_2_through_the_wired_callback(monkeypatch, capsys):
+def test_an_unknown_colour_is_refused_through_the_wired_callback(monkeypatch, capsys):
     monkeypatch.setattr(sys, "argv", ["railctl", "--color", "allways", "version"])
     with pytest.raises(SystemExit) as caught:
         cli_main.main()
@@ -965,7 +965,7 @@ def test_station_is_closed_even_when_the_command_body_raises(monkeypatch):
     assert result.exit_code == exit_code_for(TransportError("x"))
 
 
-def test_address_out_of_range_exits_2_before_any_command_runs(monkeypatch):
+def test_address_out_of_range_is_refused_before_any_command_runs(monkeypatch):
     monkeypatch.setattr(sys, "argv", ["railctl", "--address", "20000", "status"])
     with pytest.raises(SystemExit) as caught:
         cli_main.main()
@@ -1013,7 +1013,7 @@ def test_address_out_of_range_writes_json_error_and_empty_stdout(monkeypatch, ca
     assert payload["code"] == "usage"
 
 
-def test_bad_config_file_exits_2_naming_file_line_and_key(monkeypatch, capsys, tmp_path):
+def test_bad_config_file_is_a_usage_error_naming_file_line_and_key(monkeypatch, capsys, tmp_path):
     bad = tmp_path / "railctl" / "config.toml"
     bad.parent.mkdir(parents=True, exist_ok=True)
     bad.write_text("bogus = 1\n", encoding="utf-8")

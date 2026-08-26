@@ -235,7 +235,7 @@ def test_3_writing_cv3_and_reading_it_back_agrees_then_restores_the_original(ben
     print(f"\nCV3: {original} -> {target} -> {original}, each step verified")
 
 
-def test_4_a_cv_above_the_mode_bound_exits_15_with_the_doctor_suggestion():
+def test_4_a_cv_above_the_mode_bound_is_out_of_range_with_the_doctor_suggestion():
     """Stage 4. The refusal half of the acceptance: CV1025 is above the bound of
     every mode, exits 15 naming the bound, and suggests `railctl doctor`.
 

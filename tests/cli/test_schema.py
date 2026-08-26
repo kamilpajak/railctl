@@ -1240,7 +1240,7 @@ def test_schema_json_prints_one_envelope_with_the_registered_paths_in_tree_order
     ]
 
 
-def test_schema_for_a_not_yet_implemented_command_is_exit_2_with_near_misses():
+def test_schema_for_a_not_yet_implemented_command_is_a_usage_error_with_near_misses():
     result = runner.invoke(app, ["--format", "json", "schema", "power", "on"])
     assert result.exit_code == USAGE_EXIT_CODE
     assert result.stdout == ""
@@ -1516,7 +1516,7 @@ def test_a_bad_format_after_the_subcommand_fails_exactly_like_one_before_it(fake
         ["status", "--json", "--format", "ndjson"],
     ],
 )
-def test_a_bad_value_after_the_subcommand_exits_2_with_the_usage_envelope(
+def test_a_bad_value_after_the_subcommand_answers_with_the_usage_envelope(
     monkeypatch, capsys, fake_station, argv: list[str]
 ):
     # Through `main()`, the real entry point: exit 2, empty stdout, one

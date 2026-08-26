@@ -509,7 +509,7 @@ def test_an_interrupt_inside_a_command_body_leaves_by_system_exit():
     assert body["code"] == "aborted"
 
 
-def test_run_reports_a_value_error_as_usage_exit_2():
+def test_run_reports_a_value_error_as_a_usage_refusal():
     ctx = _ctx()
 
     def work() -> CommandResult:
@@ -589,7 +589,7 @@ def test_run_maps_a_railctl_error_through_exit_code_for():
     assert body["code"] == "cv_verify"
 
 
-def test_run_reports_an_unmapped_exception_as_internal_exit_1_without_a_traceback(monkeypatch):
+def test_run_reports_an_unmapped_exception_as_internal_without_a_traceback(monkeypatch):
     monkeypatch.delenv("RAILCTL_VERBOSE", raising=False)
     ctx = _ctx()
 
