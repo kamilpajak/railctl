@@ -99,7 +99,7 @@ from railctl.backup import (
 )
 from railctl.backup.plan import STAGES
 from railctl.catalog import load_catalog
-from railctl.cli._errors import OutputContext, report_for, run, usage_report
+from railctl.cli._errors import OutputContext, leave, report_for, run, usage_report
 from railctl.cli._meta import (
     RESTORE_ALLOW_INCOMPLETE_OPT,
     RESTORE_CONFIRM_OPT,
@@ -132,7 +132,7 @@ from railctl.cli.deps import (
     station_info,
 )
 from railctl.cli.render import NdjsonStream
-from railctl.cli.result import USAGE_EXIT_CODE, CommandResult, ErrorReport
+from railctl.cli.result import CommandResult, ErrorReport
 from railctl.errors import (
     AbortedError,
     CvVerifyError,
@@ -143,6 +143,7 @@ from railctl.errors import (
     RestoreFileIncompleteError,
     exit_code_for,
 )
+from railctl.exit_codes import USAGE_EXIT_CODE
 from railctl.station import (
     CV144,
     PAGE_SELECTOR_CVS,
@@ -1124,7 +1125,7 @@ def _run_ndjson(settings: Settings, output: OutputContext, invocation: _Invocati
         if station is not None and state is not None:
             stream.summary(**_summary_fields(state), exit_code=exit_code)
             close_quietly(station)
-    raise typer.Exit(code=exit_code)
+    leave(exit_code)
 
 
 def register(app: typer.Typer) -> None:

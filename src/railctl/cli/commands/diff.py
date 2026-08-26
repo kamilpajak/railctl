@@ -25,7 +25,7 @@ Four more properties are load-bearing here rather than emergent:
   which is most of the times anyone wants one;
 * **nothing is written, on either form.** Not a CV, and not the CV31/CV32
   index selectors - which is why a decoder sitting on a different page than the
-  file was taken on is a refusal (exit 17) rather than a re-selection: the
+  file was taken on is a refusal (`index_page_required`) rather than a re-selection: the
   curated CVs above 256 do not name the same registers on two banks, so
   comparing them across a page boundary would report differences that are only
   a change of subject. The same check runs offline between the two files'
@@ -72,7 +72,7 @@ import typer
 
 from railctl.backup import BackupDocument, PlannedWrite, plan_restore, read_backup
 from railctl.catalog import load_catalog
-from railctl.cli._errors import OutputContext, report_for, run, usage_report
+from railctl.cli._errors import OutputContext, leave, report_for, run, usage_report
 from railctl.cli._meta import (
     DIFF_FILE_ARG,
     DIFF_INCLUDE_SWEEP_OPT,
@@ -106,13 +106,14 @@ from railctl.cli.deps import (
     station_info,
 )
 from railctl.cli.render import NdjsonStream
-from railctl.cli.result import USAGE_EXIT_CODE, CommandResult, ErrorReport
+from railctl.cli.result import CommandResult, ErrorReport
 from railctl.errors import (
     AbortedError,
     IndexPageRequiredError,
     RailctlError,
     exit_code_for,
 )
+from railctl.exit_codes import USAGE_EXIT_CODE
 from railctl.station import PAGE_SELECTOR_CVS, Capabilities, CvPage, CvSpec, ProgMode
 
 if TYPE_CHECKING:
@@ -601,7 +602,7 @@ def _run_ndjson(settings: Settings, output: OutputContext, invocation: _Invocati
             stream.summary(**_summary_fields(rows), exit_code=exit_code)
         if station is not None:
             close_quietly(station)
-    raise typer.Exit(code=exit_code)
+    leave(exit_code)
 
 
 def register(app: typer.Typer) -> None:

@@ -16,6 +16,7 @@ from typer.testing import CliRunner
 
 import railctl.cli.commands.cv as cv_module
 from railctl.catalog import load_catalog
+from railctl.cli._click_errors import ClickUsageError
 from railctl.cli._meta import (
     CV_READ_MODE_OPT,
     CV_WRITE_TRACK_OPT,
@@ -42,14 +43,18 @@ from railctl.cli.commands.cv import (
 from railctl.cli.cvspec import parse_cv_spec
 from railctl.cli.deps import UsageProblem
 from railctl.cli.main import app
-from railctl.cli.result import PARTIAL_EXIT_CODE
 from railctl.errors import (
     CvOutOfRangeError,
     CvVerifyError,
     DecoderNotRespondingError,
     IndexPageRequiredError,
+    PomReadUnsupportedError,
+    StationBusyError,
+    TrackPowerError,
     UnsupportedCommandError,
+    exit_code_for,
 )
+from railctl.exit_codes import DOMAIN_FAILURE_EXIT_CODE, PARTIAL_EXIT_CODE, USAGE_EXIT_CODE
 from railctl.station import (
     Capabilities,
     CvEncoding,
@@ -617,8 +622,14 @@ def _stderr_envelope(result) -> dict[str, object]:
     return json.loads(result.stderr.strip().splitlines()[-1])
 
 
-def _published(path: str, code: int) -> bool:
-    return code in command_meta(path).exit_codes
+def _publishes(path: str, code: str) -> bool:
+    """Whether the manifest says this command can fail this way.
+
+    `error_codes`, not `exit_codes`: after 0.3.0 every programming failure below
+    shares exit 9, so the same question asked of the numbers answers yes for
+    failures the command cannot reach and can never go red.
+    """
+    return code in command_meta(path).error_codes
 
 
 def test_cv_read_service_happy_path_carries_both_keys_and_the_notice(monkeypatch):
@@ -648,7 +659,7 @@ def test_cv_read_human_and_json_carry_the_same_fact(monkeypatch):
 def test_cv_read_auto_resolves_pom_and_requires_an_address(monkeypatch):
     _install(monkeypatch, FakeCvStation(capabilities=POM_CAPS))
     result = runner.invoke(app, ["cv", "read", "8", "--format", "json"])
-    assert result.exit_code == 2
+    assert result.exit_code == USAGE_EXIT_CODE
     envelope = _stderr_envelope(result)
     assert envelope["code"] == "usage"
     assert envelope["suggestions"] == [["railctl", "cv", "read", "8", "--address", "3"]]
@@ -668,17 +679,22 @@ def test_cv_read_pom_runs_the_preflight_and_sends_the_address(monkeypatch):
 
 
 @pytest.mark.parametrize(
-    ("raw_status", "expected_exit"),
-    [(0x02, 20), (0x01, 20), (0x08, 12)],
+    ("raw_status", "expected_code"),
+    [
+        (0x02, TrackPowerError.code),
+        (0x01, TrackPowerError.code),
+        (0x08, StationBusyError.code),
+    ],
     ids=["emergency-off", "emergency-stop", "service-mode"],
 )
-def test_cv_read_pom_preflight_refusals_exit_with_published_codes(
-    monkeypatch, raw_status: int, expected_exit: int
+def test_cv_read_pom_preflight_refusals_report_published_codes(
+    monkeypatch, raw_status: int, expected_code: str
 ):
     _install(monkeypatch, FakeCvStation(capabilities=POM_CAPS, raw_status=raw_status))
     result = runner.invoke(app, ["cv", "read", "8", "--address", "3", "--format", "json"])
-    assert result.exit_code == expected_exit, result.stderr
-    assert _published("cv read", expected_exit)
+    envelope = _stderr_envelope(result)
+    assert envelope["code"] == expected_code, result.stderr
+    assert _publishes("cv read", envelope["code"])
 
 
 def test_cv_read_explicit_service_mode_skips_the_preflight(monkeypatch):
@@ -690,7 +706,7 @@ def test_cv_read_explicit_service_mode_skips_the_preflight(monkeypatch):
     assert fake.status_calls == 0
 
 
-def test_cv_read_auto_with_pom_ruled_out_and_nothing_proven_exits_16(monkeypatch):
+def test_cv_read_auto_with_pom_ruled_out_and_nothing_proven_refuses_pom(monkeypatch):
     _install(
         monkeypatch,
         FakeCvStation(
@@ -698,20 +714,20 @@ def test_cv_read_auto_with_pom_ruled_out_and_nothing_proven_exits_16(monkeypatch
         ),
     )
     result = runner.invoke(app, ["cv", "read", "8", "--format", "json"])
-    assert result.exit_code == 16, result.stderr
-    assert _published("cv read", 16)
+    assert result.exit_code == exit_code_for(PomReadUnsupportedError("x")), result.stderr
+    assert _publishes("cv read", PomReadUnsupportedError.code)
     assert _stderr_envelope(result)["code"] == "pom_read_unsupported"
 
 
-def test_cv_read_above_the_bound_exits_15_with_the_doctor_suggestion(monkeypatch):
+def test_cv_read_above_the_bound_is_out_of_range_with_the_doctor_suggestion(monkeypatch):
     # No station is ever opened: the bound refusal comes first.
     def _boom(*_a, **_k):
         raise AssertionError("the bound refusal must come before any port is touched")
 
     monkeypatch.setattr(Station, "open", staticmethod(_boom))
     result = runner.invoke(app, ["cv", "read", "1025", "--format", "json"])
-    assert result.exit_code == 15, result.stderr
-    assert _published("cv read", 15)
+    assert result.exit_code == exit_code_for(CvOutOfRangeError("x")), result.stderr
+    assert _publishes("cv read", CvOutOfRangeError.code)
     envelope = _stderr_envelope(result)
     assert envelope["code"] == "cv_out_of_range"
     assert envelope["suggestions"] == [["railctl", "doctor"]]
@@ -721,23 +737,23 @@ def test_cv_read_above_the_bound_exits_15_with_the_doctor_suggestion(monkeypatch
 def test_cv_read_unknown_slug_is_a_usage_error_with_runnable_suggestions(monkeypatch):
     _install(monkeypatch, FakeCvStation())
     result = runner.invoke(app, ["cv", "read", "accel_rte", "--format", "json"])
-    assert result.exit_code == 2
+    assert result.exit_code == USAGE_EXIT_CODE
     envelope = _stderr_envelope(result)
     assert envelope["code"] == "usage"
     assert envelope["suggestions"][0] == ["railctl", "cv", "read", "accel_rate"]
 
 
-def test_cv_read_a_bad_mode_exits_2(monkeypatch):
+def test_cv_read_a_bad_mode_is_a_usage_error(monkeypatch):
     _install(monkeypatch, FakeCvStation())
     result = runner.invoke(app, ["cv", "read", "8", "--mode", "xml", "--format", "json"])
-    assert result.exit_code == 2
+    assert result.exit_code == USAGE_EXIT_CODE
     assert "--mode must be one of" in _stderr_envelope(result)["message"]
 
 
-def test_cv_read_a_bad_page_exits_2(monkeypatch):
+def test_cv_read_a_bad_page_is_a_usage_error(monkeypatch):
     _install(monkeypatch, FakeCvStation())
     result = runner.invoke(app, ["cv", "read", "8", "--page", "145", "--format", "json"])
-    assert result.exit_code == 2
+    assert result.exit_code == USAGE_EXIT_CODE
 
 
 def test_cv_read_attaches_the_declared_page_to_indexed_cvs_only(monkeypatch):
@@ -773,7 +789,7 @@ def test_cv_read_with_a_page_on_an_indexed_cv_is_confirmed_before_the_station_op
             "json",
         ],
     )
-    assert result.exit_code == 2, result.stderr
+    assert result.exit_code == USAGE_EXIT_CODE, result.stderr
     envelope = _stderr_envelope(result)
     assert envelope["code"] == "confirmation_required"
     assert "CV31" in envelope["message"] and "CV32" in envelope["message"]
@@ -844,23 +860,23 @@ def test_cv_read_a_failing_selector_read_is_a_row_not_an_abort(monkeypatch):
     assert [(row["cv"], row["status"]) for row in rows] == [(31, "no_response"), (29, "ok")]
 
 
-def test_cv_read_an_indexed_cv_without_a_page_exits_17(monkeypatch):
+def test_cv_read_an_indexed_cv_without_a_page_requires_the_index_page(monkeypatch):
     error = IndexPageRequiredError(f"CV{INDEXED_CV} is behind a ZIMO index page", cv=INDEXED_CV)
     _install(monkeypatch, FakeCvStation(read_errors={INDEXED_CV: error}))
     result = runner.invoke(app, ["cv", "read", str(INDEXED_CV), "--format", "json"])
-    assert result.exit_code == 17, result.stderr
-    assert _published("cv read", 17)
+    assert result.exit_code == exit_code_for(IndexPageRequiredError("x")), result.stderr
+    assert _publishes("cv read", IndexPageRequiredError.code)
     assert _stderr_envelope(result)["code"] == "index_page_required"
 
 
-def test_cv_read_total_silence_exits_13_with_the_placement_test_hint(monkeypatch):
+def test_cv_read_total_silence_is_not_responding_with_the_placement_test_hint(monkeypatch):
     _install(
         monkeypatch,
         FakeCvStation(read_errors={253: DecoderNotRespondingError("no result for CV253", cv=253)}),
     )
     result = runner.invoke(app, ["cv", "read", "253", "--format", "json"])
-    assert result.exit_code == 13, result.stderr
-    assert _published("cv read", 13)
+    assert result.exit_code == exit_code_for(DecoderNotRespondingError("x")), result.stderr
+    assert _publishes("cv read", DecoderNotRespondingError.code)
     envelope = _stderr_envelope(result)
     assert envelope["code"] == "decoder_not_responding"
     assert envelope["hint"] == SILENCE_GUIDANCE
@@ -877,8 +893,12 @@ def test_cv_read_total_pom_silence_keeps_the_stations_own_story(monkeypatch):
         ),
     )
     result = runner.invoke(app, ["cv", "read", "8", "--address", "3", "--format", "json"])
-    assert result.exit_code == 13, result.stderr
-    assert _stderr_envelope(result)["hint"] is None
+    envelope = _stderr_envelope(result)
+    # The code, not only the number: every programming failure exits 9 since 0.3.0,
+    # so the status alone cannot say the decoder went silent rather than refusing.
+    assert envelope["code"] == DecoderNotRespondingError.code, result.stderr
+    assert result.exit_code == exit_code_for(DecoderNotRespondingError("x"))
+    assert envelope["hint"] is None
 
 
 def test_cv_read_a_mixed_batch_is_a_partial_result_not_an_error(monkeypatch):
@@ -891,7 +911,7 @@ def test_cv_read_a_mixed_batch_is_a_partial_result_not_an_error(monkeypatch):
     )
     result = runner.invoke(app, ["cv", "read", "8", "253", "--format", "json"])
     assert result.exit_code == PARTIAL_EXIT_CODE, result.stderr
-    assert _published("cv read", PARTIAL_EXIT_CODE)
+    assert PARTIAL_EXIT_CODE in command_meta("cv read").exit_codes
     payload = json.loads(result.stdout)
     assert payload["ok"] is False
     assert payload["result"]["ok"] == 1
@@ -981,7 +1001,7 @@ def test_cv_write_no_verify_is_passed_through_and_reported(monkeypatch):
 def test_cv_write_on_main_needs_an_address_and_never_verifies(monkeypatch):
     fake = _install(monkeypatch, FakeCvStation(capabilities=POM_CAPS))
     refused = runner.invoke(app, ["cv", "write", "3", "20", "--track", "main", "--format", "json"])
-    assert refused.exit_code == 2
+    assert refused.exit_code == USAGE_EXIT_CODE
     assert _stderr_envelope(refused)["suggestions"] == [
         ["railctl", "cv", "write", "3", "20", "--track", "main", "--address", "3"]
     ]
@@ -1019,7 +1039,7 @@ def test_cv_write_explicit_verify_with_main_is_refused_not_downgraded(monkeypatc
             "json",
         ],
     )
-    assert result.exit_code == 2
+    assert result.exit_code == USAGE_EXIT_CODE
     envelope = _stderr_envelope(result)
     assert envelope["details"]["reason"] == "verify_on_main"
     assert ["railctl", "cv", "write", "3", "20", "--track", "main", "--no-verify"] in envelope[
@@ -1033,8 +1053,11 @@ def test_cv_write_main_preflight_refuses_on_an_emergency_state(monkeypatch):
     result = runner.invoke(
         app, ["cv", "write", "3", "20", "--track", "main", "--address", "3", "--format", "json"]
     )
-    assert result.exit_code == 20, result.stderr
-    assert _published("cv write", 20)
+    # Which refusal, not just that one happened: the pre-flight can also refuse with
+    # station_busy, and both exit 9.
+    assert _stderr_envelope(result)["code"] == TrackPowerError.code, result.stderr
+    assert result.exit_code == exit_code_for(TrackPowerError("x"))
+    assert _publishes("cv write", TrackPowerError.code)
     assert fake.write_calls == []
 
 
@@ -1053,8 +1076,8 @@ def test_cv_write_catalog_range_is_enforcing_before_any_telegram(monkeypatch):
 
     monkeypatch.setattr(Station, "open", staticmethod(_boom))
     result = runner.invoke(app, ["cv", "write", "1", "200", "--format", "json"])
-    assert result.exit_code == 15, result.stderr
-    assert _published("cv write", 15)
+    assert result.exit_code == exit_code_for(CvOutOfRangeError("x")), result.stderr
+    assert _publishes("cv write", CvOutOfRangeError.code)
     envelope = _stderr_envelope(result)
     assert envelope["code"] == "cv_out_of_range"
     assert "1..127" in envelope["message"]
@@ -1078,7 +1101,7 @@ def test_cv_write_one_past_either_catalog_edge_is_refused(monkeypatch, value: in
     # One past the edge, not 73 past it: 128 (and 0) must be the refusal.
     fake = _install(monkeypatch, FakeCvStation())
     result = runner.invoke(app, ["cv", "write", "1", str(value), "--yes", "--format", "json"])
-    assert result.exit_code == 15, result.stderr
+    assert result.exit_code == exit_code_for(CvOutOfRangeError("x")), result.stderr
     assert "1..127" in _stderr_envelope(result)["message"]
     assert fake.write_calls == []
 
@@ -1086,7 +1109,7 @@ def test_cv_write_one_past_either_catalog_edge_is_refused(monkeypatch, value: in
 def test_cv_write_a_non_byte_value_is_a_usage_error(monkeypatch):
     _install(monkeypatch, FakeCvStation())
     result = runner.invoke(app, ["cv", "write", "11", "300", "--format", "json"])
-    assert result.exit_code == 2
+    assert result.exit_code == USAGE_EXIT_CODE
     assert _stderr_envelope(result)["details"]["reason"] == "value_not_a_byte"
 
 
@@ -1103,7 +1126,7 @@ def test_cv_write_accepts_both_value_edges(monkeypatch, value: int):
 def test_cv_write_one_past_the_value_edge_is_refused(monkeypatch):
     fake = _install(monkeypatch, FakeCvStation())
     result = runner.invoke(app, ["cv", "write", str(UNCURATED_CV), "256", "--format", "json"])
-    assert result.exit_code == 2
+    assert result.exit_code == USAGE_EXIT_CODE
     assert _stderr_envelope(result)["details"]["reason"] == "value_not_a_byte"
     assert fake.write_calls == []
 
@@ -1111,7 +1134,7 @@ def test_cv_write_one_past_the_value_edge_is_refused(monkeypatch):
 def test_cv_write_takes_exactly_one_cv(monkeypatch):
     _install(monkeypatch, FakeCvStation())
     result = runner.invoke(app, ["cv", "write", "1,3", "20", "--yes", "--format", "json"])
-    assert result.exit_code == 2
+    assert result.exit_code == USAGE_EXIT_CODE
     envelope = _stderr_envelope(result)
     assert envelope["details"]["reason"] == "multiple_cvs"
     assert ["railctl", "cv", "write", "1", "20"] in envelope["suggestions"]
@@ -1120,7 +1143,7 @@ def test_cv_write_takes_exactly_one_cv(monkeypatch):
 def test_cv_write_a_confirmed_cv_refuses_without_yes_when_not_interactive(monkeypatch):
     fake = _install(monkeypatch, FakeCvStation())
     result = runner.invoke(app, ["cv", "write", "29", "6", "--non-interactive", "--format", "json"])
-    assert result.exit_code == 2
+    assert result.exit_code == USAGE_EXIT_CODE
     envelope = _stderr_envelope(result)
     assert envelope["code"] == "confirmation_required"
     # The full runnable argv - CV and value included - never the bare
@@ -1141,7 +1164,7 @@ def test_a_factory_reset_is_not_answered_by_yes(monkeypatch):
 
     result = runner.invoke(app, ["cv", "write", "8", "8", "--yes", "--format", "json"])
 
-    assert result.exit_code == 2
+    assert result.exit_code == USAGE_EXIT_CODE
     envelope = _stderr_envelope(result)
     assert envelope["code"] == "confirmation_required"
     assert fake.write_calls == []
@@ -1162,7 +1185,7 @@ def test_the_slug_for_cv8_reaches_the_same_gate(monkeypatch):
         app, ["cv", "write", "manufacturer_id", "8", "--yes", "--format", "json"]
     )
 
-    assert result.exit_code == 2
+    assert result.exit_code == USAGE_EXIT_CODE
     assert _stderr_envelope(result)["code"] == "confirmation_required"
     assert fake.write_calls == []
 
@@ -1200,7 +1223,7 @@ def test_a_wrong_token_does_not_answer_the_factory_reset(monkeypatch):
         app, ["cv", "write", "8", "8", "--confirm", "yes", "--yes", "--format", "json"]
     )
 
-    assert result.exit_code == 2
+    assert result.exit_code == USAGE_EXIT_CODE
     assert _stderr_envelope(result)["code"] == "confirmation_required"
     assert fake.write_calls == []
 
@@ -1223,7 +1246,7 @@ def test_the_token_is_not_a_second_yes_for_every_other_confirmed_cv(monkeypatch)
     # and saying "you still need --yes" would hide that the token was the wrong tool. Note
     # `--yes` is present and does NOT rescue it - a caller who passes the token defensively
     # everywhere finds out, instead of believing it covered something.
-    assert result.exit_code == 2
+    assert result.exit_code == USAGE_EXIT_CODE
     assert _stderr_envelope(result)["code"] == "usage"
     assert fake.write_calls == []
 
@@ -1258,7 +1281,7 @@ def test_cv_write_a_blocked_confirmation_on_main_suggests_the_main_track_argv(mo
             "json",
         ],
     )
-    assert result.exit_code == 2
+    assert result.exit_code == USAGE_EXIT_CODE
     envelope = _stderr_envelope(result)
     assert envelope["code"] == "confirmation_required"
     assert envelope["suggestions"] == [
@@ -1276,7 +1299,7 @@ def test_cv_write_confirmation_refusal_comes_before_the_station_opens(monkeypatc
 
     monkeypatch.setattr(Station, "open", staticmethod(_boom))
     result = runner.invoke(app, ["cv", "write", "29", "6", "--non-interactive", "--format", "json"])
-    assert result.exit_code == 2, result.stderr
+    assert result.exit_code == USAGE_EXIT_CODE, result.stderr
     assert _stderr_envelope(result)["code"] == "confirmation_required"
 
 
@@ -1303,27 +1326,31 @@ def test_cv_write_an_uncurated_cv_has_no_catalog_gate_and_no_name(monkeypatch):
     assert fake.write_calls[0]["cv"] == UNCURATED_CV
 
 
-def test_cv_write_a_failed_verify_exits_14(monkeypatch):
+def test_cv_write_a_failed_verify_is_a_cv_verify_error(monkeypatch):
     _install(
         monkeypatch,
         FakeCvStation(write_error=CvVerifyError("read back 19, expected 20", cv=3)),
     )
     result = runner.invoke(app, ["cv", "write", "3", "20", "--format", "json"])
-    assert result.exit_code == 14, result.stderr
-    assert _published("cv write", 14)
+    assert result.exit_code == exit_code_for(CvVerifyError("x")), result.stderr
+    assert _publishes("cv write", CvVerifyError.code)
     assert _stderr_envelope(result)["code"] == "cv_verify"
 
 
-def test_cv_write_a_bad_track_exits_2(monkeypatch):
+def test_cv_write_a_bad_track_is_a_usage_error(monkeypatch):
     _install(monkeypatch, FakeCvStation())
     result = runner.invoke(app, ["cv", "write", "3", "20", "--track", "yard", "--format", "json"])
-    assert result.exit_code == 2
+    assert result.exit_code == USAGE_EXIT_CODE
     assert "--track must be one of" in _stderr_envelope(result)["message"]
 
 
 def test_the_bare_cv_group_is_a_usage_error_with_empty_stdout():
     result = runner.invoke(app, ["cv"])
-    assert result.exit_code == 2
+    # Click's own 2, not `USAGE_EXIT_CODE`: `CliRunner` invokes the app directly and
+    # never reaches `main()`, so this refusal is answered by Click before any railctl
+    # code runs. The two numbers are equal by design; naming railctl's constant here
+    # would claim this path goes through the railctl contract, and it does not.
+    assert result.exit_code == ClickUsageError.exit_code
     assert result.stdout == ""
 
 
@@ -1355,7 +1382,7 @@ def test_a_read_one_past_the_threshold_refuses_without_yes(monkeypatch):
         app,
         ["cv", "read", f"1-{SWEEP_CONFIRM_CVS + 1}", "--non-interactive", "--format", "json"],
     )
-    assert result.exit_code == 2
+    assert result.exit_code == USAGE_EXIT_CODE
     body = _stderr_envelope(result)
     assert body["code"] == "confirmation_required"
     assert ["railctl", "cv", "read", f"1-{SWEEP_CONFIRM_CVS + 1}", "--yes"] in body["suggestions"]
@@ -1371,7 +1398,7 @@ def test_a_confirmed_sweep_proceeds_with_yes(monkeypatch):
 # -- a damaged catalog is a catalog error, not an internal one ----------------
 
 
-def test_a_damaged_catalog_reports_catalog_exit_9_not_internal(monkeypatch):
+def test_a_damaged_catalog_reports_catalog_not_internal(monkeypatch):
     """`cv read accel_rate` is the first command whose happy path needs the catalog at
     runtime. A damaged zimo.toml raises CatalogError, which is a RailctlError - so run()
     renders code "catalog", exit 9: a data-file problem, not a railctl bug and not the
@@ -1385,7 +1412,7 @@ def test_a_damaged_catalog_reports_catalog_exit_9_not_internal(monkeypatch):
 
     monkeypatch.setattr(cv_module, "load_catalog", damaged)
     result = runner.invoke(app, ["cv", "read", "accel_rate", "--format", "json"])
-    assert result.exit_code == 9
+    assert result.exit_code == DOMAIN_FAILURE_EXIT_CODE
     body = _stderr_envelope(result)
     assert body["code"] == "catalog"
 
@@ -1418,7 +1445,7 @@ def test_a_refused_main_track_write_names_the_cv_operation_not_a_drive(monkeypat
             "json",
         ],
     )
-    assert result.exit_code == 20
+    assert result.exit_code == exit_code_for(TrackPowerError("x"))
     body = _stderr_envelope(result)
     assert "CV write" in body["message"]
     assert "speed" not in body["message"]

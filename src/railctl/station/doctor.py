@@ -24,6 +24,7 @@ from railctl.errors import (
     RailctlError,
     UnsupportedCommandError,
 )
+from railctl.exit_codes import DOMAIN_FAILURE_EXIT_CODE, SUCCESS_EXIT_CODE
 from railctl.station.capabilities import Capabilities
 from railctl.station.programming import CvMatcher
 from railctl.station.timing import TIMING
@@ -1365,4 +1366,12 @@ def verdict_lines(report: DoctorReport) -> list[str]:
 
 
 def exit_code_for_report(report: DoctorReport) -> int:
-    return 0 if report.ok else 3
+    """The doctor's own verdict, in the two codes the contract publishes for it.
+
+    The failing value was a bare 3 until 0.3.0, when 3 stopped being published at
+    all. It is the domain-failure code now, alongside every other real failure -
+    what went wrong is in the report, which is the doctor's whole output, and
+    `railctl doctor --help` says so under EXIT CODES. A capability that came back
+    unknown is not a failure: that is success with the gap named in the report.
+    """
+    return SUCCESS_EXIT_CODE if report.ok else DOMAIN_FAILURE_EXIT_CODE

@@ -198,8 +198,8 @@ def plan_restore(
     measured error, and `tests/backup/test_plan.py` pins the plan against a
     capabilities object with everything switched off.
 
-    Raises `AddressSetIncompleteError` (exit 9) when `with_address` cannot be
-    honoured in full, and `CvOutOfRangeError` (exit 15) listing every value the
+    Raises `AddressSetIncompleteError` when `with_address` cannot be
+    honoured in full, and `CvOutOfRangeError` listing every value the
     catalog refuses. Both fire before the caller performs any write.
     """
     if with_address and merge_cv29:

@@ -23,6 +23,7 @@ from typer.testing import CliRunner
 
 import railctl
 import railctl.cli.main as cli_main
+from railctl.cli._click_errors import ClickUsageError
 from railctl.cli._errors import OutputContext, run, usage_report
 from railctl.cli.commands import basics
 from railctl.cli.commands.basics import STATUS_SCHEMA, VERSION_SCHEMA, build_status, build_version
@@ -41,7 +42,13 @@ from railctl.cli.deps import (
     station_info,
 )
 from railctl.cli.result import CommandResult
-from railctl.errors import AbortedError, ConfirmationRequiredError, TransportError
+from railctl.errors import (
+    AbortedError,
+    ConfirmationRequiredError,
+    TransportError,
+    exit_code_for,
+)
+from railctl.exit_codes import INTERNAL_EXIT_CODE, USAGE_EXIT_CODE
 from railctl.station import TIMING, ProgMode, Station
 from railctl.xbus.replies import StationStatus, StationVersion
 
@@ -418,11 +425,11 @@ def test_an_unknown_colour_is_rejected_naming_the_three_that_exist():
         assert known in message
 
 
-def test_an_unknown_colour_exits_2_through_the_wired_callback(monkeypatch, capsys):
+def test_an_unknown_colour_is_refused_through_the_wired_callback(monkeypatch, capsys):
     monkeypatch.setattr(sys, "argv", ["railctl", "--color", "allways", "version"])
     with pytest.raises(SystemExit) as caught:
         cli_main.main()
-    assert caught.value.code == 2
+    assert caught.value.code == USAGE_EXIT_CODE
     captured = capsys.readouterr()
     assert captured.out == ""
     assert json.loads(captured.err)["code"] == "usage"
@@ -520,7 +527,7 @@ def test_a_usage_problems_argv_suggestion_survives_into_the_json_envelope():
 
     with pytest.raises(typer.Exit) as caught:
         run("drive", ctx, work)
-    assert caught.value.exit_code == 2
+    assert caught.value.exit_code == USAGE_EXIT_CODE
     assert ctx.stdout.getvalue() == ""
     payload = json.loads(ctx.stderr.getvalue())
     assert payload["code"] == "usage"
@@ -918,7 +925,7 @@ def test_status_command_human_carries_raw_byte_and_decoded_names(monkeypatch):
     assert "short" not in result.stdout.lower()
 
 
-def test_open_station_failure_exits_3_with_empty_stdout_and_json_stderr(monkeypatch):
+def test_open_station_failure_writes_json_stderr_with_empty_stdout(monkeypatch):
     def fake_open(*a, **k):
         raise TransportError("the port vanished")
 
@@ -927,10 +934,11 @@ def test_open_station_failure_exits_3_with_empty_stdout_and_json_stderr(monkeypa
     # `--format json` is what makes the error a JSON object: `render_error` (Task 8)
     # writes machine-readable errors in every mode BUT human, and human is the default.
     result = runner.invoke(cli_main.app, ["--format", "json", "version"])
-    assert result.exit_code == 3
+    assert result.exit_code == exit_code_for(TransportError("x"))
     assert result.stdout == ""
     payload = json.loads(result.stderr)
-    assert payload["exit_code"] == 3
+    assert payload["code"] == TransportError.code
+    assert payload["exit_code"] == exit_code_for(TransportError("x"))
 
 
 def test_open_station_failure_in_human_mode_writes_plain_text_and_empty_stdout(monkeypatch):
@@ -940,7 +948,7 @@ def test_open_station_failure_in_human_mode_writes_plain_text_and_empty_stdout(m
     monkeypatch.setattr(Station, "open", staticmethod(fake_open))
     runner = CliRunner()
     result = runner.invoke(cli_main.app, ["version"])
-    assert result.exit_code == 3
+    assert result.exit_code == exit_code_for(TransportError("x"))
     assert result.stdout == ""
     assert "the port vanished" in result.stderr
 
@@ -955,14 +963,14 @@ def test_station_is_closed_even_when_the_command_body_raises(monkeypatch):
     runner = CliRunner()
     result = runner.invoke(cli_main.app, ["version"])
     assert station.closed is True
-    assert result.exit_code == 3
+    assert result.exit_code == exit_code_for(TransportError("x"))
 
 
-def test_address_out_of_range_exits_2_before_any_command_runs(monkeypatch):
+def test_address_out_of_range_is_refused_before_any_command_runs(monkeypatch):
     monkeypatch.setattr(sys, "argv", ["railctl", "--address", "20000", "status"])
     with pytest.raises(SystemExit) as caught:
         cli_main.main()
-    assert caught.value.code == 2
+    assert caught.value.code == USAGE_EXIT_CODE
 
 
 def test_an_out_of_range_address_after_the_verb_is_refused_exactly_like_one_before_it(
@@ -983,7 +991,7 @@ def test_an_out_of_range_address_after_the_verb_is_refused_exactly_like_one_befo
     monkeypatch.setattr(sys, "argv", ["railctl", "power", "on", "--address", "20000"])
     with pytest.raises(SystemExit) as caught:
         cli_main.main()
-    assert caught.value.code == 2
+    assert caught.value.code == USAGE_EXIT_CODE
     captured = capsys.readouterr()
     assert captured.out == ""
     assert json.loads(captured.err)["code"] == "usage"
@@ -999,21 +1007,21 @@ def test_address_out_of_range_writes_json_error_and_empty_stdout(monkeypatch, ca
     # command has started, so a script does not need two parsers for the same failure.
     assert captured.err.count("\n") == 1
     payload = json.loads(captured.err)
-    assert payload["exit_code"] == 2
+    assert payload["exit_code"] == USAGE_EXIT_CODE
     # The envelope must agree with the process status. Built with `report_for` instead of
     # `usage_report`, a plain ValueError publishes 1/"internal" here while the process still
     # exits 2 - a script reading the JSON would be told this tool has a bug.
     assert payload["code"] == "usage"
 
 
-def test_bad_config_file_exits_2_naming_file_line_and_key(monkeypatch, capsys, tmp_path):
+def test_bad_config_file_is_a_usage_error_naming_file_line_and_key(monkeypatch, capsys, tmp_path):
     bad = tmp_path / "railctl" / "config.toml"
     bad.parent.mkdir(parents=True, exist_ok=True)
     bad.write_text("bogus = 1\n", encoding="utf-8")
     monkeypatch.setattr(sys, "argv", ["railctl", "status"])
     with pytest.raises(SystemExit) as caught:
         cli_main.main()
-    assert caught.value.code == 2
+    assert caught.value.code == USAGE_EXIT_CODE
     message = json.loads(capsys.readouterr().err)["message"]
     assert str(bad) in message
     assert "bogus" in message
@@ -1038,21 +1046,22 @@ def test_an_unreadable_config_file_is_one_internal_envelope_not_a_traceback(
             cli_main.main()
     finally:
         config.chmod(0o600)
-    assert caught.value.code == 1
+    assert caught.value.code == INTERNAL_EXIT_CODE
     captured = capsys.readouterr()
     assert captured.out == ""
     assert captured.err.count("\n") == 1
     payload = json.loads(captured.err)
     assert payload["schema"] == "railctl/error/v1"
     assert payload["code"] == "internal"
-    assert payload["exit_code"] == 1
+    assert payload["exit_code"] == INTERNAL_EXIT_CODE
 
 
 def test_a_railctl_error_out_of_the_callback_keeps_its_own_exit_code(monkeypatch, capsys):
     # `load_config` raises only ValueError today, but the callback is where Task 12's
     # capabilities loading lands, and `Capabilities.load` raises RailctlError. The point
-    # pinned here is that such a failure exits with the code its class is mapped to (3 for
-    # TransportError), not the flat 2 a usage error gets.
+    # pinned here is that such a failure exits with the code its class is mapped to - the
+    # domain-failure code - and reports `transport`, not the flat 2 and `usage` a bad
+    # command line gets. Since 0.3.0 the `code` is the half that names the failure.
     def explode(_path):
         raise TransportError("no station on this target")
 
@@ -1060,12 +1069,13 @@ def test_a_railctl_error_out_of_the_callback_keeps_its_own_exit_code(monkeypatch
     monkeypatch.setattr(sys, "argv", ["railctl", "status"])
     with pytest.raises(SystemExit) as caught:
         cli_main.main()
-    assert caught.value.code == 3
+    assert caught.value.code == exit_code_for(TransportError("x"))
     captured = capsys.readouterr()
     assert captured.out == ""
     payload = json.loads(captured.err)
     assert payload["code"] == "transport"
-    assert payload["exit_code"] == 3
+    assert payload["exit_code"] == caught.value.code
+    assert payload["exit_code"] != USAGE_EXIT_CODE
 
 
 # -- main.py: every global option, end to end through the real callback -------
@@ -1136,7 +1146,7 @@ def test_double_verbose_puts_a_traceback_on_stderr_for_an_unexpected_exception(m
     # and the only way to reach the traceback switch was a variable no help text mentions.
     _explode_on_open(monkeypatch)
     result = CliRunner().invoke(cli_main.app, ["-vv", "--json", "version"])
-    assert result.exit_code == 1
+    assert result.exit_code == INTERNAL_EXIT_CODE
     assert "Traceback" in result.stderr
     # The traceback is extra diagnostics on stderr, never a replacement for the envelope.
     assert json.loads(result.stderr.splitlines()[-1])["code"] == "internal"
@@ -1145,7 +1155,7 @@ def test_double_verbose_puts_a_traceback_on_stderr_for_an_unexpected_exception(m
 def test_without_verbose_the_same_failure_is_one_envelope_and_no_traceback(monkeypatch):
     _explode_on_open(monkeypatch)
     result = CliRunner().invoke(cli_main.app, ["version"])
-    assert result.exit_code == 1
+    assert result.exit_code == INTERNAL_EXIT_CODE
     assert "Traceback" not in result.stderr
     assert result.stdout == ""
 
@@ -1190,7 +1200,7 @@ def test_verbose_reaches_the_traceback_switch_even_when_resolution_itself_fails(
     monkeypatch.setattr(sys, "stderr", err)
     with pytest.raises(SystemExit) as caught:
         cli_main.main()
-    assert caught.value.code == 1
+    assert caught.value.code == INTERNAL_EXIT_CODE
     text = err.getvalue()
     assert ("Traceback" in text) is wants_traceback
     # Whether or not the traceback is asked for, the envelope is still the last line.
@@ -1244,7 +1254,11 @@ def test_a_bare_invocation_writes_the_error_to_stderr_and_leaves_stdout_empty():
     # ran `railctl` by mistake must not have to tell 944 bytes of help text apart from a
     # result. `no_args_is_help=True` puts the help on stdout with exit 2, which is both.
     result = CliRunner().invoke(cli_main.app, [])
-    assert result.exit_code == 2
+    # Click's own 2, not `USAGE_EXIT_CODE`: `CliRunner` invokes the app directly and
+    # never reaches `main()`, so this refusal is answered by Click before any railctl
+    # code runs. The two numbers are equal by design; naming railctl's constant here
+    # would claim this path goes through the railctl contract, and it does not.
+    assert result.exit_code == ClickUsageError.exit_code
     assert result.stdout == ""
     assert result.stderr != ""
 

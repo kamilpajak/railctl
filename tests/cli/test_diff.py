@@ -40,7 +40,24 @@ from railctl.cli.commands.diff import (
     offline_capabilities,
 )
 from railctl.cli.main import app
-from railctl.errors import DecoderNotRespondingError
+from railctl.errors import (
+    AbortedError,
+    AddressSetIncompleteError,
+    BackupFileError,
+    CvOutOfRangeError,
+    CvVerifyError,
+    DecoderNotRespondingError,
+    IndexPageRequiredError,
+    PomReadUnsupportedError,
+    exit_code_for,
+)
+from railctl.exit_codes import (
+    DOMAIN_FAILURE_EXIT_CODE,
+    INTERNAL_EXIT_CODE,
+    PARTIAL_EXIT_CODE,
+    SUCCESS_EXIT_CODE,
+    USAGE_EXIT_CODE,
+)
 from railctl.station import (
     Capabilities,
     CvEncoding,
@@ -291,12 +308,24 @@ def test_the_diff_row_publishes_its_safety_facts():
     assert meta.schema == DIFF_SCHEMA
 
 
-def test_the_diff_row_drops_the_three_codes_nothing_here_can_reach():
-    codes = set(command_meta("diff").exit_codes)
-    # 8 needs a partial ending, 14 needs a write to verify, 16 needs a POM path.
-    assert codes.isdisjoint({8, 14, 16})
-    # And it keeps the ones the shared planner and the page check can produce.
-    assert {0, 2, 9, 15, 17} <= codes
+def test_the_diff_row_drops_the_three_failures_nothing_here_can_reach():
+    meta = command_meta("diff")
+    # A verify needs a write, and the POM refusal needs a POM path; a diff has
+    # neither. The third exclusion is the partial code, which names no class -
+    # a diff has no half-finished ending, only a comparison it did or did not make.
+    assert PARTIAL_EXIT_CODE not in meta.exit_codes
+    assert set(meta.error_codes).isdisjoint({CvVerifyError.code, PomReadUnsupportedError.code})
+    # And it keeps what the shared planner and the page check can produce. Asked
+    # of `error_codes` since 0.3.0: the two exclusions above resolve to exit 9,
+    # the same code these keep, so on the numbers this test could not tell a
+    # dropped failure from a kept one in either direction.
+    assert {
+        CvOutOfRangeError.code,
+        IndexPageRequiredError.code,
+        BackupFileError.code,
+        AddressSetIncompleteError.code,
+        AbortedError.code,
+    } <= set(meta.error_codes)
 
 
 def test_the_second_file_is_an_optional_positional():
@@ -309,7 +338,7 @@ def test_the_exit_code_table_says_zero_does_not_mean_identical():
     convention would read a decoder differing in forty CVs as a clean match."""
     from railctl.cli._meta import _COMMAND_EXIT_MEANINGS
 
-    assert "diff(1)" in _COMMAND_EXIT_MEANINGS["diff"][0]
+    assert "diff(1)" in _COMMAND_EXIT_MEANINGS["diff"][SUCCESS_EXIT_CODE]
 
 
 # -- the offline form: no link, ever --------------------------------------------
@@ -382,7 +411,7 @@ def test_two_files_taken_on_different_pages_are_refused(monkeypatch, tmp_path):
     left = file_a(tmp_path)
     right = file_b(tmp_path, page=(145, 0))
     result = invoke(str(left), str(right))
-    assert result.exit_code == 17, result.stderr
+    assert result.exit_code == exit_code_for(IndexPageRequiredError("x")), result.stderr
     report = envelope(result)
     assert report["code"] == "index_page_required"
     assert report["details"] == {"live": [145, 0], "file": [0, 0], "source": SOURCE_FILE}
@@ -434,7 +463,7 @@ def test_the_live_pass_skips_the_never_restored_cvs(monkeypatch, tmp_path):
 def test_a_decoder_on_another_page_is_refused_rather_than_re_selected(monkeypatch, tmp_path):
     install(monkeypatch, FakeDiffStation(values={31: 145, 32: 0}))
     result = invoke(str(file_a(tmp_path)))
-    assert result.exit_code == 17, result.stderr
+    assert result.exit_code == exit_code_for(IndexPageRequiredError("x")), result.stderr
     report = envelope(result)
     assert report["details"] == {"live": [145, 0], "file": [0, 0], "source": SOURCE_DECODER}
     assert "never writes the selectors" in report["message"]
@@ -448,7 +477,7 @@ def test_silence_on_the_selectors_carries_the_placement_guidance(monkeypatch, tm
         FakeDiffStation(read_errors={31: DecoderNotRespondingError("no answer", cv=31)}),
     )
     result = invoke(str(file_a(tmp_path)))
-    assert result.exit_code == 13, result.stderr
+    assert result.exit_code == exit_code_for(DecoderNotRespondingError("x")), result.stderr
     assert envelope(result)["hint"] == SILENCE_GUIDANCE
 
 
@@ -516,7 +545,7 @@ def test_a_station_failure_after_the_open_still_closes_the_link(monkeypatch, tmp
 
     fake = install(monkeypatch, Exploding())
     result = invoke(str(file_a(tmp_path)))
-    assert result.exit_code == 1
+    assert result.exit_code == INTERNAL_EXIT_CODE
     assert type(fake).closed is True
 
 
@@ -560,7 +589,7 @@ def test_with_address_on_a_partial_address_set_is_refused(monkeypatch, tmp_path)
     install(monkeypatch, FakeDiffStation())
     records = tuple(r for r in default_records() if r.cv != 18)
     result = invoke(str(file_a(tmp_path, cvs=records)), "--with-address")
-    assert result.exit_code == 9, result.stderr
+    assert result.exit_code == exit_code_for(AddressSetIncompleteError("x")), result.stderr
     report = envelope(result)
     assert report["code"] == "address_set_incomplete"
     assert report["details"]["missing"] == [18]
@@ -574,7 +603,7 @@ def test_a_value_the_catalog_refuses_stops_the_comparison(monkeypatch, tmp_path)
         record(1, 200, name="primary_address") if r.cv == 1 else r for r in default_records()
     )
     result = invoke(str(file_a(tmp_path, cvs=records)), "--with-address")
-    assert result.exit_code == 15, result.stderr
+    assert result.exit_code == exit_code_for(CvOutOfRangeError("x")), result.stderr
     report = envelope(result)
     assert report["details"]["out_of_range"] == [{"cv": 1, "value": 200, "min": 1, "max": 127}]
 
@@ -615,7 +644,7 @@ def test_include_sweep_compares_a_cv_the_catalog_does_not_name(monkeypatch, tmp_
 def test_the_two_cv29_flags_together_are_a_usage_error(monkeypatch, tmp_path):
     boom_open(monkeypatch)
     result = invoke(str(file_a(tmp_path)), "--with-address", "--merge-cv29")
-    assert result.exit_code == 2
+    assert result.exit_code == USAGE_EXIT_CODE
     assert result.stdout == ""
     report = envelope(result)
     assert report["code"] == "usage"
@@ -682,7 +711,7 @@ def test_an_unreadable_file_is_the_readers_own_error(monkeypatch, tmp_path):
     bad = tmp_path / "bad.json"
     bad.write_text("{not json", encoding="utf-8")
     result = invoke(str(bad))
-    assert result.exit_code == 9
+    assert result.exit_code == exit_code_for(BackupFileError("x"))
     assert envelope(result)["code"] == "backup_file"
 
 
@@ -691,7 +720,7 @@ def test_an_unreadable_second_file_is_refused_before_any_link(monkeypatch, tmp_p
     bad = tmp_path / "bad.json"
     bad.write_text("{not json", encoding="utf-8")
     result = invoke(str(file_a(tmp_path)), str(bad))
-    assert result.exit_code == 9
+    assert result.exit_code == exit_code_for(BackupFileError("x"))
     assert envelope(result)["code"] == "backup_file"
 
 
@@ -776,10 +805,10 @@ def test_ndjson_streams_the_offline_form_without_a_link(monkeypatch, tmp_path):
 def test_ndjson_ends_with_a_summary_even_when_the_comparison_fails(monkeypatch, tmp_path):
     install(monkeypatch, FakeDiffStation(values={31: 145, 32: 0}))
     result = invoke(str(file_a(tmp_path)), fmt="ndjson")
-    assert result.exit_code == 17
+    assert result.exit_code == exit_code_for(IndexPageRequiredError("x"))
     lines = ndjson_lines(result.stdout)
     assert lines[-1]["type"] == "summary"
-    assert lines[-1]["exit_code"] == 17
+    assert lines[-1]["exit_code"] == exit_code_for(IndexPageRequiredError("x"))
     # All zeros: the run never produced a row.
     assert lines[-1]["differences"] == 0
     assert envelope(result)["code"] == "index_page_required"
@@ -788,7 +817,7 @@ def test_ndjson_ends_with_a_summary_even_when_the_comparison_fails(monkeypatch, 
 def test_ndjson_writes_no_stream_at_all_for_a_refusal_before_the_start_line(monkeypatch, tmp_path):
     boom_open(monkeypatch)
     result = invoke(str(file_a(tmp_path)), "--with-address", "--merge-cv29", fmt="ndjson")
-    assert result.exit_code == 2
+    assert result.exit_code == USAGE_EXIT_CODE
     assert result.stdout == ""
     assert envelope(result)["code"] == "usage"
 
@@ -796,16 +825,16 @@ def test_ndjson_writes_no_stream_at_all_for_a_refusal_before_the_start_line(monk
 def test_ndjson_ends_with_a_summary_on_ctrl_c(monkeypatch, tmp_path):
     install(monkeypatch, FakeDiffStation(interrupt_on_batch=True))
     result = invoke(str(file_a(tmp_path)), fmt="ndjson")
-    assert result.exit_code == 9
+    assert result.exit_code == exit_code_for(AbortedError("x"))
     lines = ndjson_lines(result.stdout)
     assert lines[-1]["type"] == "summary"
-    assert lines[-1]["exit_code"] == 9
+    assert lines[-1]["exit_code"] == exit_code_for(AbortedError("x"))
 
 
 def test_a_buffered_ctrl_c_is_the_shared_aborted_ending(monkeypatch, tmp_path):
     install(monkeypatch, FakeDiffStation(interrupt_on_batch=True))
     result = invoke(str(file_a(tmp_path)))
-    assert result.exit_code == 9
+    assert result.exit_code == exit_code_for(AbortedError("x"))
     assert envelope(result)["code"] == "aborted"
     # The reachability half: a code a command can leave with is a code its
     # row publishes, or a caller lands in their unknown-code arm.
@@ -813,12 +842,20 @@ def test_a_buffered_ctrl_c_is_the_shared_aborted_ending(monkeypatch, tmp_path):
 
 
 def test_the_exit_code_table_names_the_aborted_ending(monkeypatch, tmp_path):
-    """Ctrl-C is a normal way to end an online diff - the live pass costs
-    about 6 s per CV - so `aborted` belongs in the list of error codes exit 9
-    can carry, next to backup_file and address_set_incomplete."""
+    """Ctrl-C is a normal way to end an online diff - the live pass costs about 6 s
+    per CV - and this command's help has to say so where the shared sentence cannot.
+
+    The row moved in 0.3.0. `aborted` used to be one of several codes exit 9 could
+    carry here, listed beside backup_file and address_set_incomplete; it has its own
+    exit code now, so the override moved with it rather than being dropped - the
+    fact worth printing was never the number.
+    """
     from railctl.cli._meta import _COMMAND_EXIT_MEANINGS
 
-    assert "aborted" in _COMMAND_EXIT_MEANINGS["diff"][9]
+    meaning = _COMMAND_EXIT_MEANINGS["diff"][exit_code_for(AbortedError("x"))]
+    assert AbortedError.code in meaning
+    assert "6 s" in meaning
+    assert AbortedError.code not in _COMMAND_EXIT_MEANINGS["diff"][DOMAIN_FAILURE_EXIT_CODE]
 
 
 # -- one planner, two commands --------------------------------------------------

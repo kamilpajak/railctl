@@ -1,4 +1,4 @@
-"""Hypothesis profiles.
+"""Hypothesis profiles, and the exit-code canary.
 
 Selected with the HYPOTHESIS_PROFILE environment variable; the default applies
 when it is unset, so an ordinary `pytest` run needs no ceremony.
@@ -7,6 +7,64 @@ when it is unset, so an ordinary `pytest` run needs no ceremony.
 from __future__ import annotations
 
 import os
+
+# -- the exit-code canary ------------------------------------------------------
+#
+# `RAILCTL_EXIT_CODE_CANARY=1 uv run pytest` must be GREEN. It moves every
+# published exit code by +100 before any test module is imported; a test that
+# still goes red is a test that asserts an exit code as a NUMBER rather than by
+# name, and its file and line are printed for you.
+#
+# This exists because no regex can find those sites. `tests/cli/test_throttle.py`
+# carries a parametrize row `[(0, 0, False), (1, 20, True)]` where `1` is a speed
+# step and `20` is an exit code, in plain decimal, with nothing to tell them
+# apart. Issue #65 collapsed twenty-one exit codes to eight and touched ~273
+# assertions to do it; this is what stands between that work and the next silent
+# literal, so it runs as its own CI step.
+#
+# Placed at the very top on purpose: this module is imported before every test
+# module, so a test's `from railctl.exit_codes import USAGE_EXIT_CODE` binds the
+# shifted value, and `cli/_meta`'s derived tuples are computed later still.
+#
+# `SUCCESS_EXIT_CODE` is deliberately NOT shifted - nothing folds into 0, and
+# `ok`, `SystemExit` and every `CliRunner` result key on it structurally.
+# `cli.main.TYPER_INTERRUPT_EXIT_CODE` is deliberately NOT shifted either: it is
+# typer's number, not railctl's, and leaving it alone is what catches someone
+# "tidying" `main()`'s sentinel into railctl's constant - a change that looks
+# right and is wrong.
+if os.environ.get("RAILCTL_EXIT_CODE_CANARY"):
+    from types import MappingProxyType
+
+    from railctl import errors, exit_codes
+
+    _SHIFT = 100
+    for _name in [n for n in dir(exit_codes) if n.endswith("_EXIT_CODE")]:
+        _value = getattr(exit_codes, _name)
+        if _value:
+            setattr(exit_codes, _name, _value + _SHIFT)
+    errors.EXIT_CODES.update({k: v + _SHIFT for k, v in errors.EXIT_CODES.items()})
+    # The two derived tables are rebuilt, not just the scalars: both were evaluated
+    # when `exit_codes` was imported, a moment before this runs, so shifting the
+    # constants alone would leave `EXIT_MEANINGS` keyed by the old numbers and every
+    # `--help` page would raise KeyError instead of the suite reporting a real result.
+    exit_codes.EXIT_MEANINGS = MappingProxyType(
+        {k + _SHIFT if k else k: v for k, v in exit_codes.EXIT_MEANINGS.items()}
+    )
+    exit_codes.PUBLISHED_EXIT_CODES = frozenset(
+        c + _SHIFT if c else c for c in exit_codes.PUBLISHED_EXIT_CODES
+    )
+
+    def pytest_ignore_collect(collection_path, config):
+        """`tests/unit/test_exit_codes.py` is the one file the canary must not run.
+
+        That file is the contract's second copy and its literals are deliberate - it
+        exists so that an edit to `railctl/exit_codes.py` shows up in a diff as a
+        contract change rather than a refactor. Under the canary every one of those
+        literals is wrong by design, so 33 red tests there would say nothing except
+        that the shift happened, while burying the failures that mean something.
+        """
+        return collection_path.name == "test_exit_codes.py"
+
 
 from hypothesis import HealthCheck, Verbosity, settings
 

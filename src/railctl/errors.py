@@ -11,25 +11,47 @@ The distinction this project exists to preserve is between three answers:
 * `UnsupportedCommandError` - the station said **no** (`61 82`). A real answer.
 * `UnsupportedFeatureError` - **we** decided it is out of scope. Never measured.
 
-They are three classes with three exit codes (5, 6, 7) because collapsing them
-is exactly how milestone M1 recorded four capabilities as absent when the
-instrument, not the hardware, was at fault.
+They are three classes with three `error.code` strings because collapsing them is
+exactly how milestone M1 recorded four capabilities as absent when the
+instrument, not the hardware, was at fault. They had three exit codes too (5, 6
+and 7) until 0.3.0, and they no longer do: `LinkTimeout` is the retryable code
+and the other two share the domain-failure code. That was given up deliberately -
+see `railctl/CLAUDE.md` and issue #65 - because `error.code` already carried the
+distinction and a second copy of it in the process status was what made this tool
+publish twenty-one exit codes.
 
-These exit codes are a versioned public contract. Within a major version no code
-may be renumbered, repurposed, or retired; a new error class claims an unused
-code above 20 instead of reusing one of these. The one code below that range is
-`ConfirmationRequiredError: 2`, and it is not an exception to the rule so much as
-the rule's other half: 2 is the CLI's documented *usage* code, shared with a
-malformed argument, because both tell a script the same thing - fix the
-invocation, do not retry. A domain failure never claims a low code. A future JSON envelope (M5
-and later) can carry a stable machine-readable `error.code` string alongside the
-process exit status, and that is where new domain detail belongs, not in a new
-exit code.
+**`error.code` is the versioned public contract, not the number.** Within a major
+version no `code` string may be renamed, repurposed or retired, and a new error
+class declares its own rather than reusing one. What the process status still
+separates is the one thing a caller can act on without reading anything:
+`RETRYABLE_EXIT_CODE` means the same invocation may succeed later, and every
+other non-zero value means it will not. Which failure it was is read from
+`error.code`, and `railctl schema` lists every value it can take, per command as
+well as in one table.
+
+The eight published statuses and their meanings live in `railctl/exit_codes.py`;
+`EXIT_CODES` below maps classes onto them, and most classes are deliberately not
+in it - inheriting the base code is the normal case now, not an omission.
+
+Numbers do not belong in the class docstrings below. `_meta._class_error_row`
+publishes each one's first paragraph as the `summary` in `railctl schema`, so a
+docstring naming an exit code becomes a row whose prose contradicts its own
+`exit_code` field the moment the map changes. It did: `AbortedError` said "exit
+9" while the row said 130.
 """
 
 from __future__ import annotations
 
 from typing import ClassVar, Final
+
+from railctl.exit_codes import (
+    DOMAIN_FAILURE_EXIT_CODE,
+    INTERNAL_EXIT_CODE,
+    INTERRUPTED_EXIT_CODE,
+    NOT_FOUND_EXIT_CODE,
+    RETRYABLE_EXIT_CODE,
+    USAGE_EXIT_CODE,
+)
 
 
 class RailctlError(Exception):
@@ -313,7 +335,7 @@ class CvOutOfRangeError(ProgrammingError):
 
 
 #: `CvOutOfRangeError.details["reason"]` when the refused number is the VALUE
-#: being written, not the CV. Both refusals share the class and exit code 15 -
+#: being written, not the CV. Both refusals share the class and the code -
 #: the catalog's min/max are enforcing on write - but not the remedy: a CV the
 #: mode cannot reach suggests `railctl doctor` (a re-probe is what could move
 #: the bound), while nothing the doctor measures changes 300 not fitting in
@@ -463,7 +485,7 @@ class ProgrammingLockedError(RailctlError):
 
 
 class AbortedError(RailctlError):
-    """The operator interrupted the run. Cleanup ran; exit 9."""
+    """The operator interrupted the run. Cleanup ran."""
 
     code: ClassVar[str] = "aborted"
 
@@ -493,36 +515,54 @@ class ConfirmationRequiredError(RailctlError):
         self.retry_argv = retry_argv
 
 
+#: Class -> process exit code. Eight values, declared in `railctl/exit_codes.py`;
+#: this table only says which of them each failure lands on.
+#:
+#: Most rows are absent on purpose. `exit_code_for` walks the MRO, so anything
+#: without its own row takes its nearest mapped ancestor's - and after #65 the
+#: nearest ancestor is almost always `RailctlError` itself. Before that collapse
+#: there were eighteen rows and eleven distinct numbers below, one per class,
+#: which made `$?` a second spelling of `error.code`. What a caller can now act
+#: on without reading anything is retryable-or-not; which failure it was is
+#: `error.code`.
 EXIT_CODES: Final[dict[type[RailctlError], int]] = {
-    TransportError: 3,
-    ProtocolError: 4,
-    LinkTimeout: 5,
-    UnsupportedCommandError: 6,
-    UnsupportedFeatureError: 7,
-    RailctlError: 9,
-    DecoderNoAckError: 10,
-    ShortCircuitError: 11,
-    StationBusyError: 12,
-    DecoderNotRespondingError: 13,
-    CvVerifyError: 14,
-    CvOutOfRangeError: 15,
-    PomReadUnsupportedError: 16,
-    IndexPageRequiredError: 17,
-    ServiceEncodingUnknownError: 18,
-    ProgrammingError: 19,
-    TrackPowerError: 20,
-    ConfirmationRequiredError: 2,
+    # The three the caller may usefully retry, and exactly these. Kept identical
+    # to `cli.result.RETRYABLE_CODES` by
+    # `tests/unit/test_exit_codes.py::test_exactly_the_retryable_codes_exit_with_the_retryable_status`,
+    # which compares the two sets in both directions - a class added to one and
+    # not the other is the defect this collapse was made to fix.
+    LinkTimeout: RETRYABLE_EXIT_CODE,
+    StationBusyError: RETRYABLE_EXIT_CODE,
+    PortBusy: RETRYABLE_EXIT_CODE,
+    # A port that was named and is not there. The only "not found" this tool has;
+    # a malformed reply is a domain failure, and confusing the two is what made
+    # the old 4 contradict the convention it shares a number with.
+    PortNotFound: NOT_FOUND_EXIT_CODE,
+    # Refused before anything ran, so the caller can fix the command line.
+    ConfirmationRequiredError: USAGE_EXIT_CODE,
+    # The operator stopped the run. `cli/_errors.run` raises SystemExit for this
+    # rather than typer.Exit - see its comment; typer returns an Exit's code as a
+    # plain int, which would reach `main()`'s 130 sentinel and print a second
+    # envelope.
+    AbortedError: INTERRUPTED_EXIT_CODE,
+    # Everything else. Every class not listed above inherits this through the MRO.
+    RailctlError: DOMAIN_FAILURE_EXIT_CODE,
 }
 
-UNMAPPED_EXIT_CODE: Final[int] = 1
+#: Retired as a separate name in 0.3.0: it was 1 and so is `INTERNAL_EXIT_CODE`.
+#: "No row matched" and "railctl has a bug" are the same fact - a class the map
+#: cannot resolve IS a bug - so they are one name now.
+UNMAPPED_EXIT_CODE: Final[int] = INTERNAL_EXIT_CODE
 
 
 def exit_code_for(exc: BaseException) -> int:
     """Most specific mapped exit code for `exc`, or 1 when nothing matches.
 
-    Walks `type(exc).__mro__`, so a new subclass inherits its parent's code
-    until it is given one of its own. `StationError` has no row and resolves to
-    the base 9 on purpose, exactly as the exit-code table states.
+    Walks `type(exc).__mro__`, so a subclass inherits its parent's code unless it
+    is given one of its own - and after #65 most classes have none, resolving to
+    `DOMAIN_FAILURE_EXIT_CODE` through `RailctlError`. That is the design, not an
+    omission: the number says whether to retry, and `error.code` says what
+    happened.
     """
     for klass in type(exc).__mro__:
         code = EXIT_CODES.get(klass)  # type: ignore[arg-type]

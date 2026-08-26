@@ -22,6 +22,7 @@ from typing import TYPE_CHECKING
 import pytest
 
 from railctl.errors import DecoderNoAckError, StationBusyError
+from railctl.exit_codes import DOMAIN_FAILURE_EXIT_CODE
 from railctl.station import doctor as doctor_module
 from railctl.station.capabilities import Capabilities
 from railctl.station.doctor import (
@@ -1238,7 +1239,7 @@ def test_exit_code_for_report_is_zero_when_ok():
     assert exit_code_for_report(report) == 0
 
 
-def test_exit_code_for_report_is_three_when_d1_failed():
+def test_exit_code_for_report_is_the_domain_failure_when_d1_failed():
     caps = Capabilities.unknown("test")
     checks = (
         Check("D0", CHECK_TITLES["D0"], "ok", ""),
@@ -1247,7 +1248,7 @@ def test_exit_code_for_report_is_three_when_d1_failed():
     )
     report = DoctorReport(checks=checks, capabilities=caps)
     assert report.ok is False
-    assert exit_code_for_report(report) == 3
+    assert exit_code_for_report(report) == DOMAIN_FAILURE_EXIT_CODE
 
 
 def test_station_probe_delegates_to_run_probe(doctor_bench, monkeypatch):
@@ -1464,7 +1465,7 @@ def test_a_failed_hold_switches_the_track_back_off_and_fails_d3(doctor_bench):
     assert report.layout.track_power is False
     assert report.layout.must_leave_held is False
     assert report.ok is False
-    assert exit_code_for_report(report) == 3
+    assert exit_code_for_report(report) == DOMAIN_FAILURE_EXIT_CODE
 
 
 def test_a_failed_hold_that_cannot_be_switched_off_says_the_track_may_be_live(doctor_bench):

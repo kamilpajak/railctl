@@ -50,7 +50,8 @@ from railctl.cli.deps import (
     open_station,
     station_info,
 )
-from railctl.cli.result import PARTIAL_EXIT_CODE, CommandResult, ResultWarning, tri_state
+from railctl.cli.result import CommandResult, ResultWarning, tri_state
+from railctl.exit_codes import PARTIAL_EXIT_CODE
 from railctl.station import (
     Capabilities,
     Check,
@@ -389,7 +390,7 @@ def build_doctor(report: DoctorReport, *, saved_to: Path | None) -> CommandResul
 
     # Always, on every ending. `may_degrade` carries the exit-code precedence that
     # used to be spelled by skipping this call: a doctor whose D0-D2 could not
-    # establish the basics has measured nothing at all, and exit 3 is the bigger
+    # establish the basics has measured nothing at all, and a failed probe is the bigger
     # answer of the two, so the partial must not soften it. The WARNINGS belong in
     # both cases - a failed probe is if anything more likely to have left a live,
     # unheld track, and that was the run publishing no layout warning at all.

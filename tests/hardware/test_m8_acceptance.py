@@ -44,6 +44,7 @@ import pytest
 from typer.testing import CliRunner
 
 from railctl.cli.main import app
+from railctl.errors import CvOutOfRangeError, exit_code_for
 
 pytestmark = pytest.mark.hardware
 
@@ -234,7 +235,7 @@ def test_3_writing_cv3_and_reading_it_back_agrees_then_restores_the_original(ben
     print(f"\nCV3: {original} -> {target} -> {original}, each step verified")
 
 
-def test_4_a_cv_above_the_mode_bound_exits_15_with_the_doctor_suggestion():
+def test_4_a_cv_above_the_mode_bound_is_out_of_range_with_the_doctor_suggestion():
     """Stage 4. The refusal half of the acceptance: CV1025 is above the bound of
     every mode, exits 15 naming the bound, and suggests `railctl doctor`.
 
@@ -243,7 +244,7 @@ def test_4_a_cv_above_the_mode_bound_exits_15_with_the_doctor_suggestion():
     """
     _gate("STAGE 4 of 4 - refusal check, nothing is sent to the station.")
     result = _run("cv", "read", "1025", "--format", "json")
-    assert result.exit_code == 15, result.stderr
+    assert result.exit_code == exit_code_for(CvOutOfRangeError("x")), result.stderr
     envelope = json.loads(result.stderr.strip().splitlines()[-1])
     assert envelope["code"] == "cv_out_of_range"
     assert "1..1024" in envelope["message"]

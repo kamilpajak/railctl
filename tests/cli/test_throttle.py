@@ -25,7 +25,6 @@ from railctl.cli._errors import OutputContext
 from railctl.cli._meta import FUNCTION_STATE_ARG, POWER_STATE_ARG
 from railctl.cli.commands import power, throttle
 from railctl.cli.deps import Settings
-from railctl.cli.result import PARTIAL_EXIT_CODE
 from railctl.errors import (
     FunctionGroupUnreadableError,
     LinkTimeout,
@@ -36,6 +35,13 @@ from railctl.errors import (
     TransportError,
     UnsupportedCommandError,
     XBusChecksumError,
+    exit_code_for,
+)
+from railctl.exit_codes import (
+    DOMAIN_FAILURE_EXIT_CODE,
+    PARTIAL_EXIT_CODE,
+    SUCCESS_EXIT_CODE,
+    USAGE_EXIT_CODE,
 )
 from railctl.xbus.replies import LocoInfo, StationStatus
 from railctl.xbus.speed import Direction
@@ -351,7 +357,7 @@ def test_a_refused_command_hands_back_a_runnable_recovery(
     station = FakeStation(status=status)
     app = _app(station, monkeypatch, fmt="json")
     result = runner.invoke(app, argv)
-    assert result.exit_code == 20
+    assert result.exit_code == exit_code_for(TrackPowerError("x"))
     error = json.loads(result.stderr)
     assert error["suggestions"] == suggestions
     assert error["details"]["condition"] == condition
@@ -411,7 +417,7 @@ def test_a_mistyped_function_state_is_refused_through_our_envelope(monkeypatch):
     station = FakeStation()
     app = _app(station, monkeypatch, fmt="json")
     result = runner.invoke(app, ["function", "f2", "sideways"])
-    assert result.exit_code == 2
+    assert result.exit_code == USAGE_EXIT_CODE
     assert station.calls == []
     error = json.loads(result.stderr)
     assert error["code"] == "usage"
@@ -850,7 +856,7 @@ def test_drive_refuses_a_positive_speed_when_the_direction_was_never_decoded(mon
     station = FakeStation(loco_info=LOCO_14_STEP)
     app = _app(station, monkeypatch, fmt="json")
     result = runner.invoke(app, ["drive", "30"])
-    assert result.exit_code == 2
+    assert result.exit_code == USAGE_EXIT_CODE
     assert "drive" not in station.call_names
     error = json.loads(result.stderr)
     assert error["code"] == "usage"
@@ -866,7 +872,7 @@ def test_drive_refuses_a_positive_speed_when_the_locomotive_cannot_be_read(monke
     station = FakeStation(loco_info=None)
     app = _app(station, monkeypatch, fmt="json")
     result = runner.invoke(app, ["drive", "30"])
-    assert result.exit_code == 2
+    assert result.exit_code == USAGE_EXIT_CODE
     assert "drive" not in station.call_names
     error = json.loads(result.stderr)
     assert error["details"] == {
@@ -903,7 +909,7 @@ def test_the_refusal_names_which_failure_hid_the_direction(monkeypatch, raised, 
     station = FakeStation(loco_info_raises=raised)
     app = _app(station, monkeypatch, fmt="json")
     result = runner.invoke(app, ["drive", "30"])
-    assert result.exit_code == 2
+    assert result.exit_code == USAGE_EXIT_CODE
     assert "drive" not in station.call_names
     details = json.loads(result.stderr)["details"]
     assert details["reason"] == "direction_unread"
@@ -929,7 +935,7 @@ def test_forward_and_reverse_together_are_refused_before_a_station_is_opened(mon
     station = FakeStation()
     app = _app(station, monkeypatch, fmt="json")
     result = runner.invoke(app, ["drive", "30", "--forward", "--reverse"])
-    assert result.exit_code == 2
+    assert result.exit_code == USAGE_EXIT_CODE
     assert station.calls == []
     error = json.loads(result.stderr)
     assert error["details"] == {"reason": "contradictory_direction_flags"}
@@ -978,7 +984,11 @@ def test_drive_positive_speed_refuses_on_emergency_off(monkeypatch):
     station = FakeStation(status=EMERGENCY_OFF_STATUS)
     app = _app(station, monkeypatch)
     result = runner.invoke(app, ["drive", "30"])
-    assert result.exit_code == 20
+    # The condition, not only the refusal: an active service-mode session refuses
+    # here too, and since 0.3.0 both leave the same exit code. Human mode here, so
+    # the message is what carries it.
+    assert "emergency off" in result.stderr
+    assert result.exit_code == exit_code_for(TrackPowerError("x"))
     assert "drive" not in station.call_names
 
 
@@ -986,7 +996,7 @@ def test_drive_positive_speed_refuses_on_emergency_stop(monkeypatch):
     station = FakeStation(status=EMERGENCY_STOP_STATUS)
     app = _app(station, monkeypatch)
     result = runner.invoke(app, ["drive", "30"])
-    assert result.exit_code == 20
+    assert result.exit_code == exit_code_for(TrackPowerError("x"))
     assert "drive" not in station.call_names
 
 
@@ -994,7 +1004,7 @@ def test_drive_positive_speed_refuses_on_service_mode(monkeypatch):
     station = FakeStation(status=SERVICE_MODE_STATUS)
     app = _app(station, monkeypatch)
     result = runner.invoke(app, ["drive", "30"])
-    assert result.exit_code == 12
+    assert result.exit_code == exit_code_for(StationBusyError("x"))
     assert "drive" not in station.call_names
 
 
@@ -1064,7 +1074,10 @@ def test_drive_reads_the_status_before_the_locomotive(monkeypatch):
 
 @pytest.mark.parametrize(
     ("speed", "expected_exit", "reads_status"),
-    [(0, 0, False), (1, 20, True)],
+    [
+        (0, SUCCESS_EXIT_CODE, False),
+        (1, exit_code_for(TrackPowerError("x")), True),
+    ],
     ids=["speed-0-sent", "speed-1-refused"],
 )
 def test_speed_zero_and_speed_one_are_the_pair_that_pins_the_guard(
@@ -1111,7 +1124,7 @@ def test_drive_without_an_address_is_a_usage_error_naming_the_fix(monkeypatch):
     station = FakeStation()
     app = _app(station, monkeypatch, address=None, fmt="json")
     result = runner.invoke(app, ["drive", "30"])
-    assert result.exit_code == 2
+    assert result.exit_code == USAGE_EXIT_CODE
     assert "drive" not in station.call_names
     error = json.loads(result.stderr)
     assert error["suggestions"] == [["railctl", "drive", "30", "--address", "3"]]
@@ -1204,7 +1217,7 @@ def test_function_refuses_on_service_mode(monkeypatch):
     station = FakeStation(status=SERVICE_MODE_STATUS)
     app = _app(station, monkeypatch)
     result = runner.invoke(app, ["function", "f2", "on"])
-    assert result.exit_code == 12
+    assert result.exit_code == exit_code_for(StationBusyError("x"))
     assert not any(name in ("function_set", "function_toggle") for name in station.call_names)
 
 
@@ -1212,7 +1225,8 @@ def test_function_refuses_on_emergency_off(monkeypatch):
     station = FakeStation(status=EMERGENCY_OFF_STATUS)
     app = _app(station, monkeypatch)
     result = runner.invoke(app, ["function", "f2", "on"])
-    assert result.exit_code == 20
+    assert "emergency off" in result.stderr
+    assert result.exit_code == exit_code_for(TrackPowerError("x"))
     assert not any(name in ("function_set", "function_toggle") for name in station.call_names)
 
 
@@ -1220,7 +1234,7 @@ def test_function_rejects_a_token_that_is_not_a_function(monkeypatch):
     station = FakeStation()
     app = _app(station, monkeypatch)
     result = runner.invoke(app, ["function", "sideways", "on"])
-    assert result.exit_code == 2
+    assert result.exit_code == USAGE_EXIT_CODE
     assert station.calls == []  # refused before a station was ever opened
 
 
@@ -1228,7 +1242,7 @@ def test_function_suggests_force_group_when_state_cannot_be_read(monkeypatch):
     station = FakeStation(function_raises=True)
     app = _app(station, monkeypatch, fmt="json")
     result = runner.invoke(app, ["function", "f2", "on"])
-    assert result.exit_code == 9
+    assert result.exit_code == DOMAIN_FAILURE_EXIT_CODE
     error = json.loads(result.stderr)
     assert error["code"] == "function_group_unreadable"
     assert error["suggestions"][0] == [
@@ -1257,7 +1271,7 @@ def test_a_failure_after_the_group_telegram_is_not_reported_as_a_failed_read(mon
     )
     app = _app(station, monkeypatch, fmt="json")
     result = runner.invoke(app, ["function", "f2", state])
-    assert result.exit_code == 9
+    assert result.exit_code == DOMAIN_FAILURE_EXIT_CODE
     error = json.loads(result.stderr)
     assert error["code"] == "station"
     assert "could not read" not in error["message"]
@@ -1284,7 +1298,7 @@ def test_function_toggle_that_cannot_read_the_group_suggests_the_same_retry(monk
     station = FakeStation(function_raises=True)
     app = _app(station, monkeypatch, fmt="json")
     result = runner.invoke(app, ["function", "f2", "toggle"])
-    assert result.exit_code == 9
+    assert result.exit_code == DOMAIN_FAILURE_EXIT_CODE
     error = json.loads(result.stderr)
     assert error["suggestions"][0][-1] == "--force-group"
     assert "toggle" in error["suggestions"][0]
@@ -1545,7 +1559,7 @@ def test_power_resume_reports_a_partial_run_when_the_release_landed_and_the_read
     station = _DiesAfterRelease(status=EMERGENCY_STOP_STATUS)
     app = _app(station, monkeypatch, address=3, fmt="json")
     result = runner.invoke(app, ["power", "resume"])
-    assert result.exit_code == 8, result.stderr
+    assert result.exit_code == PARTIAL_EXIT_CODE, result.stderr
     payload = json.loads(result.stdout)
     assert payload["result"]["state"] == "resume"
     assert payload["result"]["completed"] == ["read_status_before", "power_on"]
@@ -1602,11 +1616,11 @@ def test_power_on_reports_a_partial_run_rather_than_a_plain_failure(
     station = _FailsAfterPowerOn(status=HELD_STATUS)
     app = _app(station, monkeypatch, address=3, fmt="json")
     result = runner.invoke(app, ["power", "on"])
-    assert result.exit_code == 8, result.stderr
+    assert result.exit_code == PARTIAL_EXIT_CODE, result.stderr
     assert "power_on" in station.call_names
     payload = json.loads(result.stdout)
     assert payload["ok"] is False
-    assert payload["exit_code"] == 8
+    assert payload["exit_code"] == PARTIAL_EXIT_CODE
     assert payload["result"]["completed"] == completed
     assert payload["result"]["failed_step"] == failed_step
     # Never `false`: the status read is one of the steps that may have failed,
@@ -1632,7 +1646,7 @@ def test_a_failure_before_any_telegram_is_a_plain_error_not_a_partial(monkeypatc
     station = _FailsAtTheFirstRead(status=AUTO_START_STATUS)
     app = _app(station, monkeypatch, address=3, fmt="json")
     result = runner.invoke(app, ["power", "on"])
-    assert result.exit_code == 5
+    assert result.exit_code == exit_code_for(LinkTimeout("x"))
     assert result.stdout == ""
     assert json.loads(result.stderr)["code"] == "link_timeout"
     assert "power_on" not in station.call_names
@@ -1661,7 +1675,7 @@ def test_a_power_on_that_dies_in_the_energise_says_the_track_may_be_live(monkeyp
     station = _DiesInTheEnergise(status=EMERGENCY_OFF_STATUS)
     app = _app(station, monkeypatch, address=3, fmt="json")
     result = runner.invoke(app, ["power", "on"])
-    assert result.exit_code == 8, result.stderr
+    assert result.exit_code == PARTIAL_EXIT_CODE, result.stderr
     payload = json.loads(result.stdout)
     assert payload["ok"] is False
     assert payload["result"]["completed"] == ["read_status_before"]
@@ -1678,7 +1692,7 @@ def test_a_power_on_that_dies_in_the_energise_says_the_track_may_be_live(monkeyp
     human = runner.invoke(
         _app(_DiesInTheEnergise(status=EMERGENCY_OFF_STATUS), monkeypatch), ["power", "on"]
     )
-    assert human.exit_code == 8
+    assert human.exit_code == PARTIAL_EXIT_CODE
     assert "the track may be live" in human.stdout
     assert "NOTHING is holding it" in human.stdout
 
@@ -1700,7 +1714,7 @@ def test_a_resume_that_dies_in_the_release_still_says_stored_speeds_were_release
     station = _DiesInTheRelease(status=EMERGENCY_STOP_STATUS)
     app = _app(station, monkeypatch, address=3, fmt="json")
     result = runner.invoke(app, ["power", "resume"])
-    assert result.exit_code == 8, result.stderr
+    assert result.exit_code == PARTIAL_EXIT_CODE, result.stderr
     payload = json.loads(result.stdout)
     assert payload["result"]["failed_step"] == "power_on"
     names = [w["name"] for w in payload["warnings"]]
@@ -1785,7 +1799,7 @@ def test_power_rejects_a_state_that_is_none_of_the_three(monkeypatch):
     station = FakeStation()
     app = _app(station, monkeypatch, fmt="json")
     result = runner.invoke(app, ["power", "sideways"])
-    assert result.exit_code == 2
+    assert result.exit_code == USAGE_EXIT_CODE
     assert station.calls == []
     error = json.loads(result.stderr)
     assert error["code"] == "usage"
@@ -1844,7 +1858,7 @@ def test_the_partial_pins_the_four_fields_a_caller_reads_before_approaching_the_
     station = _DiesBeforeTheHold(status=AUTO_START_STATUS)
     app = _app(station, monkeypatch, address=3, fmt="json")
     result = runner.invoke(app, ["power", "on"])
-    assert result.exit_code == 8, result.stderr
+    assert result.exit_code == PARTIAL_EXIT_CODE, result.stderr
     body = json.loads(result.stdout)["result"]
     assert body["track_power"] is None
     assert body["emergency_stop"] is None
@@ -1882,7 +1896,7 @@ def test_the_worst_partial_says_the_track_is_live_and_unheld_in_both_renderings(
         _app(_DiesBeforeTheHold(status=AUTO_START_STATUS), monkeypatch, address=3),
         ["power", "on"],
     )
-    assert human.exit_code == 8
+    assert human.exit_code == PARTIAL_EXIT_CODE
     assert "the track was switched on" in human.stdout
     assert "NOTHING is holding it" in human.stdout
 
@@ -1906,7 +1920,7 @@ def test_a_partial_with_no_address_does_not_name_the_step_it_never_ran(monkeypat
     station = _DiesOnTheConfirmingRead(status=AUTO_START_STATUS)
     app = _app(station, monkeypatch, address=None, fmt="json")
     result = runner.invoke(app, ["power", "on"])
-    assert result.exit_code == 8, result.stderr
+    assert result.exit_code == PARTIAL_EXIT_CODE, result.stderr
     body = json.loads(result.stdout)["result"]
     assert "loco_info" not in station.call_names
     assert body["completed"] == ["read_status_before", "power_on", "stop_all"]
@@ -1939,7 +1953,7 @@ def test_power_on_leaves_the_layout_held_so_a_drive_straight_after_is_refused(mo
     assert json.loads(powered.stdout)["result"]["emergency_stop"] is True
 
     refused = runner.invoke(app, ["drive", "30"])
-    assert refused.exit_code == 20
+    assert refused.exit_code == exit_code_for(TrackPowerError("x"))
     error = json.loads(refused.stderr)
     assert error["code"] == "track_power"
     assert error["details"]["condition"] == "emergency_stop"
@@ -1966,7 +1980,7 @@ def test_power_resume_refuses_on_a_dead_track_and_sends_nothing(monkeypatch):
         station = FakeStation(status=status)
         app = _app(station, monkeypatch, address=3, fmt="json")
         result = runner.invoke(app, ["power", "resume"])
-        assert result.exit_code == 20, (status.raw, result.stderr)
+        assert result.exit_code == exit_code_for(TrackPowerError("x")), (status.raw, result.stderr)
         assert result.stdout == ""
         # The opening status read, then close. No power_on, no emergency_stop,
         # no drive: nothing was sent.
@@ -2023,7 +2037,7 @@ def test_stop_refuses_an_address_outside_the_published_bound_before_opening_a_st
     station = FakeStation()
     app = _app(station, monkeypatch, fmt="json")
     result = runner.invoke(app, ["stop", "--address", "20000"])
-    assert result.exit_code == 2
+    assert result.exit_code == USAGE_EXIT_CODE
     assert station.calls == []
     assert json.loads(result.stderr)["code"] == "usage"
 
@@ -2089,7 +2103,7 @@ def test_function_group_unreadable_carries_its_retry_argv_and_the_station_exit_c
     assert exc.retry_argv == ["railctl", "function", "f2", "on"]
     # No row of its own in EXIT_CODES: it resolves to RailctlError's base 9,
     # which is what the spec's "exit 9 with a --force-group suggestion" says.
-    assert exit_code_for(exc) == 9
+    assert exit_code_for(exc) == DOMAIN_FAILURE_EXIT_CODE
 
 
 # -- a finished answer survives a failure to close ----------------------------
@@ -2126,7 +2140,7 @@ def test_a_close_failure_never_masks_the_error_the_command_already_raised(monkey
     )
     app = _app(station, monkeypatch, address=3, fmt="json")
     result = runner.invoke(app, ["drive", "30"])
-    assert result.exit_code == 20
+    assert result.exit_code == exit_code_for(TrackPowerError("x"))
     assert json.loads(result.stderr)["code"] == "track_power"
 
 

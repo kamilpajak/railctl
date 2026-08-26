@@ -27,7 +27,7 @@ Two exception families live here, split by whose mistake it is:
 
 * a bad 1-based USER CV number (CV0, CV1025, CV256 on the direct opcodes) raises
   `CvOutOfRangeError`. That value came from the command line, so it needs the
-  stable `code` in the `railctl/error/v1` envelope and exit code 15;
+  stable `code` in the `railctl/error/v1` envelope (`cv_out_of_range`);
 * a bad WIRE value (a non-byte echo, an unknown reply ident, a page index
   outside 0..3) raises plain `ValueError`. Only code inside this repo can pass
   one, and M2's rule is that internal argument validation is a `ValueError`,
@@ -93,7 +93,7 @@ def _check_range(cv: int, maximum: int, what: str) -> None:
 
     CvOutOfRangeError rather than ValueError: this value comes from the command
     line, and only a RailctlError reaches `exit_code_for`, which maps this class
-    to exit code 15. A bare ValueError would exit 1 with a traceback instead of
+    to `cv_out_of_range`. A bare ValueError would exit 1 with a traceback instead of
     the documented `railctl/error/v1` envelope, and code 15 - reserved in M2 -
     would never be produced by anything.
     """

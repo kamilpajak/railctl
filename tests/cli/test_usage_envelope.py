@@ -26,7 +26,13 @@ from railctl.cli._click_errors import ClickException, ClickUsageError
 from railctl.cli._errors import OutputContext, aborted_report, run
 from railctl.cli._meta import error_codes, manifest
 from railctl.cli._parse_context import ParseContextTyper
-from railctl.cli.result import ERROR_SCHEMA, INTERNAL_CODE, USAGE_CODE, USAGE_EXIT_CODE
+from railctl.cli.result import ERROR_SCHEMA, INTERNAL_CODE, USAGE_CODE
+from railctl.exit_codes import (
+    DOMAIN_FAILURE_EXIT_CODE,
+    INTERNAL_EXIT_CODE,
+    INTERRUPTED_EXIT_CODE,
+    USAGE_EXIT_CODE,
+)
 
 
 def _exit_code(monkeypatch, argv: list[str]) -> int:
@@ -78,7 +84,7 @@ PARSE_FAILURES = [
 
 
 @pytest.mark.parametrize("argv", PARSE_FAILURES)
-def test_a_parse_failure_exits_2_with_one_usage_envelope_on_stderr(monkeypatch, capsys, argv):
+def test_a_parse_failure_answers_with_one_usage_envelope_on_stderr(monkeypatch, capsys, argv):
     assert _exit_code(monkeypatch, argv) == USAGE_EXIT_CODE
     payload = _envelope(capsys)
     assert payload["schema"] == ERROR_SCHEMA
@@ -292,7 +298,7 @@ def test_details_name_the_root_when_a_root_option_is_missing_its_value(monkeypat
 # -- the exit code main() now owns -------------------------------------------
 
 
-def test_a_command_that_exits_9_still_exits_9_through_main(monkeypatch):
+def test_a_commands_own_exit_code_still_reaches_the_process_through_main(monkeypatch):
     """The regression guard for `standalone_mode=False`.
 
     Every command signals its exit code by raising `typer.Exit` from `run()`. In
@@ -302,10 +308,10 @@ def test_a_command_that_exits_9_still_exits_9_through_main(monkeypatch):
     """
 
     def boom() -> None:
-        raise typer.Exit(code=9)
+        raise typer.Exit(code=DOMAIN_FAILURE_EXIT_CODE)
 
     _throwaway_app(monkeypatch, boom)
-    assert _exit_code(monkeypatch, []) == 9
+    assert _exit_code(monkeypatch, []) == DOMAIN_FAILURE_EXIT_CODE
 
 
 def test_a_command_that_exits_0_exits_0_through_main(monkeypatch):
@@ -359,7 +365,11 @@ def _keyboard_interrupt_envelope() -> dict:
     def interrupted():
         raise KeyboardInterrupt
 
-    with pytest.raises(typer.Exit):
+    # `SystemExit`, not `typer.Exit`, and the difference is the whole point of
+    # `run()`'s abort branch since 0.3.0: `typer.Exit(130)` would be RETURNED to
+    # `main()` as a plain int and mistaken for typer's parse-time interrupt, so
+    # this event would be reported twice.
+    with pytest.raises(SystemExit):
         run("railctl", ctx, interrupted)
     return json.loads(stderr.getvalue())
 
@@ -413,10 +423,10 @@ def test_a_click_exception_that_is_not_a_usage_error_is_an_internal_envelope(mon
         raise ClickException("the vendored parser gave up")
 
     _throwaway_app(monkeypatch, broken)
-    assert _exit_code(monkeypatch, []) == 1
+    assert _exit_code(monkeypatch, []) == INTERNAL_EXIT_CODE
     payload = _envelope(capsys)
     assert payload["code"] == INTERNAL_CODE
-    assert payload["exit_code"] == 1
+    assert payload["exit_code"] == INTERNAL_EXIT_CODE
 
 
 # -- the guard on the typer assumption ---------------------------------------
@@ -430,7 +440,12 @@ def test_the_click_names_still_resolve_to_the_vendored_hierarchy():
     assert ClickException.__name__ == "ClickException"
     assert issubclass(typer.BadParameter, ClickUsageError)
     assert issubclass(ClickUsageError, ClickException)
-    assert ClickUsageError.exit_code == USAGE_EXIT_CODE
+    # Click's own number, not railctl's constant. The two are equal on purpose -
+    # `railctl.exit_codes.USAGE_EXIT_CODE` was chosen to match what Click already exits
+    # with - but they are two separate facts, and `tests/unit/test_exit_codes.py` is
+    # where the coincidence is asserted. Written as Click's here so this test keeps
+    # measuring Click.
+    assert ClickUsageError.exit_code == 2  # exit-code-literal: Click's number, not railctl's
 
 
 def test_typer_exit_and_abort_are_the_classes_the_vendored_click_raises():
@@ -501,7 +516,7 @@ def _interrupting_app(monkeypatch) -> list[str]:
     return reached
 
 
-def test_an_interrupt_while_parsing_publishes_the_aborted_envelope_and_exits_9(monkeypatch, capsys):
+def test_an_interrupt_while_parsing_publishes_the_aborted_envelope(monkeypatch, capsys):
     """The route that used to publish nothing at all.
 
     `typer.core._main` turns a `KeyboardInterrupt` into `Exit(130)` and, in
@@ -556,21 +571,27 @@ def test_a_command_that_exits_with_a_published_code_still_does(monkeypatch, publ
     assert _exit_code(monkeypatch, []) == published
 
 
-def test_no_published_exit_code_collides_with_the_interrupt_sentinel():
-    """The assumption that makes `outcome == 130` unambiguous, pinned.
+def test_only_the_interrupt_itself_carries_the_sentinel_value():
+    """What makes `outcome == 130` unambiguous, restated for 0.3.0.
 
-    `main()` reads a returned 130 as "typer converted a KeyboardInterrupt", which is only
-    safe while no railctl command can return that value itself. If a future command ever
-    publishes 130, this test fails and tells whoever added it that the sentinel is now
-    ambiguous - instead of a Ctrl-C envelope quietly appearing on that command's ordinary
-    run.
+    It used to be the value: no railctl exit code was 130, so a returned 130 could only
+    be typer's. `aborted` became 130 in 0.3.0 and that argument died - every command now
+    publishes it. Two things replace it, and this test holds the first: 130 belongs to
+    the interrupt ALONE, so even a returned one could not describe a different failure.
+    The second is the route, and it is pinned next to the code that depends on it
+    (`tests/cli/test_errors.py::test_an_interrupt_inside_a_command_body_leaves_by_system_exit`):
+    the abort path raises `SystemExit`, which typer never converts into a return value,
+    so the only 130 that can reach the sentinel is the one typer itself produced.
+
+    Written against `INTERRUPTED_EXIT_CODE`, never `cli_main.TYPER_INTERRUPT_EXIT_CODE`,
+    even though both are 130. They are two different facts that coincide, and the
+    coincidence is asserted once, in `tests/unit/test_exit_codes.py`. Using typer's name
+    here would make this test read as though railctl's contract followed typer's number.
     """
-    sentinel = cli_main.TYPER_INTERRUPT_EXIT_CODE
-
-    assert [
-        command["path"] for command in _manifest_commands() if sentinel in command["exit_codes"]
-    ] == []
-    assert [row["code"] for row in error_codes() if row["exit_code"] == sentinel] == []
+    assert [row["code"] for row in error_codes() if row["exit_code"] == INTERRUPTED_EXIT_CODE] == [
+        "aborted"
+    ]
+    assert _keyboard_interrupt_envelope()["exit_code"] == INTERRUPTED_EXIT_CODE
 
 
 # -- what the three routes must share ----------------------------------------

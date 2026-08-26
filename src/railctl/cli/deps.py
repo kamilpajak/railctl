@@ -536,7 +536,7 @@ def close_quietly(station: Station) -> None:
     """Close while an exception is already on its way out.
 
     The original failure is the answer the caller needs; a close error raised
-    on top of it would replace a `TrackPowerError` (exit 20, with a runnable
+    on top of it would replace a `TrackPowerError` (code `track_power`, with a runnable
     suggestion) by an `OSError` reported as an internal bug (exit 1). Nothing
     is swallowed that a caller could act on - the command has already failed,
     and its own exception says why.

@@ -52,6 +52,25 @@ jobs:
           HYPOTHESIS_PROFILE: ci
         run: uv run pytest
 
+      - name: Exit-code canary
+        # A second full run with every published exit code shifted by +100. It must
+        # be GREEN: a test that goes red is one that asserts an exit code as a
+        # NUMBER rather than by name, and its file and line are printed.
+        #
+        # It is here rather than left to a developer's habit because no regex can
+        # do this job. A parametrize row like `[(0, 0, False), (1, 20, True)]` gives
+        # nothing away about which number is a speed step and which is an exit code.
+        # `tests/test_exit_code_literals.py` is the cheap half and runs in the step
+        # above; this is the half that finds what the patterns cannot. The suite
+        # takes about eleven seconds, so the whole cost is one more of those.
+        #
+        # HYPOTHESIS_PROFILE for the reason the Tests step gives: an unnamed job
+        # runs the `default` profile with a value it never declared.
+        env:
+          HYPOTHESIS_PROFILE: ci
+          RAILCTL_EXIT_CODE_CANARY: "1"
+        run: uv run pytest
+
       - name: Coverage
         # Configured in pyproject.toml since M2 (fail_under = 90, branch = true,
         # serial_posix.py omitted) but only switched on here: at the end of M2 the

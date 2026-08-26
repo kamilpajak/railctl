@@ -45,13 +45,19 @@ from railctl.cli.deps import (
 from railctl.cli.result import (
     ERROR_SCHEMA,
     INTERNAL_CODE,
-    INTERNAL_EXIT_CODE,
-    PARTIAL_EXIT_CODE,
     RESERVED_CODES,
     RETRYABLE_CODES,
     USAGE_CODE,
-    USAGE_EXIT_CODE,
     error_code,
+)
+from railctl.exit_codes import (
+    DOMAIN_FAILURE_EXIT_CODE,
+    EXIT_MEANINGS,
+    INTERNAL_EXIT_CODE,
+    PARTIAL_EXIT_CODE,
+    RETRYABLE_EXIT_CODE,
+    SUCCESS_EXIT_CODE,
+    USAGE_EXIT_CODE,
 )
 from railctl.xbus.speed import MAX_SPEED_STEP
 
@@ -116,6 +122,11 @@ class CommandMeta:
     schema: str
     mutates: bool
     exit_codes: tuple[int, ...]
+    #: Every `error.code` this command's envelope can carry. Since 0.3.0 this is
+    #: the field that says WHICH failures a command has - `exit_codes` says only
+    #: what the process status can be, and thirty-odd failures share one of those.
+    #: A caller deciding whether a command can hit a condition reads this.
+    error_codes: tuple[str, ...]
     arguments: tuple[Argument, ...] = ()
     options: tuple[Option, ...] = ()
     confirms: bool = False
@@ -197,70 +208,203 @@ GLOBAL_OPTIONS: Final[tuple[Option, ...]] = (
 
 _GLOBAL_BY_NAME: Final[dict[str, Option]] = {o.name: o for o in GLOBAL_OPTIONS}
 
+
 #: What an operator interrupt leaves the process with, in every command and on all three
 #: routes (`_errors.run()`, `main()`'s `typer.Abort` branch, and `main()`'s parse-time
 #: branch): they all publish `AbortedError`, which takes `RailctlError`'s own code because
 #: it has no row of its own. Read through `exit_code_for` rather than written as the number,
 #: so the set a command PUBLISHES is taken from the same table the envelope's `exit_code`
 #: field is.
-ABORTED_EXIT_CODE: Final[int] = errors.exit_code_for(errors.AbortedError(""))
+def _for(klass: type[errors.RailctlError]) -> int:
+    """The exit code a class resolves to, asked of the map rather than typed out.
+
+    Every published tuple below is written in these terms. Before #65 they were
+    literals, which made them a second copy of `errors.EXIT_CODES` that a remap had to
+    remember to update - and the `--help` page would have gone on advertising codes the
+    map no longer produced, silently, because nothing compares the two. Written this way
+    the tuples cannot drift: they say WHICH FAILURES a command can reach, and the numbers
+    follow from that.
+
+    `__new__` rather than a constructor: several classes take required keyword arguments
+    (`cv=`, `condition=`), and nothing here needs an initialised instance.
+    """
+    return errors.exit_code_for(klass.__new__(klass))
+
+
+ABORTED_EXIT_CODE: Final[int] = _for(errors.AbortedError)
+
+#: One family of failures, named by class. Both published tuples a command
+#: carries are derived from one of these, which is what stops `exit_codes` and
+#: `error_codes` from describing two different commands: they are two
+#: renderings of a single list.
+#:
+#: Classes rather than numbers for a second reason, which #65 turned from a
+#: preference into a requirement. `RESTORE_ERRORS` and `DIFF_ERRORS` are their
+#: parent family minus a failure that cannot happen there, and while every
+#: class owned a number of its own that subtraction could be done on the
+#: numbers. After the collapse `set(CV_WRITE_EXIT_CODES) - {_for(
+#: PomReadUnsupportedError)}` deletes 9 - the code some thirty failures share -
+#: and `restore` would publish a set with no domain failure in it at all, on a
+#: command whose ordinary ending is one. Subtracting a class removes exactly
+#: the failure meant.
+ErrorFamily = tuple[type[errors.RailctlError], ...]
+
+#: What every command can raise whatever else it does: the operator interrupt.
+#: It sits here rather than in each family so that a new family cannot forget
+#: it - it was missing once, while it was reachable, and `railctl schema`
+#: documented three codes for a command that could leave the process with a
+#: fourth.
+BASE_ERRORS: Final[ErrorFamily] = (errors.AbortedError,)
+
+
+def _exit_codes(family: ErrorFamily, *, extra: Sequence[int] = ()) -> tuple[int, ...]:
+    """The process statuses a command carrying `family` can exit with.
+
+    Success, the internal-error safety net and a refused invocation come with
+    every command and name no class, so they are added here; everything else is
+    asked of `errors.EXIT_CODES` through `_for`.
+
+    Sorted, because `help_epilog` and the manifest publish this tuple in the
+    order it is written, and appending the partial code after the base set's
+    listed the codes as `0 1 2 7 9 130 8` on the `--help` page.
+
+    `extra` carries the codes that name no exception - the partial code is the
+    only one today. A command publishes it when some of its steps can complete
+    before a later one fails, which is a result and not an error envelope.
+    """
+    return tuple(
+        sorted(
+            {
+                SUCCESS_EXIT_CODE,
+                INTERNAL_EXIT_CODE,
+                USAGE_EXIT_CODE,
+                *(_for(klass) for klass in (*BASE_ERRORS, *family)),
+                *extra,
+            }
+        )
+    )
+
+
+def _error_codes(family: ErrorFamily) -> tuple[str, ...]:
+    """The `error.code` values a command carrying `family` can put in an envelope.
+
+    Since 0.3.0 this is the tuple that carries the capability claim the exit
+    codes used to: `{2, 9, 14, 15, 17} <= set(meta.exit_codes)` said "restore
+    can fail these five ways" only while five numbers meant five things. The
+    numbers collapsed and the claim moved here intact.
+
+    `_exit_codes`'s `extra` has no counterpart, deliberately. The codes it
+    carries belong to results rather than to error envelopes, so there is no
+    `error.code` to publish alongside them.
+    """
+    return tuple(
+        sorted({USAGE_CODE, INTERNAL_CODE, *(klass.code for klass in (*BASE_ERRORS, *family))})
+    )
+
 
 # The codes a command publishes whatever else it does: success, the internal-error safety
 # net, a refused invocation, and the interrupt. The interrupt was missing while it was
 # reachable, so `railctl schema` - the one command whose whole set this is - documented
 # three codes and could leave the process with a fourth. That is the documented-lie defect
-# `STATION_EXIT_CODES`'s comment describes: a published code that never arrives costs a
+# `STATION_ERRORS`'s comment describes: a published code that never arrives costs a
 # caller one unused branch, a code that arrives unpublished drops them into their
 # unknown-exit-code arm. Pinned by
 # `tests/cli/test_usage_envelope.py::test_every_command_publishes_the_exit_code_an_interrupt_leaves`,
 # which walks every row in the manifest.
-BASE_EXIT_CODES: Final[tuple[int, ...]] = (0, 1, 2, ABORTED_EXIT_CODE)
+BASE_EXIT_CODES: Final[tuple[int, ...]] = _exit_codes(())
+BASE_ERROR_CODES: Final[tuple[str, ...]] = _error_codes(())
 
-# Every code a command that opens a `Station` and goes through `Station.exchange()` can
-# actually leave the process with: the base 0/1/2, transport 3, protocol 4, silence 5, the
-# `61 82` refusal 6, out-of-scope 7 (a `z21:` target - one of the three `--target` forms this
-# same table advertises), and `RailctlError`'s own 9. Two of these were missing while both
-# were reachable, so `railctl status --target z21:...` exited 7 against a manifest that said
-# it could not. `help_epilog` reads the two new lines off the exception docstrings on its own.
+# Every failure a command that opens a `Station` and goes through `Station.exchange()` can
+# actually reach: a transport fault, a malformed reply, silence, the `61 82` refusal,
+# out-of-scope (a `z21:` target - one of the three `--target` forms this same table
+# advertises), and `RailctlError` itself. Two of these were missing while both were
+# reachable, so `railctl status --target z21:...` refused a target against a manifest that
+# said it could not.
 #
 # This is a "can produce" set, not a "has been observed" one, and the two errors are not
 # symmetric. A published code that never arrives costs a caller one unused branch. A code that
 # arrives unpublished drops them into their unknown-exit-code arm on a failure this tool
-# documents everywhere else. So when a code is arguable, publish it. Only 6 and 7 are driven by
-# a test today (`tests/cli/test_schema.py`, the two reachability guards); 3, 4, 5 and 9 are
-# reachable by reading `Station.exchange` and its callers but are not exercised end to end. Do
-# NOT "tighten" this tuple to the observed four - that is the same defect the comment above
-# describes, running the other way.
-STATION_EXIT_CODES: Final[tuple[int, ...]] = (0, 1, 2, 3, 4, 5, 6, 7, 9)
+# documents everywhere else. So when a failure is arguable, publish it. Only the refusal and
+# out-of-scope are driven by a test today (`tests/cli/test_schema.py`, the two reachability
+# guards); the rest are reachable by reading `Station.exchange` and its callers but are not
+# exercised end to end. Do NOT "tighten" this family to the observed four - that is the same
+# defect the comment above describes, running the other way.
+#: The failures opening or configuring the serial port can raise. Named one by
+#: one rather than left to `TransportError`, which is their common parent, and
+#: this is the second place #65 turned a shorthand into a lie. While every class
+#: took its parent's number, publishing `TransportError` published the whole
+#: subtree with it. After the collapse `PortNotFound` resolves to the
+#: not-found code and `PortBusy` to the retryable one - neither of them their
+#: parent's - so a set built from the parent alone would omit two of the three
+#: process statuses a missing or occupied port can leave, and omit every one of
+#: their `error.code` strings.
+PORT_ERRORS: Final[ErrorFamily] = (
+    errors.AmbiguousPort,
+    errors.PortBusy,
+    errors.PortConfigError,
+    errors.PortNotFound,
+    errors.PortNotOpen,
+    errors.PortNotXpressNet,
+)
+
+#: The decode failures a reply can produce, named for the same reason
+#: `PORT_ERRORS` are: they are `ProtocolError` subclasses, they used to be
+#: covered by publishing their parent, and each one carries an `error.code` of
+#: its own that no parent can stand in for.
+FRAME_ERRORS: Final[ErrorFamily] = (
+    errors.LinkProtocolError,
+    errors.XBusChecksumError,
+    errors.XBusDecodeError,
+    errors.XBusEncodeError,
+    errors.XBusIncompleteError,
+)
+
+STATION_ERRORS: Final[ErrorFamily] = (
+    *PORT_ERRORS,
+    *FRAME_ERRORS,
+    errors.TransportError,
+    errors.ProtocolError,
+    errors.LinkTimeout,
+    errors.UnsupportedCommandError,
+    errors.UnsupportedFeatureError,
+    errors.StationError,
+    errors.RailctlError,
+)
+STATION_EXIT_CODES: Final[tuple[int, ...]] = _exit_codes(STATION_ERRORS)
+STATION_ERROR_CODES: Final[tuple[str, ...]] = _error_codes(STATION_ERRORS)
 
 # All three `power` states go through `Station._settle_power`, which raises
-# `TrackPowerError` (20) when the station still disagrees after the settle
-# pause. `power on` and `power resume` also publish the partial code: each one
+# `TrackPowerError` when the station still disagrees after the settle pause.
+# `power on` and `power resume` also publish the partial code: each one
 # energises the track before its remaining steps, and `power resume` releases
 # the hold in the same call, so a failure after that point leaves the layout in
 # a state that is a different thing from the command having done nothing.
-#
-# Sorted, because `help_epilog` and the manifest publish this tuple in the order
-# it is written and appending 8 after the base set's 9 listed the codes as
-# 0 1 2 3 4 5 6 7 9 8 20 on the `--help` page. `STATION_EXIT_CODES` happens to be
-# in order already; sorting here is what keeps that from being a property the
-# next addition has to remember.
-POWER_EXIT_CODES: Final[tuple[int, ...]] = tuple(
-    sorted({*STATION_EXIT_CODES, PARTIAL_EXIT_CODE, 20})
-)
+POWER_ERRORS: Final[ErrorFamily] = (*STATION_ERRORS, errors.TrackPowerError)
+POWER_EXIT_CODES: Final[tuple[int, ...]] = _exit_codes(POWER_ERRORS, extra=(PARTIAL_EXIT_CODE,))
+POWER_ERROR_CODES: Final[tuple[str, ...]] = _error_codes(POWER_ERRORS)
 
 # `drive SPEED>0` and `function` both run `throttle.preflight`, which refuses
-# with `TrackPowerError` (20) on emergency off or emergency stop and with
-# `StationBusyError` (12) on an active service-mode session. Published because
-# they are reachable, not because a test happens to drive them - though
+# with `TrackPowerError` on emergency off or emergency stop and with
+# `StationBusyError` on an active service-mode session. Published because they
+# are reachable, not because a test happens to drive them - though
 # tests/cli/test_schema.py drives both, per the rule in design spec L6.
-THROTTLE_EXIT_CODES: Final[tuple[int, ...]] = (*STATION_EXIT_CODES, 12, 20)
+THROTTLE_ERRORS: Final[ErrorFamily] = (
+    *STATION_ERRORS,
+    errors.FunctionGroupUnreadableError,
+    errors.StationBusyError,
+    errors.TrackPowerError,
+)
+THROTTLE_EXIT_CODES: Final[tuple[int, ...]] = _exit_codes(THROTTLE_ERRORS)
+THROTTLE_ERROR_CODES: Final[tuple[str, ...]] = _error_codes(THROTTLE_ERRORS)
 
-#: `doctor` publishes 8 for the same reading `power on` publishes it for: the track
-#: is live because this run energised it, and the station never confirmed the hold
-#: that should be under it. The probe itself may have gone perfectly - what did not
-#: is the promise about the layout - so that is a partial result, not an error.
-DOCTOR_EXIT_CODES: Final[tuple[int, ...]] = tuple(sorted({*STATION_EXIT_CODES, PARTIAL_EXIT_CODE}))
+#: `doctor` publishes the partial code for the same reading `power on` publishes it
+#: for: the track is live because this run energised it, and the station never
+#: confirmed the hold that should be under it. The probe itself may have gone
+#: perfectly - what did not is the promise about the layout - so that is a partial
+#: result, not an error.
+DOCTOR_ERRORS: Final[ErrorFamily] = STATION_ERRORS
+DOCTOR_EXIT_CODES: Final[tuple[int, ...]] = _exit_codes(DOCTOR_ERRORS, extra=(PARTIAL_EXIT_CODE,))
+DOCTOR_ERROR_CODES: Final[tuple[str, ...]] = _error_codes(DOCTOR_ERRORS)
 
 DOCTOR_POWER_ON = Option(
     name="--power-on",
@@ -309,6 +453,7 @@ _DOCTOR = CommandMeta(
     schema="railctl/doctor/v1",
     mutates=True,  # --power-on energises the track and holds the layout
     exit_codes=DOCTOR_EXIT_CODES,
+    error_codes=DOCTOR_ERROR_CODES,
     options=(
         DOCTOR_POWER_ON,
         DOCTOR_NO_PROGRAMMING_TRACK,
@@ -323,6 +468,7 @@ _STATUS = CommandMeta(
     schema="railctl/status/v1",
     mutates=False,
     exit_codes=STATION_EXIT_CODES,
+    error_codes=STATION_ERROR_CODES,
 )
 _VERSION = CommandMeta(
     path="version",
@@ -330,6 +476,7 @@ _VERSION = CommandMeta(
     schema="railctl/version/v1",
     mutates=False,
     exit_codes=STATION_EXIT_CODES,
+    error_codes=STATION_ERROR_CODES,
 )
 _SCHEMA = CommandMeta(
     path="schema",
@@ -340,6 +487,7 @@ _SCHEMA = CommandMeta(
     # includes the interrupt: a command that talks to no hardware can still be stopped by
     # the operator, and it answers that with the same `aborted` envelope as every other.
     exit_codes=BASE_EXIT_CODES,
+    error_codes=BASE_ERROR_CODES,
     arguments=(
         Argument(
             name="path",
@@ -384,6 +532,7 @@ _DRIVE = CommandMeta(
     schema="railctl/drive/v1",
     mutates=True,
     exit_codes=THROTTLE_EXIT_CODES,
+    error_codes=THROTTLE_ERROR_CODES,
     arguments=(DRIVE_SPEED_ARG,),
     options=(DRIVE_REVERSE_OPT, DRIVE_FORWARD_OPT),
 )
@@ -416,6 +565,7 @@ _FUNCTION = CommandMeta(
     schema="railctl/function/v1",
     mutates=True,
     exit_codes=THROTTLE_EXIT_CODES,
+    error_codes=THROTTLE_ERROR_CODES,
     arguments=(FUNCTION_FUNC_ARG, FUNCTION_STATE_ARG),
     options=(FUNCTION_FORCE_GROUP_OPT,),
 )
@@ -455,6 +605,7 @@ _POWER = CommandMeta(
     schema="railctl/power/v1",
     mutates=True,
     exit_codes=POWER_EXIT_CODES,
+    error_codes=POWER_ERROR_CODES,
     arguments=(POWER_STATE_ARG,),
 )
 
@@ -472,10 +623,13 @@ _MONITOR = CommandMeta(
     help="Decode broadcasts and own traffic until Ctrl-C",
     schema="railctl/monitor/v1",  # matches commands/monitor.py's MONITOR_SCHEMA
     mutates=False,
-    # `STATION_EXIT_CODES` already carries 9, which is how a monitor normally ends:
+    # The interrupt code is how a monitor normally ends, and every family carries it:
     # `run()` turns the operator's Ctrl-C into `AbortedError`, and the ndjson path
-    # exits with the same 9 by hand after its stream has been closed off.
+    # leaves with the same code by hand after its stream has been closed off. Since
+    # 0.3.0 that is 130 rather than a 9 shared with real failures, which is why this
+    # command's `_COMMAND_EXIT_MEANINGS` row moved to the interrupt code with it.
     exit_codes=STATION_EXIT_CODES,
+    error_codes=STATION_ERROR_CODES,
     options=(MONITOR_LIMIT,),
 )
 
@@ -553,22 +707,66 @@ CV_WRITE_TRACK_OPT = Option(
     default="prog",
 )
 
-#: What a CV read can leave the process with, beyond a station command's own
-#: set: the programming-error family 10-19 (`errors.EXIT_CODES` - 14 included,
-#: because a `--page` read verifies its CV31/CV32 selection and the restore of
-#: the pair it found, and either read-back can disagree), 20 from the POM
-#: pre-flight and the POM track-power check, and the partial 8 when some CVs
-#: of a batch answered and others did not. Like `STATION_EXIT_CODES` this is a
-#: "can produce" set: reachability drives in tests/cli/test_cv.py cover 15 and
-#: 17 among others.
-CV_READ_EXIT_CODES: Final[tuple[int, ...]] = tuple(
-    sorted({*STATION_EXIT_CODES, PARTIAL_EXIT_CODE, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20})
+#: What a CV read can fail with beyond a station command's own family: the
+#: whole programming-error family (`CvVerifyError` included, because a `--page`
+#: read verifies its CV31/CV32 selection and the restore of the pair it found,
+#: and either read-back can disagree) and `TrackPowerError` from the POM
+#: pre-flight and the POM track-power check. It also publishes the partial exit
+#: code, for a batch where some CVs answered and others did not. Like
+#: `STATION_ERRORS` this is a "can produce" family: reachability drives in
+#: tests/cli/test_cv.py cover the out-of-range and index-page refusals among
+#: others.
+CV_PROGRAMMING_ERRORS: Final[ErrorFamily] = (
+    errors.DecoderNoAckError,
+    errors.ShortCircuitError,
+    errors.StationBusyError,
+    errors.DecoderNotRespondingError,
+    errors.CvVerifyError,
+    errors.CvOutOfRangeError,
+    errors.PomReadUnsupportedError,
+    errors.IndexPageRequiredError,
+    errors.ServiceEncodingUnknownError,
+    errors.ProgrammingError,
+    errors.TrackPowerError,
 )
-#: A write adds 14 (`CvVerifyError`: the read-back disagreed) and drops the
-#: partial 8 - one CV either was written or the command failed saying why.
-CV_WRITE_EXIT_CODES: Final[tuple[int, ...]] = tuple(
-    sorted({*STATION_EXIT_CODES, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20})
+#: Raised by `deps`' confirmation gate, so it belongs to exactly the commands
+#: whose row says `confirms=True`. It exits 2 rather than 9 - a refused
+#: invocation is fixed on the command line, not at the layout.
+CONFIRM_ERRORS: Final[ErrorFamily] = (errors.ConfirmationRequiredError,)
+
+#: The catalog refuses a CV name or a value on the way in, in every command that
+#: takes one.
+CATALOG_ERRORS: Final[ErrorFamily] = (errors.CatalogError,)
+
+#: What a command that only ever speaks to the programming track cannot reach.
+#: `restore` and `diff` both run at `ProgMode.SERVICE` and nothing else (M10 D1),
+#: so neither can raise the POM refusal - and neither can raise `TrackPowerError`,
+#: which comes from the POM pre-flight and from `Station._settle_power`. Service
+#: mode energises the track by sending `21 81` through `exchange` directly, never
+#: through `power_on()`, so the settle check that raises it is not on this path.
+#:
+#: Publishing a failure a command cannot produce costs a caller one unused branch
+#: and is the safe direction - but it also makes `error_codes` stop being an
+#: answer to "can this command hit this condition", which is the whole reason the
+#: field exists. Where a path demonstrably does not exist, say so.
+_SERVICE_ONLY_EXCLUSIONS: Final[frozenset[type[errors.RailctlError]]] = frozenset(
+    {errors.PomReadUnsupportedError, errors.TrackPowerError}
 )
+
+CV_READ_ERRORS: Final[ErrorFamily] = (
+    *STATION_ERRORS,
+    *CV_PROGRAMMING_ERRORS,
+    *CATALOG_ERRORS,
+    *CONFIRM_ERRORS,
+)
+CV_READ_EXIT_CODES: Final[tuple[int, ...]] = _exit_codes(CV_READ_ERRORS, extra=(PARTIAL_EXIT_CODE,))
+CV_READ_ERROR_CODES: Final[tuple[str, ...]] = _error_codes(CV_READ_ERRORS)
+
+#: A write reaches the same failures and drops the partial code - one CV either
+#: was written or the command failed saying why.
+CV_WRITE_ERRORS: Final[ErrorFamily] = CV_READ_ERRORS
+CV_WRITE_EXIT_CODES: Final[tuple[int, ...]] = _exit_codes(CV_WRITE_ERRORS)
+CV_WRITE_ERROR_CODES: Final[tuple[str, ...]] = _error_codes(CV_WRITE_ERRORS)
 
 _CV_READ = CommandMeta(
     path="cv read",
@@ -583,6 +781,7 @@ _CV_READ = CommandMeta(
     # CV31/CV32 (commands/cv.py's page gate).
     mutates=True,
     exit_codes=CV_READ_EXIT_CODES,
+    error_codes=CV_READ_ERROR_CODES,
     arguments=(CV_SPEC_ARG,),
     options=(CV_READ_MODE_OPT, CV_PAGE_OPT),
     confirms=True,
@@ -604,6 +803,7 @@ _CV_WRITE = CommandMeta(
     schema="railctl/cv-write/v1",
     mutates=True,
     exit_codes=CV_WRITE_EXIT_CODES,
+    error_codes=CV_WRITE_ERROR_CODES,
     arguments=(CV_WRITE_CV_ARG, CV_WRITE_VALUE_ARG),
     options=(CV_WRITE_VERIFY_OPT, CV_WRITE_TRACK_OPT, CV_WRITE_CONFIRM_OPT),
     # The confirmation set {1, 8, 17, 18, 29, 31, 32, 144} lives in
@@ -678,17 +878,25 @@ BACKUP_PAGE_OPT = Option(
     default=None,
 )
 
-#: `cv read`'s whole set, unchanged: a backup is a batch of CV reads through
-#: the same station paths, so everything that set can produce - the
-#: programming family 10-19, 20 from the POM pre-flight, the station codes -
-#: this command can produce too. 9 carries three backup-specific meanings
-#: (see `_COMMAND_EXIT_MEANINGS`), and 16 is the `--mode pom` refusal when
-#: POM reading is a measured no. Like the sets above this is "can produce",
-#: not "has been observed": the reachability drives in
-#: tests/cli/test_backup.py cover the backup-specific codes, and dropping a
-#: code an inherited path can still reach is the documented-lie defect
-#: `STATION_EXIT_CODES`'s comment describes.
-BACKUP_EXIT_CODES: Final[tuple[int, ...]] = CV_READ_EXIT_CODES
+#: `cv read`'s whole family, unchanged: a backup is a batch of CV reads through
+#: the same station paths, so everything that family can produce - the
+#: programming errors, `TrackPowerError` from the POM pre-flight, the station
+#: failures - this command can produce too. Three backup-specific failures
+#: share the domain-failure code (see `_COMMAND_EXIT_MEANINGS`), and
+#: `PomReadUnsupportedError` is the `--mode pom` refusal when POM reading is a
+#: measured no. Like the families above this is "can produce", not "has been
+#: observed": the reachability drives in tests/cli/test_backup.py cover the
+#: backup-specific codes, and dropping a failure an inherited path can still
+#: reach is the documented-lie defect `STATION_ERRORS`'s comment describes.
+#: Plus the three endings that are about the FILE rather than the decoder, all
+#: three of them named in this command's `_COMMAND_EXIT_MEANINGS` row.
+BACKUP_ERRORS: Final[ErrorFamily] = (
+    *CV_READ_ERRORS,
+    errors.BackupFileError,
+    errors.BackupIncompleteError,
+)
+BACKUP_EXIT_CODES: Final[tuple[int, ...]] = _exit_codes(BACKUP_ERRORS, extra=(PARTIAL_EXIT_CODE,))
+BACKUP_ERROR_CODES: Final[tuple[str, ...]] = _error_codes(BACKUP_ERRORS)
 
 _BACKUP = CommandMeta(
     path="backup",
@@ -710,6 +918,7 @@ _BACKUP = CommandMeta(
     # conditional - so the curated path never asking does not make this false.
     confirms=True,
     exit_codes=BACKUP_EXIT_CODES,
+    error_codes=BACKUP_ERROR_CODES,
     options=(
         BACKUP_OUT_OPT,
         BACKUP_NOTE_OPT,
@@ -801,14 +1010,24 @@ RESTORE_CONFIRM_OPT = Option(
     default=None,
 )
 
-#: `cv write`'s set minus 16. A restore is a batch of programming-track CV
-#: writes and reads, so the whole programming family 10-19 and the station
-#: codes come with it, 14 is the verification mismatch this command is judged
-#: on, and 15 is a file value the catalog refuses. 16 is dropped because
-#: nothing here can reach it: `PomReadUnsupportedError` is raised only where
-#: POM was asked for, and `restore` has no POM path at all (D1). 9 carries
-#: several restore-specific meanings - see `_COMMAND_EXIT_MEANINGS`.
-RESTORE_EXIT_CODES: Final[tuple[int, ...]] = tuple(sorted(set(CV_WRITE_EXIT_CODES) - {16}))
+#: `cv write`'s family minus the POM refusal. A restore is a batch of
+#: programming-track CV writes and reads, so the whole programming family and
+#: the station failures come with it, `CvVerifyError` is the verification
+#: mismatch this command is judged on, and `CvOutOfRangeError` is a file value
+#: the catalog refuses. `PomReadUnsupportedError` is dropped because nothing
+#: here can reach it: it is raised only where POM was asked for, and `restore`
+#: has no POM path at all (D1). Several restore-specific failures share the
+#: domain-failure exit code - see `_COMMAND_EXIT_MEANINGS`.
+RESTORE_ERRORS: Final[ErrorFamily] = (
+    *(klass for klass in CV_WRITE_ERRORS if klass not in _SERVICE_ONLY_EXCLUSIONS),
+    errors.AddressSetIncompleteError,
+    errors.BackupFileError,
+    errors.DecoderIdentityMismatchError,
+    errors.ProgrammingLockedError,
+    errors.RestoreFileIncompleteError,
+)
+RESTORE_EXIT_CODES: Final[tuple[int, ...]] = _exit_codes(RESTORE_ERRORS)
+RESTORE_ERROR_CODES: Final[tuple[str, ...]] = _error_codes(RESTORE_ERRORS)
 
 _RESTORE = CommandMeta(
     path="restore",
@@ -816,6 +1035,7 @@ _RESTORE = CommandMeta(
     schema="railctl/restore/v1",
     mutates=True,
     exit_codes=RESTORE_EXIT_CODES,
+    error_codes=RESTORE_ERROR_CODES,
     arguments=(RESTORE_FILE_ARG,),
     options=(
         RESTORE_DRY_RUN_OPT,
@@ -881,17 +1101,26 @@ DIFF_INCLUDE_SWEEP_OPT = Option(
     default=False,
 )
 
-#: `cv read`'s set minus three codes nothing in a diff can reach. 8 is gone
-#: because a diff has no partial ending: a live CV that does not answer is a
-#: row the plan marks "live value not known", which is a reported comparison
-#: and not a half-finished command. 14 is gone because nothing is written, so
-#: nothing is verified - `cv read` publishes it only for the `--page` path that
-#: writes the CV31/CV32 selectors and puts them back, and a diff refuses a
-#: wrong page instead of moving it. 16 is gone for the reason `restore` drops
-#: it: there is no POM path here to raise it (M10 D1).
-DIFF_EXIT_CODES: Final[tuple[int, ...]] = tuple(
-    sorted(set(CV_READ_EXIT_CODES) - {PARTIAL_EXIT_CODE, 14, 16})
+#: `cv read`'s family minus two failures nothing in a diff can reach, and
+#: without the partial code. The partial code is gone because a diff has no
+#: partial ending: a live CV that does not answer is a row the plan marks
+#: "live value not known", which is a reported comparison and not a
+#: half-finished command. `CvVerifyError` is gone because nothing is written,
+#: so nothing is verified - `cv read` publishes it only for the `--page` path
+#: that writes the CV31/CV32 selectors and puts them back, and a diff refuses a
+#: wrong page instead of moving it. `PomReadUnsupportedError` is gone for the
+#: reason `restore` drops it: there is no POM path here to raise it (M10 D1).
+DIFF_ERRORS: Final[ErrorFamily] = (
+    *(
+        klass
+        for klass in CV_READ_ERRORS
+        if klass not in {errors.CvVerifyError, *_SERVICE_ONLY_EXCLUSIONS, *CONFIRM_ERRORS}
+    ),
+    errors.AddressSetIncompleteError,
+    errors.BackupFileError,
 )
+DIFF_EXIT_CODES: Final[tuple[int, ...]] = _exit_codes(DIFF_ERRORS)
+DIFF_ERROR_CODES: Final[tuple[str, ...]] = _error_codes(DIFF_ERRORS)
 
 _DIFF = CommandMeta(
     path="diff",
@@ -905,6 +1134,7 @@ _DIFF = CommandMeta(
     # never described.
     mutates=False,
     exit_codes=DIFF_EXIT_CODES,
+    error_codes=DIFF_ERROR_CODES,
     arguments=(DIFF_FILE_ARG, DIFF_OTHER_ARG),
     options=(DIFF_WITH_ADDRESS_OPT, DIFF_MERGE_CV29_OPT, DIFF_INCLUDE_SWEEP_OPT),
 )
@@ -930,6 +1160,7 @@ _STOP = CommandMeta(
     schema="railctl/stop/v1",
     mutates=True,
     exit_codes=STATION_EXIT_CODES,
+    error_codes=STATION_ERROR_CODES,
     options=(STOP_ADDRESS_OPT,),
 )
 
@@ -1079,23 +1310,32 @@ def global_option(name: str) -> Any:
     return typer_option(replace(row, default=_bare_default(row), late_default=False))
 
 
-#: Why a THROTTLE command exits 12 - the pre-flight found the station in a
+#: Why a THROTTLE command refuses - the pre-flight found the station in a
 #: service-mode session, which is not the `61 1F` reply `StationBusyError`'s
 #: own docstring describes.
-_SERVICE_MODE_MEANING: Final[str] = (
-    "a service-mode programming session is active on the station; it must finish or be "
-    "cancelled before a throttle command can run"
+#: `drive` and `function` share one preflight, so they share one sentence.
+#:
+#: It names `track_power` and NOT `station_busy`, and that is the correction a
+#: review caught: the two refusals come from the same preflight and read as a
+#: pair, but `StationBusyError` is retryable and resolves to a different code -
+#: the session it names ends on its own. Naming it here would have put a code
+#: under a number it does not carry, which is the same documented lie in
+#: miniature that #65 was raised to remove. `test_every_code_a_help_sentence_names
+#: _carries_the_code_it_is_filed_under` is the guard.
+_THROTTLE_MEANING: Final[str] = (
+    "the command was refused or the station failed. The error.code says which: track_power "
+    "(the layout is in emergency off or emergency stop - nothing was sent, and the layout was "
+    "not touched), function_group_unreadable (the current state of the function group could "
+    "not be read, so flipping one bit would have cleared the rest), or one of the station and "
+    "link failures every command shares. A service-mode session blocking the throttle is "
+    f"station_busy and exits {RETRYABLE_EXIT_CODE}, not this - it ends on its own, so that "
+    "one is worth retrying and this one is not"
 )
 
-_BASE_EXIT_MEANINGS: Final[dict[int, str]] = {
-    0: "success",
-    1: "unhandled internal error",
-    2: "usage error - a bad flag, value, or missing argument",
-    PARTIAL_EXIT_CODE: (
-        "partial - some steps of this command completed and a later one failed; the result "
-        "names which"
-    ),
-}
+# `_BASE_EXIT_MEANINGS` was the four codes that named no exception class, kept here
+# because `_meta` owned the prose for them alone. After #65 none of the eight names
+# a class, so the table generalised and moved to `railctl/exit_codes.py` as
+# `EXIT_MEANINGS`. Per-command overrides below stay here: those ARE command-specific.
 
 # The two published codes that name no class in the exception tree, so these two sentences
 # are the only error meanings this module owns. `result.RESERVED_CODES` is the set they are
@@ -1198,76 +1438,73 @@ def _output_lines(schema: str) -> list[str]:
 
 
 #: Where an exception's own docstring is not why THIS command exits with that
-#: code. `drive`/`function` exit 12 from the pre-flight finding a service-mode
+#: code. `drive`/`function` refuse from the pre-flight finding a service-mode
 #: session on the station, and `StationBusyError`'s docstring opens "The station
 #: reported 61 1F" - a reply neither command has sent anything to provoke. The
 #: class summary is right for the error-code table, where it describes the
 #: class; it is wrong in a command's EXIT CODES section, where it has to
 #: describe that command.
 _COMMAND_EXIT_MEANINGS: Final[dict[str, dict[int, str]]] = {
-    "drive": {12: _SERVICE_MODE_MEANING},
-    "function": {12: _SERVICE_MODE_MEANING},
+    # Before #65 an override corrected a class summary: the command exited with a
+    # number that named one exception, and this table said why THAT command reached
+    # it. The collapse changed what an override is for. Nine now means "a real
+    # failure" for every command, so the useful command-specific sentence is the
+    # list of which failures this command's nine can be - the same list `error_codes`
+    # publishes in the manifest, written out for a human reading `--help`.
+    #
+    # Four of restore's rows and three of diff's used to be separate numbers and are
+    # merged here into one sentence each, because their numbers merged. Nothing was
+    # dropped in the merge: every `error.code` those rows named is still named.
+    "drive": {DOMAIN_FAILURE_EXIT_CODE: _THROTTLE_MEANING},
+    "function": {DOMAIN_FAILURE_EXIT_CODE: _THROTTLE_MEANING},
     "doctor": {
-        # 3 is TransportError everywhere else, and that class summary is still true of
-        # the class - it is just not why `doctor` exits 3. The doctor's own 3 is the
-        # verdict `station.exit_code_for_report` returns for a report that failed.
-        3: (
+        DOMAIN_FAILURE_EXIT_CODE: (
             "the probe could not establish the basics - D0, D1 or D2 failed, or D3 failed "
-            "outright. A capability that came back unknown is NOT this: that is exit 0 with "
-            "the gap named in the report"
+            "outright - or the link itself failed. A capability that came back unknown is "
+            "NOT this: that is exit 0 with the gap named in the report"
         ),
-        8: (
+        PARTIAL_EXIT_CODE: (
             "partial - the probe ran, but the layout is not confirmed held: this run either "
             "energised the track or released a hold it found, and the station never confirmed "
             "the hold that should be under it, or a locomotive refused the speed-0 telegram. "
             "Treat the layout as able to move"
         ),
     },
-    # 9 is `RailctlError`'s base code everywhere else, and for `backup` it is the
-    # exit the milestone is judged on: three distinct endings share it, and the
-    # `error.code` string is what tells them apart, not the process status.
+    # Three distinct endings share this command's nine, and the `error.code` string is
+    # what tells them apart. That was true before the collapse too - this is the row
+    # that showed the rest of the table what it would become.
     "backup": {
-        9: (
+        DOMAIN_FAILURE_EXIT_CODE: (
             "the backup ran and the file was written, but it has holes - a no_response or "
-            "error row (code backup_incomplete); or the operator interrupted the run and the "
-            'partial file carries "interrupted": true (code aborted); or the backup file '
-            "itself could not be written (code backup_file). A skipped row never causes "
-            "this - a recorded decision is not a hole. An --all sweep NORMALLY ends here: "
-            'most CV numbers are not implemented in any decoder, and silence and "this CV '
-            'does not exist" cannot be told apart on this hardware, so those rows are '
-            "no_response and the file is incomplete by definition. The file is the product "
-            "either way"
+            "error row (code backup_incomplete); or the backup file itself could not be "
+            "written (code backup_file); or a station or programming failure stopped it. A "
+            "skipped row never causes this - a recorded decision is not a hole. An --all "
+            "sweep NORMALLY ends here: most CV numbers are not implemented in any decoder, "
+            'and silence and "this CV does not exist" cannot be told apart on this '
+            "hardware, so those rows are no_response and the file is incomplete by "
+            "definition. The file is the product either way. An interrupt is exit 130 and "
+            'leaves the partial file carrying "interrupted": true'
         )
     },
-    # 9 collects every restore refusal that is about the FILE or the decoder in
-    # front of you rather than about a telegram, and 14 is the one this command
-    # is judged on. Both class summaries are right about their classes and
-    # wrong about this command: `CvVerifyError`'s describes a single write, and
-    # a restore reports a whole stage at once.
     "restore": {
-        9: (
+        DOMAIN_FAILURE_EXIT_CODE: (
             "the run refused before writing anything, or stopped part-way. The error.code "
-            "says which: decoder_identity_mismatch (the decoder on the programming track is "
-            "not the one the file came from), restore_file_incomplete (the file has holes "
-            "and --allow-incomplete was not given), programming_locked (live CV144 is not 0 "
-            "on a decoder family that locks on it), address_set_incomplete (--with-address "
-            "with CV1/CV17/CV18/CV29 not all ok in the file), backup_file (the file is "
-            "unreadable or malformed), or aborted (Ctrl-C - nothing is rolled back)"
-        ),
-        14: (
-            "a stage's read-back disagreed with the value that stage intended to write, "
-            "after one retry and one re-read. The mismatch table names every CV; nothing "
-            "is rolled back, and re-running restore is the recovery"
-        ),
-        15: (
-            "a VALUE in the file falls outside the catalog's min/max for its CV - the "
-            "catalog is enforcing on write. Every offender is listed, and the run refused "
-            "before its first write"
-        ),
-        17: (
-            "the decoder sits on a different CV31/CV32 index page than the file was taken "
-            "on, so the CVs above 256 would not mean the same thing. A restore never writes "
-            "the selectors, so it refuses instead of moving the bank"
+            "says which: cv_verify (a stage's read-back disagreed with what that stage "
+            "intended to write, after one retry and one re-read - the mismatch table names "
+            "every CV, nothing is rolled back, and re-running restore is the recovery); "
+            "cv_out_of_range (a VALUE in the file falls outside the catalog's min/max for "
+            "its CV, listed offender by offender, refused before the first write); "
+            "index_page_required (the decoder sits on a different CV31/CV32 index page than "
+            "the file was taken on, and a restore refuses rather than moving the bank); "
+            "decoder_identity_mismatch (the decoder on the programming track is not the one "
+            "the file came from); restore_file_incomplete (the file has holes and "
+            "--allow-incomplete was not given); programming_locked (live CV144 is not 0 on a "
+            "decoder family that locks on it); address_set_incomplete (--with-address with "
+            "CV1/CV17/CV18/CV29 not all ok in the file); or backup_file (the file is "
+            "unreadable or malformed). It can also be one of the programming and station "
+            "failures every CV command inherits - decoder_no_ack, decoder_not_responding, "
+            "short_circuit and the rest - which stop a stage part-way rather than refusing "
+            "it. Ctrl-C is exit 130, and nothing is rolled back"
         ),
     },
     # 0 is the row this command exists to state out loud. Every other command's
@@ -1275,49 +1512,45 @@ _COMMAND_EXIT_MEANINGS: Final[dict[str, dict[int, str]]] = {
     # payload, whatever it says", and a caller who assumed diff(1)'s convention
     # would read a decoder that differs in forty CVs as a clean match.
     "diff": {
-        0: (
+        SUCCESS_EXIT_CODE: (
             "the comparison completed - result.differences says how many CVs differ, and 0 "
             "of them is not a different exit code. diff deliberately does NOT mirror "
             "diff(1)'s exit 1 on a difference: every non-zero code in this tool is an "
             "exception, and inventing one for a successful answer would make this table lie"
         ),
-        9: (
-            "no comparison was reported. The error.code says which: backup_file (a file is "
-            "unreadable or malformed), address_set_incomplete (--with-address with "
-            "CV1/CV17/CV18/CV29 not all ok in the file, so there is no address set to "
-            "compare), or aborted (Ctrl-C - the online form reads every curated CV at about "
-            "6 s each, so an interrupt is a normal way for this command to end)"
+        DOMAIN_FAILURE_EXIT_CODE: (
+            "no comparison was reported. The error.code says which: cv_out_of_range (a VALUE "
+            "in the file falls outside the catalog's min/max for its CV - the shared planner "
+            "refuses it, because a file this diff would report on is a file no restore could "
+            "write); index_page_required (the decoder, or the second file, sits on a "
+            "different CV31/CV32 index page than the file was taken on, so the CVs above 256 "
+            "do not name the same registers); backup_file (a file is unreadable or "
+            "malformed); or address_set_incomplete (--with-address with CV1/CV17/CV18/CV29 "
+            "not all ok in the file, so there is no address set to compare). It can also be "
+            "one of the programming and station failures every CV command inherits, which "
+            "stop the live pass part-way rather than refusing it"
         ),
-        15: (
-            "a VALUE in the file falls outside the catalog's min/max for its CV. The "
-            "comparison is refused rather than reported, because the shared planner is the "
-            "one that decides it - a file this diff would report on is a file no restore "
-            "could write"
-        ),
-        17: (
-            "the decoder sits on a different CV31/CV32 index page than the file was taken "
-            "on (or the two files were), so the CVs above 256 do not name the same "
-            "registers. A diff never writes the selectors, so it refuses instead of "
-            "comparing rows that mean two different things"
+        ABORTED_EXIT_CODE: (
+            "the operator stopped the comparison (error.code aborted). The online form "
+            "reads every curated CV at about 6 s each, so an interrupt is a normal way for "
+            "this command to end rather than a fault - nothing was written, and re-running "
+            "costs only the time"
         ),
     },
-    # 9 is AbortedError everywhere else, and for `monitor` that IS how a normal run
-    # ends - the operator's Ctrl-C. The row exists because the class summary reads as
-    # a failure, and here it is the documented ending: this is the one command whose
-    # metadata comment already explained 9 while its own help text did not.
+    # The interrupt is how a normal `monitor` run ends, so its row says what the stream
+    # does on the way out rather than treating it as a failure. This was a nine before
+    # 0.3.0, sharing a code with real failures; it is 130 now and the sentence is the
+    # same one.
     "monitor": {
-        9: (
+        ABORTED_EXIT_CODE: (
             "the operator stopped the monitor with Ctrl-C. The ndjson stream still ends with "
             "its summary line, carrying complete: false - a monitor that ran until it was "
             "interrupted did its job"
         )
     },
-    # The only non-zero domain ending this command has. Everywhere else 9 is shared by
-    # several codes and the class summary has to stay generic, but `schema` opens no
-    # station and reads no port, so the interrupt is the whole of its 9 - and saying so is
-    # what makes the code it now publishes useful rather than merely present. Keyed by the
-    # constant `BASE_EXIT_CODES` is built from, so the override cannot name a code this
-    # command stops publishing.
+    # `schema` opens no station and reads no port, so the interrupt is the only way it
+    # ends other than success or a bad command line - and saying so is what makes the
+    # code it publishes useful rather than merely present.
     "schema": {
         ABORTED_EXIT_CODE: (
             "the operator interrupted the run (error.code aborted). This command talks to "
@@ -1330,12 +1563,17 @@ _COMMAND_EXIT_MEANINGS: Final[dict[str, dict[int, str]]] = {
 def _exit_code_lines(
     codes: Sequence[int], overrides: Mapping[int, str] = MappingProxyType({})
 ) -> list[str]:
-    by_code = {code: klass for klass, code in errors.EXIT_CODES.items()}
+    # `EXIT_MEANINGS`, not an inversion of `errors.EXIT_CODES`. That inversion is
+    # what this used to do - read the meaning off the docstring of the single class
+    # owning each number - and it worked only while the map was one-to-one. Under
+    # #65's collapse it does not raise: inverting a non-injective dict is
+    # last-writer-wins, so exit 9 would have been published with whichever of some
+    # thirty classes happened to sort last. Prose about the CONTRACT lives with the
+    # contract, and a published code with no sentence is a KeyError here rather than
+    # a wrong answer on a help page.
     lines = ["EXIT CODES"]
     for code in codes:
-        meaning = overrides.get(code) or _BASE_EXIT_MEANINGS.get(code)
-        if meaning is None:
-            meaning = _first_paragraph(by_code[code].__doc__)
+        meaning = overrides.get(code) or EXIT_MEANINGS[code]
         lines.append(f"  {code}: {meaning}")
     return [*lines, ""]
 
@@ -1445,6 +1683,12 @@ def _command_dict(meta: CommandMeta) -> dict[str, object]:
         "mutates": meta.mutates,
         "confirms": meta.confirms,
         "exit_codes": list(meta.exit_codes),
+        # Published beside `exit_codes` rather than instead of it: the two answer
+        # different questions since 0.3.0. `exit_codes` is what `$?` can be, and
+        # after #65 that no longer names a failure - `error_codes` is the list of
+        # failures, and the row for each one in the top-level `errors` table says
+        # which exit code it carries and whether it is worth retrying.
+        "error_codes": list(meta.error_codes),
         "arguments": [_argument_dict(a) for a in meta.arguments],
         "options": [_option_dict(o) for o in meta.options],
     }

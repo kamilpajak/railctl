@@ -19,7 +19,8 @@ from railctl.cli.commands.monitor import MONITOR_SCHEMA, build_monitor, stream_m
 from railctl.cli.deps import Settings
 from railctl.cli.main import app as real_app
 from railctl.cli.render import NdjsonStream, render
-from railctl.errors import DecoderNotRespondingError
+from railctl.errors import AbortedError, DecoderNotRespondingError, exit_code_for
+from railctl.exit_codes import INTERNAL_EXIT_CODE, USAGE_EXIT_CODE
 from railctl.station import EVENT_NAMES, StationEvent
 
 
@@ -106,7 +107,7 @@ def test_stream_monitor_writes_three_events_then_a_summary_on_keyboard_interrupt
         "sequence": 3,
         "count": 3,
         "complete": False,
-        "exit_code": 9,
+        "exit_code": exit_code_for(AbortedError("x")),
     }
 
 
@@ -180,7 +181,7 @@ def test_a_bug_in_the_stream_closes_with_the_internal_exit_code():
         "sequence": 0,
         "count": 0,
         "complete": False,
-        "exit_code": 1,
+        "exit_code": INTERNAL_EXIT_CODE,
     }
 
 
@@ -226,10 +227,10 @@ def test_unknown_telegram_is_reported_not_dropped():
     assert body["result"]["events"][0]["payload"]["telegram"] == "63 FF FF"
 
 
-def test_build_monitor_marks_an_interrupted_run_incomplete_with_exit_nine():
+def test_build_monitor_marks_an_interrupted_run_incomplete_and_says_so_in_the_code():
     result = build_monitor([], complete=False, streamed=False)
     assert result.ok is False
-    assert result.exit_code == 9
+    assert result.exit_code == exit_code_for(AbortedError("x"))
     assert "interrupted" in result.lines
 
 
@@ -323,26 +324,26 @@ def test_an_interrupted_buffered_run_is_a_partial_result_not_an_error(monkeypatc
     station = _EventStation(events, interrupt_after=1)
     app = _wire(monkeypatch, station, tmp_path)
     result = CliRunner().invoke(app, ["monitor", "--format", "json"])
-    assert result.exit_code == 9
+    assert result.exit_code == exit_code_for(AbortedError("x"))
     body = json.loads(result.stdout)
     assert body["result"]["complete"] is False
     assert body["result"]["count"] == 1
     assert station.closed is True
 
 
-def test_an_interrupted_ndjson_run_ends_its_stream_and_exits_nine(monkeypatch, tmp_path):
+def test_an_interrupted_ndjson_run_ends_its_stream_with_the_interrupt_code(monkeypatch, tmp_path):
     events = [StationEvent(at=1.0, name="power.on", detail="on", payload={})]
     station = _EventStation(events, interrupt_after=1)
     app = _wire(monkeypatch, station, tmp_path)
     result = CliRunner().invoke(app, ["monitor", "--format", "ndjson"])
-    assert result.exit_code == 9
+    assert result.exit_code == exit_code_for(AbortedError("x"))
     lines = [json.loads(line) for line in result.stdout.splitlines()]
     assert lines[-1] == {
         "type": "summary",
         "sequence": 1,
         "count": 1,
         "complete": False,
-        "exit_code": 9,
+        "exit_code": exit_code_for(AbortedError("x")),
     }
     assert station.closed is True
 
@@ -388,7 +389,7 @@ def test_a_limit_below_one_is_refused_with_a_usage_envelope_and_exit_two(monkeyp
     station = _EventStation([StationEvent(at=1.0, name="power.on", detail="on", payload={})])
     app = _wire(monkeypatch, station, tmp_path)
     result = CliRunner().invoke(app, ["monitor", "--limit", "0", "--format", "json"])
-    assert result.exit_code == 2
+    assert result.exit_code == USAGE_EXIT_CODE
     assert result.stdout == ""
     envelope = json.loads(result.stderr.strip().splitlines()[-1])
     assert envelope["code"] == "usage"
@@ -401,14 +402,15 @@ def test_a_limit_below_one_is_refused_the_same_way_on_the_ndjson_path(monkeypatc
     station = _EventStation([StationEvent(at=1.0, name="power.on", detail="on", payload={})])
     app = _wire(monkeypatch, station, tmp_path)
     result = CliRunner().invoke(app, ["monitor", "--limit", "-3", "--format", "ndjson"])
-    assert result.exit_code == 2
+    assert result.exit_code == USAGE_EXIT_CODE
     assert result.stdout == ""
     assert json.loads(result.stderr.strip().splitlines()[-1])["code"] == "usage"
 
 
-def test_monitors_help_explains_what_exit_nine_means_for_a_monitor():
-    """The metadata row's own comment explained 9 while the help text an operator
-    reads printed the generic "aborted by the operator" class summary."""
+def test_monitors_help_explains_what_an_interrupt_means_for_a_monitor():
+    """The metadata row's own comment explained the interrupt while the help text an
+    operator reads printed the generic class summary. The code the override is keyed
+    by moved from 9 to 130 in 0.3.0; the sentence it prints did not change."""
     result = CliRunner().invoke(real_app, ["monitor", "--help"])
     assert result.exit_code == 0
     assert "Ctrl-C" in result.stdout
