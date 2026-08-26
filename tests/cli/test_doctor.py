@@ -28,10 +28,9 @@ from railctl.cli.render import render
 from railctl.cli.result import LinkInfo, StationInfo
 from railctl.errors import (
     DecoderNotRespondingError,
-    TransportError,
     exit_code_for,
 )
-from railctl.exit_codes import PARTIAL_EXIT_CODE
+from railctl.exit_codes import DOMAIN_FAILURE_EXIT_CODE, PARTIAL_EXIT_CODE
 from railctl.station import (
     UNKNOWN_IDENTITY,
     Capabilities,
@@ -132,13 +131,16 @@ def test_bench_scenario_track_unpowered_no_power_on_exits_zero():
     assert result.result["checks"][4]["status"] == "skip"  # D4
 
 
-def test_a_failed_link_check_exits_three():
+def test_a_failed_link_check_is_a_domain_failure():
     checks = (Check(id="D0", title="link", status="fail", detail="port not found"),)
     report = DoctorReport(checks=checks, capabilities=Capabilities.unknown("unknown"))
     assert report.ok is False
     result = build_doctor(report, saved_to=None)
     assert result.ok is False
-    assert result.exit_code == exit_code_for(TransportError("x"))
+    # `exit_code_for_report`'s own failing value, not any exception's: the doctor
+    # reports a failed probe as a result rather than raising, and what failed is in
+    # the report. It was a 3 of its own until 0.3.0.
+    assert result.exit_code == DOMAIN_FAILURE_EXIT_CODE
 
 
 def test_human_output_ends_with_the_four_line_verdict_and_json_carries_the_same_lines():
@@ -262,7 +264,7 @@ def test_a_probe_failure_outranks_the_partial_hold_code_but_still_warns():
         layout=LayoutState(energised=True, held=None),
     )
     result = build_doctor(report, saved_to=None)
-    assert result.exit_code == exit_code_for(TransportError("x"))
+    assert result.exit_code == DOMAIN_FAILURE_EXIT_CODE
     assert [w.name for w in result.warnings] == ["hold_not_confirmed"]
 
 
@@ -363,7 +365,7 @@ def test_a_declined_power_on_says_the_track_was_off_and_still_is():
     assert result.warnings == []
 
 
-def test_a_failed_probe_that_could_not_idle_the_loco_keeps_exit_three():
+def test_a_failed_probe_that_could_not_idle_the_loco_keeps_the_failure_code():
     """Same precedence as the hold warning, in the other partial: the locomotive is
     still named as able to start, and the bigger failure keeps the exit code."""
     checks = (Check(id="D0", title="link", status="fail", detail="port not found"),)
@@ -376,7 +378,7 @@ def test_a_failed_probe_that_could_not_idle_the_loco_keeps_exit_three():
     )
     result = build_doctor(report, saved_to=None)
     assert [w.name for w in result.warnings] == ["loco_not_idled"]
-    assert result.exit_code == exit_code_for(TransportError("x"))
+    assert result.exit_code == DOMAIN_FAILURE_EXIT_CODE
 
 
 def test_a_track_switched_back_off_is_never_reported_as_able_to_move():

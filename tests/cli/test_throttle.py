@@ -984,6 +984,10 @@ def test_drive_positive_speed_refuses_on_emergency_off(monkeypatch):
     station = FakeStation(status=EMERGENCY_OFF_STATUS)
     app = _app(station, monkeypatch)
     result = runner.invoke(app, ["drive", "30"])
+    # The condition, not only the refusal: an active service-mode session refuses
+    # here too, and since 0.3.0 both leave the same exit code. Human mode here, so
+    # the message is what carries it.
+    assert "emergency off" in result.stderr
     assert result.exit_code == exit_code_for(TrackPowerError("x"))
     assert "drive" not in station.call_names
 
@@ -1221,6 +1225,7 @@ def test_function_refuses_on_emergency_off(monkeypatch):
     station = FakeStation(status=EMERGENCY_OFF_STATUS)
     app = _app(station, monkeypatch)
     result = runner.invoke(app, ["function", "f2", "on"])
+    assert "emergency off" in result.stderr
     assert result.exit_code == exit_code_for(TrackPowerError("x"))
     assert not any(name in ("function_set", "function_toggle") for name in station.call_names)
 

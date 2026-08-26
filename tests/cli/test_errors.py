@@ -644,7 +644,14 @@ def test_run_sends_every_format_error_to_stderr_only(fmt: str):
         run("power on", ctx, work)
     assert caught.value.exit_code == exit_code_for(TrackPowerError("x"))
     assert ctx.stdout.getvalue() == ""
-    assert ctx.stderr.getvalue() != ""
+    # Not just "stderr is non-empty": every domain failure exits 9 since 0.3.0, so
+    # without naming the failure this test would pass for any of them. Human mode
+    # writes prose rather than an envelope, so it is checked on its own terms.
+    written = ctx.stderr.getvalue()
+    if fmt == "human":
+        assert "track power is off" in written
+    else:
+        assert json.loads(written.strip().splitlines()[-1])["code"] == TrackPowerError.code
 
 
 def test_run_times_the_work_and_reports_a_non_zero_elapsed_ms(monkeypatch):

@@ -893,8 +893,12 @@ def test_cv_read_total_pom_silence_keeps_the_stations_own_story(monkeypatch):
         ),
     )
     result = runner.invoke(app, ["cv", "read", "8", "--address", "3", "--format", "json"])
-    assert result.exit_code == exit_code_for(DecoderNotRespondingError("x")), result.stderr
-    assert _stderr_envelope(result)["hint"] is None
+    envelope = _stderr_envelope(result)
+    # The code, not only the number: every programming failure exits 9 since 0.3.0,
+    # so the status alone cannot say the decoder went silent rather than refusing.
+    assert envelope["code"] == DecoderNotRespondingError.code, result.stderr
+    assert result.exit_code == exit_code_for(DecoderNotRespondingError("x"))
+    assert envelope["hint"] is None
 
 
 def test_cv_read_a_mixed_batch_is_a_partial_result_not_an_error(monkeypatch):
@@ -1049,7 +1053,10 @@ def test_cv_write_main_preflight_refuses_on_an_emergency_state(monkeypatch):
     result = runner.invoke(
         app, ["cv", "write", "3", "20", "--track", "main", "--address", "3", "--format", "json"]
     )
-    assert result.exit_code == exit_code_for(TrackPowerError("x")), result.stderr
+    # Which refusal, not just that one happened: the pre-flight can also refuse with
+    # station_busy, and both exit 9.
+    assert _stderr_envelope(result)["code"] == TrackPowerError.code, result.stderr
+    assert result.exit_code == exit_code_for(TrackPowerError("x"))
     assert _publishes("cv write", TrackPowerError.code)
     assert fake.write_calls == []
 

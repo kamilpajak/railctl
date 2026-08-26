@@ -937,6 +937,7 @@ def test_open_station_failure_writes_json_stderr_with_empty_stdout(monkeypatch):
     assert result.exit_code == exit_code_for(TransportError("x"))
     assert result.stdout == ""
     payload = json.loads(result.stderr)
+    assert payload["code"] == TransportError.code
     assert payload["exit_code"] == exit_code_for(TransportError("x"))
 
 
