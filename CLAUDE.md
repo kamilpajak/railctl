@@ -6,7 +6,9 @@ A CLI that drives a YaMoRC YD7010 command station over XpressNet on a USB serial
 
 **A capability must never be recorded as absent because the instrument measuring it was broken.** It happened four times while probing the real hardware, and each time the fix was in the tool, not the station.
 
-Three outcomes stay distinguishable end to end — in the dataclass, in the JSON (`true` / `false` / `null`), in the human text (`yes` / `no` / `unknown`) and in the exit code:
+Three outcomes stay distinguishable end to end — in the dataclass, in the JSON
+(`true` / `false` / `null`), in the human text (`yes` / `no` / `unknown`) and in
+`error.code`:
 
 - **true** — measured working.
 - **false** — the station said so. Only a `61 82` *Unsupported* reply earns this.
@@ -17,6 +19,20 @@ Silence is `unknown`. On this hardware a POM CV read returns nothing at all — 
 The doctor makes **one** deliberate exception, and it is the only place in the codebase where `false` may follow anything but a `61 82`: D4 records `pom_read = false` after total silence, because leaving it `null` makes every `AUTO` operation retry POM for seconds on end, forever. That exception carries its own provenance — **`pom_read_provenance` is `"unsupported"` or `"silence"`**, so the difference lives in the type and not in a prose note. Anything that must not act on a guess reads that field, not `pom_read`.
 
 The parallel is DNS negative caching (RFC 2308): an authoritative `NXDOMAIN` may be cached, a timeout may not be cached as one. `61 82` is authoritative; silence is a timeout. Wherever `pom_read` becomes `false` — the doctor's D4, or `CvProgrammer.pom_read` on a `61 82` mid-session — the provenance is written in the same call.
+
+**`error.code` is the channel, and since 0.3.0 it is the only one.** This sentence used
+to end "and in the exit code", and two tests in `tests/unit/test_exit_codes.py` held
+silence, refusal and out-of-scope at three separate exit codes so that a caller reading
+only `$?` could tell them apart. That was given up deliberately, because it contradicted
+the other rule this project is judged against: a small documented exit-code set, with
+domain detail in `error.code` rather than in the process status (`~/Developer/CLAUDE.md`,
+"CLI Design"). Twenty-one exit codes were the price of keeping it, and eleven of them
+said nothing `error.code` did not already say.
+
+What `$?` still separates is the one distinction a caller can ACT on without reading
+anything: `7` means try again, everything else does not. Which of the three outcomes
+happened is read from `error.code`, and `railctl schema` lists every value it can take.
+Issue #65 has the full reasoning.
 
 When you touch a parser, an error path or a capability field, ask which of the three a caller will see, and whether a defect in your own code could produce the wrong one.
 
