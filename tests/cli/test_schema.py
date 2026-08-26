@@ -29,8 +29,9 @@ from railctl.cli._meta import (
     typer_argument,
     typer_option,
 )
-from railctl.cli.result import PARTIAL_EXIT_CODE, RESERVED_CODES, RETRYABLE_CODES
+from railctl.cli.result import RESERVED_CODES, RETRYABLE_CODES
 from railctl.errors import EXIT_CODES
+from railctl.exit_codes import PARTIAL_EXIT_CODE
 
 # `PARTIAL_EXIT_CODE` names no exception class - a partial run is a RESULT, not an
 # error - so it reaches this set from `result.py` rather than from the exit-code map.

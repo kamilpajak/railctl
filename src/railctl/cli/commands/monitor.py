@@ -35,8 +35,9 @@ from railctl.cli._meta import MONITOR_LIMIT, command_meta, global_option, help_e
 from railctl.cli.config import capabilities_path
 from railctl.cli.deps import UsageProblem, close_after, close_quietly, merged_output, open_station
 from railctl.cli.render import NdjsonStream
-from railctl.cli.result import INTERNAL_EXIT_CODE, USAGE_EXIT_CODE, CommandResult, ErrorReport
+from railctl.cli.result import CommandResult, ErrorReport
 from railctl.errors import AbortedError, RailctlError, exit_code_for
+from railctl.exit_codes import INTERNAL_EXIT_CODE, USAGE_EXIT_CODE
 from railctl.station import EVENT_NAMES
 
 if TYPE_CHECKING:

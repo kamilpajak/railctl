@@ -50,7 +50,8 @@ from railctl.cli.deps import (
     open_station,
     station_info,
 )
-from railctl.cli.result import PARTIAL_EXIT_CODE, CommandResult, ResultWarning, tri_state
+from railctl.cli.result import CommandResult, ResultWarning, tri_state
+from railctl.exit_codes import PARTIAL_EXIT_CODE
 from railctl.station import (
     Capabilities,
     Check,

@@ -42,17 +42,12 @@ RESERVED_CODES: Final[frozenset[str]] = frozenset({USAGE_CODE, INTERNAL_CODE})
 # (UnsupportedCommandError) or a bug (everything else), neither of which gets better on retry.
 RETRYABLE_CODES: Final[frozenset[str]] = frozenset({"link_timeout", "station_busy", "port_busy"})
 
-USAGE_EXIT_CODE: Final[int] = 2
-INTERNAL_EXIT_CODE: Final[int] = 1
-
-#: Some steps of a multi-step mutation ran and a later one failed. Not an error
-#: envelope: the whole value of this code is the report of WHAT completed, and
-#: that report is a result. A `CommandResult` carrying it sets `ok=False` and
-#: goes to stdout like any other result, so a caller can tell "nothing
-#: happened" from "the track is on but the locomotive was not idled" without
-#: parsing prose. Names no exception class, which is why `_meta` owns its
-#: one-line meaning alongside 0/1/2.
-PARTIAL_EXIT_CODE: Final[int] = 8
+# The exit-code constants moved to `railctl.exit_codes` in 0.3.0 (#65). They are
+# NOT re-exported from here on purpose: a stale
+# `from railctl.cli.result import PARTIAL_EXIT_CODE` is now an ImportError, which
+# is the loudest and cheapest way to find every site that had one. What stays in
+# this module is the `error.code` STRING contract above, which is a different
+# thing and is now the channel carrying the detail the exit code used to.
 
 
 def error_code(exc: BaseException) -> str:

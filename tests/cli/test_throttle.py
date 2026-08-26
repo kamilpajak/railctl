@@ -25,7 +25,6 @@ from railctl.cli._errors import OutputContext
 from railctl.cli._meta import FUNCTION_STATE_ARG, POWER_STATE_ARG
 from railctl.cli.commands import power, throttle
 from railctl.cli.deps import Settings
-from railctl.cli.result import PARTIAL_EXIT_CODE
 from railctl.errors import (
     FunctionGroupUnreadableError,
     LinkTimeout,
@@ -37,6 +36,7 @@ from railctl.errors import (
     UnsupportedCommandError,
     XBusChecksumError,
 )
+from railctl.exit_codes import PARTIAL_EXIT_CODE
 from railctl.xbus.replies import LocoInfo, StationStatus
 from railctl.xbus.speed import Direction
 

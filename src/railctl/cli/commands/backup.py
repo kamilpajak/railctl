@@ -120,7 +120,7 @@ from railctl.cli.deps import (
     station_info,
 )
 from railctl.cli.render import NdjsonStream
-from railctl.cli.result import USAGE_EXIT_CODE, CommandResult, ErrorReport
+from railctl.cli.result import CommandResult, ErrorReport
 from railctl.errors import (
     AbortedError,
     BackupIncompleteError,
@@ -129,6 +129,7 @@ from railctl.errors import (
     RailctlError,
     exit_code_for,
 )
+from railctl.exit_codes import USAGE_EXIT_CODE
 from railctl.station import CvPage, CvReadOutcome, CvResult, CvSpec, ProgMode
 from railctl.xbus.cv import MAX_CV_DIRECT, MAX_CV_EXT, MAX_CV_Z21
 

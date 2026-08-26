@@ -42,7 +42,6 @@ from railctl.cli.commands.cv import (
 from railctl.cli.cvspec import parse_cv_spec
 from railctl.cli.deps import UsageProblem
 from railctl.cli.main import app
-from railctl.cli.result import PARTIAL_EXIT_CODE
 from railctl.errors import (
     CvOutOfRangeError,
     CvVerifyError,
@@ -50,6 +49,7 @@ from railctl.errors import (
     IndexPageRequiredError,
     UnsupportedCommandError,
 )
+from railctl.exit_codes import PARTIAL_EXIT_CODE
 from railctl.station import (
     Capabilities,
     CvEncoding,

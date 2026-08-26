@@ -45,13 +45,16 @@ from railctl.cli.deps import (
 from railctl.cli.result import (
     ERROR_SCHEMA,
     INTERNAL_CODE,
-    INTERNAL_EXIT_CODE,
-    PARTIAL_EXIT_CODE,
     RESERVED_CODES,
     RETRYABLE_CODES,
     USAGE_CODE,
-    USAGE_EXIT_CODE,
     error_code,
+)
+from railctl.exit_codes import (
+    INTERNAL_EXIT_CODE,
+    PARTIAL_EXIT_CODE,
+    SUCCESS_EXIT_CODE,
+    USAGE_EXIT_CODE,
 )
 from railctl.xbus.speed import MAX_SPEED_STEP
 
@@ -197,13 +200,30 @@ GLOBAL_OPTIONS: Final[tuple[Option, ...]] = (
 
 _GLOBAL_BY_NAME: Final[dict[str, Option]] = {o.name: o for o in GLOBAL_OPTIONS}
 
+
 #: What an operator interrupt leaves the process with, in every command and on all three
 #: routes (`_errors.run()`, `main()`'s `typer.Abort` branch, and `main()`'s parse-time
 #: branch): they all publish `AbortedError`, which takes `RailctlError`'s own code because
 #: it has no row of its own. Read through `exit_code_for` rather than written as the number,
 #: so the set a command PUBLISHES is taken from the same table the envelope's `exit_code`
 #: field is.
-ABORTED_EXIT_CODE: Final[int] = errors.exit_code_for(errors.AbortedError(""))
+def _for(klass: type[errors.RailctlError]) -> int:
+    """The exit code a class resolves to, asked of the map rather than typed out.
+
+    Every published tuple below is written in these terms. Before #65 they were
+    literals, which made them a second copy of `errors.EXIT_CODES` that a remap had to
+    remember to update - and the `--help` page would have gone on advertising codes the
+    map no longer produced, silently, because nothing compares the two. Written this way
+    the tuples cannot drift: they say WHICH FAILURES a command can reach, and the numbers
+    follow from that.
+
+    `__new__` rather than a constructor: several classes take required keyword arguments
+    (`cv=`, `condition=`), and nothing here needs an initialised instance.
+    """
+    return errors.exit_code_for(klass.__new__(klass))
+
+
+ABORTED_EXIT_CODE: Final[int] = _for(errors.AbortedError)
 
 # The codes a command publishes whatever else it does: success, the internal-error safety
 # net, a refused invocation, and the interrupt. The interrupt was missing while it was
@@ -214,7 +234,9 @@ ABORTED_EXIT_CODE: Final[int] = errors.exit_code_for(errors.AbortedError(""))
 # unknown-exit-code arm. Pinned by
 # `tests/cli/test_usage_envelope.py::test_every_command_publishes_the_exit_code_an_interrupt_leaves`,
 # which walks every row in the manifest.
-BASE_EXIT_CODES: Final[tuple[int, ...]] = (0, 1, 2, ABORTED_EXIT_CODE)
+BASE_EXIT_CODES: Final[tuple[int, ...]] = tuple(
+    sorted({SUCCESS_EXIT_CODE, INTERNAL_EXIT_CODE, USAGE_EXIT_CODE, ABORTED_EXIT_CODE})
+)
 
 # Every code a command that opens a `Station` and goes through `Station.exchange()` can
 # actually leave the process with: the base 0/1/2, transport 3, protocol 4, silence 5, the
@@ -231,7 +253,19 @@ BASE_EXIT_CODES: Final[tuple[int, ...]] = (0, 1, 2, ABORTED_EXIT_CODE)
 # reachable by reading `Station.exchange` and its callers but are not exercised end to end. Do
 # NOT "tighten" this tuple to the observed four - that is the same defect the comment above
 # describes, running the other way.
-STATION_EXIT_CODES: Final[tuple[int, ...]] = (0, 1, 2, 3, 4, 5, 6, 7, 9)
+STATION_EXIT_CODES: Final[tuple[int, ...]] = tuple(
+    sorted(
+        {
+            *BASE_EXIT_CODES,
+            _for(errors.TransportError),
+            _for(errors.ProtocolError),
+            _for(errors.LinkTimeout),
+            _for(errors.UnsupportedCommandError),
+            _for(errors.UnsupportedFeatureError),
+            _for(errors.RailctlError),
+        }
+    )
+)
 
 # All three `power` states go through `Station._settle_power`, which raises
 # `TrackPowerError` (20) when the station still disagrees after the settle
@@ -246,7 +280,7 @@ STATION_EXIT_CODES: Final[tuple[int, ...]] = (0, 1, 2, 3, 4, 5, 6, 7, 9)
 # in order already; sorting here is what keeps that from being a property the
 # next addition has to remember.
 POWER_EXIT_CODES: Final[tuple[int, ...]] = tuple(
-    sorted({*STATION_EXIT_CODES, PARTIAL_EXIT_CODE, 20})
+    sorted({*STATION_EXIT_CODES, PARTIAL_EXIT_CODE, _for(errors.TrackPowerError)})
 )
 
 # `drive SPEED>0` and `function` both run `throttle.preflight`, which refuses
@@ -254,7 +288,9 @@ POWER_EXIT_CODES: Final[tuple[int, ...]] = tuple(
 # `StationBusyError` (12) on an active service-mode session. Published because
 # they are reachable, not because a test happens to drive them - though
 # tests/cli/test_schema.py drives both, per the rule in design spec L6.
-THROTTLE_EXIT_CODES: Final[tuple[int, ...]] = (*STATION_EXIT_CODES, 12, 20)
+THROTTLE_EXIT_CODES: Final[tuple[int, ...]] = tuple(
+    sorted({*STATION_EXIT_CODES, _for(errors.StationBusyError), _for(errors.TrackPowerError)})
+)
 
 #: `doctor` publishes 8 for the same reading `power on` publishes it for: the track
 #: is live because this run energised it, and the station never confirmed the hold
@@ -562,12 +598,43 @@ CV_WRITE_TRACK_OPT = Option(
 #: "can produce" set: reachability drives in tests/cli/test_cv.py cover 15 and
 #: 17 among others.
 CV_READ_EXIT_CODES: Final[tuple[int, ...]] = tuple(
-    sorted({*STATION_EXIT_CODES, PARTIAL_EXIT_CODE, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20})
+    sorted(
+        {
+            *STATION_EXIT_CODES,
+            PARTIAL_EXIT_CODE,
+            _for(errors.DecoderNoAckError),
+            _for(errors.ShortCircuitError),
+            _for(errors.StationBusyError),
+            _for(errors.DecoderNotRespondingError),
+            _for(errors.CvVerifyError),
+            _for(errors.CvOutOfRangeError),
+            _for(errors.PomReadUnsupportedError),
+            _for(errors.IndexPageRequiredError),
+            _for(errors.ServiceEncodingUnknownError),
+            _for(errors.ProgrammingError),
+            _for(errors.TrackPowerError),
+        }
+    )
 )
 #: A write adds 14 (`CvVerifyError`: the read-back disagreed) and drops the
 #: partial 8 - one CV either was written or the command failed saying why.
 CV_WRITE_EXIT_CODES: Final[tuple[int, ...]] = tuple(
-    sorted({*STATION_EXIT_CODES, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20})
+    sorted(
+        {
+            *STATION_EXIT_CODES,
+            _for(errors.DecoderNoAckError),
+            _for(errors.ShortCircuitError),
+            _for(errors.StationBusyError),
+            _for(errors.DecoderNotRespondingError),
+            _for(errors.CvVerifyError),
+            _for(errors.CvOutOfRangeError),
+            _for(errors.PomReadUnsupportedError),
+            _for(errors.IndexPageRequiredError),
+            _for(errors.ServiceEncodingUnknownError),
+            _for(errors.ProgrammingError),
+            _for(errors.TrackPowerError),
+        }
+    )
 )
 
 _CV_READ = CommandMeta(
@@ -808,7 +875,9 @@ RESTORE_CONFIRM_OPT = Option(
 #: nothing here can reach it: `PomReadUnsupportedError` is raised only where
 #: POM was asked for, and `restore` has no POM path at all (D1). 9 carries
 #: several restore-specific meanings - see `_COMMAND_EXIT_MEANINGS`.
-RESTORE_EXIT_CODES: Final[tuple[int, ...]] = tuple(sorted(set(CV_WRITE_EXIT_CODES) - {16}))
+RESTORE_EXIT_CODES: Final[tuple[int, ...]] = tuple(
+    sorted(set(CV_WRITE_EXIT_CODES) - {_for(errors.PomReadUnsupportedError)})
+)
 
 _RESTORE = CommandMeta(
     path="restore",
@@ -890,7 +959,14 @@ DIFF_INCLUDE_SWEEP_OPT = Option(
 #: wrong page instead of moving it. 16 is gone for the reason `restore` drops
 #: it: there is no POM path here to raise it (M10 D1).
 DIFF_EXIT_CODES: Final[tuple[int, ...]] = tuple(
-    sorted(set(CV_READ_EXIT_CODES) - {PARTIAL_EXIT_CODE, 14, 16})
+    sorted(
+        set(CV_READ_EXIT_CODES)
+        - {
+            PARTIAL_EXIT_CODE,
+            _for(errors.CvVerifyError),
+            _for(errors.PomReadUnsupportedError),
+        }
+    )
 )
 
 _DIFF = CommandMeta(

@@ -132,7 +132,7 @@ from railctl.cli.deps import (
     station_info,
 )
 from railctl.cli.render import NdjsonStream
-from railctl.cli.result import USAGE_EXIT_CODE, CommandResult, ErrorReport
+from railctl.cli.result import CommandResult, ErrorReport
 from railctl.errors import (
     AbortedError,
     CvVerifyError,
@@ -143,6 +143,7 @@ from railctl.errors import (
     RestoreFileIncompleteError,
     exit_code_for,
 )
+from railctl.exit_codes import USAGE_EXIT_CODE
 from railctl.station import (
     CV144,
     PAGE_SELECTOR_CVS,

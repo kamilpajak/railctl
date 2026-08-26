@@ -23,10 +23,8 @@ from railctl.cli.config import VERBOSE_ENV
 from railctl.cli.render import render, render_error
 from railctl.cli.result import (
     INTERNAL_CODE,
-    INTERNAL_EXIT_CODE,
     RETRYABLE_CODES,
     USAGE_CODE,
-    USAGE_EXIT_CODE,
     CommandResult,
     ErrorReport,
     Format,
@@ -47,6 +45,7 @@ from railctl.errors import (
     TrackPowerError,
     exit_code_for,
 )
+from railctl.exit_codes import INTERNAL_EXIT_CODE, USAGE_EXIT_CODE
 
 
 @dataclass(frozen=True, slots=True)

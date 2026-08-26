@@ -26,7 +26,8 @@ from railctl.cli._click_errors import ClickException, ClickUsageError
 from railctl.cli._errors import OutputContext, aborted_report, run
 from railctl.cli._meta import error_codes, manifest
 from railctl.cli._parse_context import ParseContextTyper
-from railctl.cli.result import ERROR_SCHEMA, INTERNAL_CODE, USAGE_CODE, USAGE_EXIT_CODE
+from railctl.cli.result import ERROR_SCHEMA, INTERNAL_CODE, USAGE_CODE
+from railctl.exit_codes import USAGE_EXIT_CODE
 
 
 def _exit_code(monkeypatch, argv: list[str]) -> int:

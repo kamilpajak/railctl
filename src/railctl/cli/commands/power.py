@@ -48,8 +48,9 @@ from railctl.cli.deps import (
     open_station,
     read_loco,
 )
-from railctl.cli.result import PARTIAL_EXIT_CODE, CommandResult, error_code, tri_state
+from railctl.cli.result import CommandResult, error_code, tri_state
 from railctl.errors import CONDITION_TRACK_DEAD, RailctlError, TrackPowerError
+from railctl.exit_codes import PARTIAL_EXIT_CODE
 from railctl.station import Station
 from railctl.xbus.replies import StationStatus
 from railctl.xbus.speed import Direction

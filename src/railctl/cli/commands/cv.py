@@ -73,7 +73,7 @@ from railctl.cli.deps import (
     require_address,
     station_info,
 )
-from railctl.cli.result import PARTIAL_EXIT_CODE, CommandResult, error_code, tri_state
+from railctl.cli.result import CommandResult, error_code, tri_state
 from railctl.errors import (
     REASON_VALUE_OUT_OF_RANGE,
     ConfirmationRequiredError,
@@ -84,6 +84,7 @@ from railctl.errors import (
     RailctlError,
     ServiceEncodingUnknownError,
 )
+from railctl.exit_codes import PARTIAL_EXIT_CODE
 from railctl.station import (
     ADDRESS_CVS,
     CV144,

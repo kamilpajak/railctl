@@ -25,8 +25,9 @@ from railctl.cli.commands.doctor import (
 from railctl.cli.deps import HELD_LINES, RESUME_COMMAND
 from railctl.cli.main import app as real_app
 from railctl.cli.render import render
-from railctl.cli.result import PARTIAL_EXIT_CODE, LinkInfo, StationInfo
+from railctl.cli.result import LinkInfo, StationInfo
 from railctl.errors import DecoderNotRespondingError
+from railctl.exit_codes import PARTIAL_EXIT_CODE
 from railctl.station import (
     UNKNOWN_IDENTITY,
     Capabilities,
