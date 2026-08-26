@@ -45,7 +45,7 @@ from railctl.errors import (
     TrackPowerError,
     exit_code_for,
 )
-from railctl.exit_codes import INTERNAL_EXIT_CODE, USAGE_EXIT_CODE
+from railctl.exit_codes import INTERNAL_EXIT_CODE, INTERRUPTED_EXIT_CODE, USAGE_EXIT_CODE
 
 
 @dataclass(frozen=True, slots=True)
@@ -372,6 +372,38 @@ def _internal_report(
     )
 
 
+def leave(code: int) -> NoReturn:
+    """End the process with `code`, by the route that code needs.
+
+    `typer.Exit` for everything except the interrupt, and the exception is not a
+    preference. With `standalone_mode=False`, `typer.core._main` RETURNS the code a
+    `typer.Exit` carries instead of raising it - so once `aborted` became 130 in
+    0.3.0, a `typer.Exit(130)` from here would reach `main()` as the plain integer
+    130, which is `main()`'s sentinel for a Ctrl-C typer caught while PARSING.
+    `main()` would then write a second envelope for an interrupt this function has
+    already reported, putting two JSON values on the one stream the contract says
+    carries exactly one.
+
+    `SystemExit` passes through Click and typer untouched, so the report written
+    just above is the only one, and the only 130 that can still reach the sentinel
+    is typer's own. Pinned by
+    `tests/cli/test_errors.py::test_an_interrupt_inside_a_command_body_leaves_by_system_exit`.
+
+    Public within the cli package because `run()` is not the only caller: the four
+    ndjson streaming paths (`monitor`, `backup`, `restore`, `diff`) deliberately
+    bypass `run()` - they have already written their own summary line - and each of
+    them can end on an interrupt, so each needs this same route out.
+
+    Both of `run()`'s endings come through here, not only the error one: `monitor`
+    reports an interrupted run as a RESULT carrying the interrupt code - a monitor
+    that ran until the operator stopped it did its job - and that route would reach
+    the sentinel exactly the same way.
+    """
+    if code == INTERRUPTED_EXIT_CODE:
+        raise SystemExit(INTERRUPTED_EXIT_CODE)
+    raise typer.Exit(code=code)
+
+
 def run(command: str, ctx: OutputContext, work: Callable[[], CommandResult]) -> NoReturn:
     start = time.monotonic()
     try:
@@ -404,7 +436,7 @@ def run(command: str, ctx: OutputContext, work: Callable[[], CommandResult]) -> 
         # time a script comparing two invocations actually cares about.
         result.elapsed_ms = round((time.monotonic() - start) * 1000)
         render(result, fmt=ctx.fmt, stdout=ctx.stdout, color=ctx.stdout_color)
-        raise typer.Exit(code=result.exit_code)
+        leave(result.exit_code)
 
     render_error(report, stderr=ctx.stderr, fmt=ctx.fmt, color=ctx.stderr_color)
-    raise typer.Exit(code=report.exit_code)
+    leave(report.exit_code)

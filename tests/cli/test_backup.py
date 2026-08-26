@@ -38,14 +38,22 @@ from railctl.cli.commands.backup import (
 from railctl.cli.commands.cv import PROG_TRACK_NOTICE, SILENCE_GUIDANCE
 from railctl.cli.main import app
 from railctl.errors import (
+    AbortedError,
+    BackupFileError,
+    BackupIncompleteError,
+    ConfirmationRequiredError,
     CvOutOfRangeError,
     DecoderNotRespondingError,
     IndexPageRequiredError,
     PomReadUnsupportedError,
     ServiceEncodingUnknownError,
     ShortCircuitError,
+    StationBusyError,
+    TrackPowerError,
     UnsupportedCommandError,
+    exit_code_for,
 )
+from railctl.exit_codes import DOMAIN_FAILURE_EXIT_CODE, USAGE_EXIT_CODE
 from railctl.station import (
     Capabilities,
     CvEncoding,
@@ -227,8 +235,14 @@ def _stderr_envelope(result) -> dict[str, object]:
     return json.loads(result.stderr.strip().splitlines()[-1])
 
 
-def _published(code: int) -> bool:
-    return code in command_meta("backup").exit_codes
+def _publishes(code: str) -> bool:
+    """Whether the manifest says `backup` can fail this way.
+
+    A claim about `error.code` since 0.3.0. `backup` publishes seven exit codes and
+    most of these failures share one of them, so asking `exit_codes` would answer yes
+    for failures this command cannot reach - a guard that cannot go red.
+    """
+    return code in command_meta("backup").error_codes
 
 
 def _freeze_clock(monkeypatch) -> None:
@@ -247,10 +261,24 @@ def test_the_backup_row_publishes_its_safety_facts():
     assert meta.mutates is False
     assert meta.confirms is True
     assert meta.schema == BACKUP_SCHEMA
-    # `cv read`'s whole set: a backup is a batch of CV reads through the same
-    # station paths, and 9/16 - the codes the brief adds - were already in it.
+    # `cv read`'s whole family: a backup is a batch of CV reads through the same
+    # station paths. It adds the two endings that are about the FILE, which is why
+    # the exit-code sets are equal and the error-code sets are not.
     assert meta.exit_codes == command_meta("cv read").exit_codes
-    assert {2, 9, 12, 13, 16, 17, 20} <= set(meta.exit_codes)
+    assert set(command_meta("cv read").error_codes) < set(meta.error_codes)
+    # The failures this command is judged on, named. Asserted on `error_codes`
+    # since 0.3.0 - most of these share exit 9, so the same claim about
+    # `exit_codes` would hold for failures backup cannot reach.
+    assert {
+        ConfirmationRequiredError.code,
+        BackupIncompleteError.code,
+        BackupFileError.code,
+        StationBusyError.code,
+        DecoderNotRespondingError.code,
+        PomReadUnsupportedError.code,
+        IndexPageRequiredError.code,
+        TrackPowerError.code,
+    } <= set(meta.error_codes)
 
 
 # -- the happy path, all three formats ---------------------------------------
@@ -429,7 +457,7 @@ def test_backup_existing_file_is_refused_before_the_station_opens(monkeypatch, t
     out = tmp_path / "already.json"
     out.write_text("{}", encoding="utf-8")
     result = runner.invoke(app, ["backup", "--address", "3", "--out", str(out), "--format", "json"])
-    assert result.exit_code == 2, result.stderr
+    assert result.exit_code == USAGE_EXIT_CODE, result.stderr
     envelope = _stderr_envelope(result)
     assert envelope["code"] == "usage"
     assert envelope["details"]["reason"] == "backup_file_exists"
@@ -461,7 +489,7 @@ def test_backup_refusal_suggestion_keeps_every_typed_flag(monkeypatch, tmp_path)
             "json",
         ],
     )
-    assert result.exit_code == 2, result.stderr
+    assert result.exit_code == USAGE_EXIT_CODE, result.stderr
     assert _stderr_envelope(result)["suggestions"] == [
         [
             "railctl",
@@ -503,7 +531,7 @@ def test_backup_refusal_suggestion_keeps_typed_global_flags(monkeypatch, tmp_pat
             "--yes",
         ],
     )
-    assert result.exit_code == 2, result.stderr
+    assert result.exit_code == USAGE_EXIT_CODE, result.stderr
     assert _stderr_envelope(result)["suggestions"] == [
         [
             "railctl",
@@ -541,7 +569,7 @@ def test_backup_refusal_suggestion_keeps_the_remaining_typed_globals(monkeypatch
             "--non-interactive",
         ],
     )
-    assert result.exit_code == 2, result.stderr
+    assert result.exit_code == USAGE_EXIT_CODE, result.stderr
     assert _stderr_envelope(result)["suggestions"] == [
         [
             "railctl",
@@ -576,7 +604,7 @@ def test_backup_force_overwrites_the_existing_file(monkeypatch, tmp_path):
 def test_backup_without_an_address_is_a_usage_error(monkeypatch):
     _boom_open(monkeypatch)
     result = runner.invoke(app, ["backup", "--format", "json"])
-    assert result.exit_code == 2
+    assert result.exit_code == USAGE_EXIT_CODE
     envelope = _stderr_envelope(result)
     assert envelope["code"] == "usage"
     assert envelope["suggestions"] == [["railctl", "backup", "--address", "3"]]
@@ -585,14 +613,14 @@ def test_backup_without_an_address_is_a_usage_error(monkeypatch):
 def test_backup_a_bad_mode_exits_2(monkeypatch):
     _boom_open(monkeypatch)
     result = runner.invoke(app, ["backup", "--address", "3", "--mode", "xml", "--format", "json"])
-    assert result.exit_code == 2
+    assert result.exit_code == USAGE_EXIT_CODE
     assert "--mode must be one of" in _stderr_envelope(result)["message"]
 
 
 def test_backup_a_bad_page_exits_2(monkeypatch):
     _boom_open(monkeypatch)
     result = runner.invoke(app, ["backup", "--address", "3", "--page", "145", "--format", "json"])
-    assert result.exit_code == 2
+    assert result.exit_code == USAGE_EXIT_CODE
     assert _stderr_envelope(result)["details"]["reason"] == "malformed_page"
 
 
@@ -604,10 +632,10 @@ def test_backup_mode_pom_on_a_measured_no_exits_16(monkeypatch):
     result = runner.invoke(
         app, ["backup", "--address", "3", "--out", "-", "--mode", "pom", "--format", "json"]
     )
-    assert result.exit_code == 16, result.stderr
-    assert _published(16)
+    assert result.exit_code == exit_code_for(PomReadUnsupportedError("x")), result.stderr
     envelope = _stderr_envelope(result)
     assert envelope["code"] == "pom_read_unsupported"
+    assert _publishes(envelope["code"])
     # Both remedies, named: the re-probe as a runnable argv, the programming
     # track in the hint.
     assert envelope["suggestions"] == [["railctl", "doctor"]]
@@ -645,19 +673,30 @@ def test_backup_auto_resolves_pom_only_on_a_measured_yes(monkeypatch, tmp_path):
 
 
 @pytest.mark.parametrize(
-    ("raw_status", "expected_exit"),
-    [(0x02, 20), (0x01, 20), (0x08, 12)],
+    ("raw_status", "expected_code"),
+    [
+        (0x02, TrackPowerError.code),
+        (0x01, TrackPowerError.code),
+        (0x08, StationBusyError.code),
+    ],
     ids=["emergency-off", "emergency-stop", "service-mode"],
 )
-def test_backup_pom_preflight_refusals_exit_with_published_codes(
-    monkeypatch, raw_status: int, expected_exit: int
+def test_backup_pom_preflight_refusals_report_published_codes(
+    monkeypatch, raw_status: int, expected_code: str
 ):
+    """The POM pre-flight refuses, and the refusal is one the manifest names.
+
+    Asked of `error.code`: both refusals exit 9 since 0.3.0, along with the station
+    family every command carries, so the exit code cannot say which one arrived.
+    """
     fake = _install(
         monkeypatch, FakeBackupStation(capabilities=POM_YES_CAPS, raw_status=raw_status)
     )
     result = runner.invoke(app, ["backup", "--address", "3", "--out", "-", "--format", "json"])
-    assert result.exit_code == expected_exit, result.stderr
-    assert _published(expected_exit)
+    envelope = _stderr_envelope(result)
+    assert envelope["code"] == expected_code, result.stderr
+    assert _publishes(envelope["code"])
+    assert result.exit_code in command_meta("backup").exit_codes
     assert fake.batch_calls == []  # nothing was read
 
 
@@ -678,10 +717,10 @@ def test_backup_nonzero_page_without_the_flag_exits_17(monkeypatch, tmp_path):
     out = tmp_path / "never.json"
     _install(monkeypatch, FakeBackupStation(read_values={31: 145}))
     result = runner.invoke(app, ["backup", "--address", "3", "--out", str(out), "--format", "json"])
-    assert result.exit_code == 17, result.stderr
-    assert _published(17)
+    assert result.exit_code == exit_code_for(IndexPageRequiredError("x")), result.stderr
     envelope = _stderr_envelope(result)
     assert envelope["code"] == "index_page_required"
+    assert _publishes(envelope["code"])
     assert "--page 145:0" in envelope["message"]  # the runnable acknowledgement
     assert not out.exists()
 
@@ -705,7 +744,7 @@ def test_backup_on_a_real_cv_page_still_aborts_and_names_the_neutral_banks(monke
     out = tmp_path / "never.json"
     _install(monkeypatch, FakeBackupStation(read_values={31: 145, 32: 2}))
     result = runner.invoke(app, ["backup", "--address", "3", "--out", str(out), "--format", "json"])
-    assert result.exit_code == 17, result.stderr
+    assert result.exit_code == exit_code_for(IndexPageRequiredError("x")), result.stderr
     envelope = _stderr_envelope(result)
     assert "--page 145:2" in envelope["message"]
     assert "0:0, 0:1" in envelope["message"]
@@ -750,10 +789,10 @@ def test_backup_cv29_silence_aborts_13_with_the_placement_hint(monkeypatch, tmp_
         FakeBackupStation(read_errors={29: DecoderNotRespondingError("no result", cv=29)}),
     )
     result = runner.invoke(app, ["backup", "--address", "3", "--out", str(out), "--format", "json"])
-    assert result.exit_code == 13, result.stderr
-    assert _published(13)
+    assert result.exit_code == exit_code_for(DecoderNotRespondingError("x")), result.stderr
     envelope = _stderr_envelope(result)
     assert envelope["code"] == "decoder_not_responding"
+    assert _publishes(envelope["code"])
     assert envelope["hint"] == SILENCE_GUIDANCE
     assert not out.exists()
 
@@ -764,8 +803,8 @@ def test_backup_a_selector_failure_aborts_with_its_own_code(monkeypatch):
         FakeBackupStation(read_errors={31: UnsupportedCommandError("station answered 61 82")}),
     )
     result = runner.invoke(app, ["backup", "--address", "3", "--out", "-", "--format", "json"])
-    assert result.exit_code == 6, result.stderr
-    assert _published(6)
+    assert result.exit_code == exit_code_for(UnsupportedCommandError("x")), result.stderr
+    assert _publishes(_stderr_envelope(result)["code"])
 
 
 # -- holes: the exit-9 incomplete file ----------------------------------------
@@ -787,11 +826,11 @@ def test_backup_an_unreadable_cv_is_a_no_response_hole_and_exit_9(monkeypatch, t
         ),
     )
     result = runner.invoke(app, ["backup", "--address", "3", "--out", str(out), "--format", "json"])
-    assert result.exit_code == 9, result.stderr
-    assert _published(9)
+    assert result.exit_code == exit_code_for(BackupIncompleteError("x")), result.stderr
     payload = json.loads(result.stdout)
     assert payload["ok"] is False
-    assert payload["exit_code"] == 9
+    assert payload["exit_code"] == result.exit_code
+    assert _publishes(BackupIncompleteError.code)
     warning = next(w for w in payload["warnings"] if w["name"] == "backup.incomplete")
     assert "CV250" in warning["message"] and "CV253" in warning["message"]
     assert warning["details"]["path"] == str(out)
@@ -840,7 +879,7 @@ def test_the_incomplete_report_stops_naming_holes_but_never_stops_counting_them(
 
     result = runner.invoke(app, ["backup", "--address", "3", "--out", str(out), "--format", "json"])
 
-    assert result.exit_code == 9, result.stderr
+    assert result.exit_code == DOMAIN_FAILURE_EXIT_CODE, result.stderr
     warning = next(
         w for w in json.loads(result.stdout)["warnings"] if w["name"] == "backup.incomplete"
     )
@@ -857,7 +896,7 @@ def test_backup_a_station_error_row_also_makes_the_file_incomplete(monkeypatch, 
         FakeBackupStation(read_errors={65: UnsupportedCommandError("station answered 61 82")}),
     )
     result = runner.invoke(app, ["backup", "--address", "3", "--out", str(out), "--format", "json"])
-    assert result.exit_code == 9, result.stderr
+    assert result.exit_code == DOMAIN_FAILURE_EXIT_CODE, result.stderr
     payload = json.loads(result.stdout)
     warning = next(w for w in payload["warnings"] if w["name"] == "backup.incomplete")
     assert warning["details"]["error"] == [65]
@@ -873,7 +912,7 @@ def test_backup_incomplete_to_stdout_still_delivers_the_document(monkeypatch):
         FakeBackupStation(read_errors={253: DecoderNotRespondingError("no answer", cv=253)}),
     )
     result = runner.invoke(app, ["backup", "--address", "3", "--out", "-", "--format", "json"])
-    assert result.exit_code == 9, result.stderr
+    assert result.exit_code == DOMAIN_FAILURE_EXIT_CODE, result.stderr
     payload = json.loads(result.stdout)
     assert payload["ok"] is False
     body = payload["result"]
@@ -893,7 +932,7 @@ def test_backup_incomplete_human_still_prints_every_row(monkeypatch, tmp_path):
         ),
     )
     result = runner.invoke(app, ["backup", "--address", "3", "--out", str(out)])
-    assert result.exit_code == 9, result.stderr
+    assert result.exit_code == DOMAIN_FAILURE_EXIT_CODE, result.stderr
     assert f"CV8 manufacturer_id = {DEFAULT_VALUE}" in result.stdout
     assert "CV253 serial_byte_3: no_response (no answer after 3 attempts)" in result.stdout
     assert "complete: no" in result.stdout
@@ -910,7 +949,7 @@ def test_backup_station_events_still_reach_an_incomplete_envelope(monkeypatch):
         ),
     )
     result = runner.invoke(app, ["backup", "--address", "3", "--out", "-", "--format", "json"])
-    assert result.exit_code == 9, result.stderr
+    assert result.exit_code == DOMAIN_FAILURE_EXIT_CODE, result.stderr
     names = [w["name"] for w in json.loads(result.stdout)["warnings"]]
     assert "cv.stale_result" in names
     assert "backup.incomplete" in names
@@ -930,7 +969,7 @@ def test_backup_a_mid_run_refusal_is_an_error_row_and_exit_9(monkeypatch, tmp_pa
     out = tmp_path / "refused.json"
     _install(monkeypatch, FakeBackupStation(read_errors={65: error}))
     result = runner.invoke(app, ["backup", "--address", "3", "--out", str(out), "--format", "json"])
-    assert result.exit_code == 9, result.stderr
+    assert result.exit_code == DOMAIN_FAILURE_EXIT_CODE, result.stderr
     on_disk = json.loads(out.read_text(encoding="utf-8"))
     row = next(r for r in on_disk["cvs"] if r["cv"] == 65)
     assert row["status"] == "error"
@@ -1021,18 +1060,18 @@ def test_backup_write_failure_is_backup_file_exit_9(monkeypatch, tmp_path):
         app,
         ["backup", "--address", "3", "--out", str(blocker / "x.json"), "--format", "json"],
     )
-    assert result.exit_code == 9, result.stderr
+    assert result.exit_code == DOMAIN_FAILURE_EXIT_CODE, result.stderr
     assert _stderr_envelope(result)["code"] == "backup_file"
 
 
 # -- Ctrl-C: the partial file --------------------------------------------------
 
 
-def test_backup_ctrl_c_writes_the_partial_file_and_exits_9(monkeypatch, tmp_path):
+def test_backup_ctrl_c_writes_the_partial_file_and_reports_aborted(monkeypatch, tmp_path):
     out = tmp_path / "partial.json"
     _install(monkeypatch, FakeBackupStation(interrupt_after=8))
     result = runner.invoke(app, ["backup", "--address", "3", "--out", str(out), "--format", "json"])
-    assert result.exit_code == 9, result.stderr
+    assert result.exit_code == exit_code_for(AbortedError("x")), result.stderr
     envelope = _stderr_envelope(result)
     assert envelope["code"] == "aborted"
     assert envelope["details"]["path"] == str(out)
@@ -1051,7 +1090,7 @@ def test_backup_ctrl_c_before_the_curated_list_writes_nothing(monkeypatch, tmp_p
     out = tmp_path / "nothing.json"
     _install(monkeypatch, FakeBackupStation(interrupt_singleton=31))
     result = runner.invoke(app, ["backup", "--address", "3", "--out", str(out), "--format", "json"])
-    assert result.exit_code == 9, result.stderr
+    assert result.exit_code == exit_code_for(AbortedError("x")), result.stderr
     envelope = _stderr_envelope(result)
     assert envelope["code"] == "aborted"
     assert "no backup file was written" in envelope["message"]
@@ -1061,7 +1100,7 @@ def test_backup_ctrl_c_before_the_curated_list_writes_nothing(monkeypatch, tmp_p
 def test_backup_ctrl_c_with_a_stdout_target_names_the_reason_nothing_was_kept(monkeypatch):
     _install(monkeypatch, FakeBackupStation(interrupt_after=2))
     result = runner.invoke(app, ["backup", "--address", "3", "--out", "-", "--format", "json"])
-    assert result.exit_code == 9, result.stderr
+    assert result.exit_code == exit_code_for(AbortedError("x")), result.stderr
     assert "stdout" in _stderr_envelope(result)["message"]
 
 
@@ -1115,14 +1154,14 @@ def test_backup_ndjson_incomplete_run_still_ends_in_a_summary_with_exit_9(monkey
     result = runner.invoke(
         app, ["backup", "--address", "3", "--out", str(out), "--format", "ndjson"]
     )
-    assert result.exit_code == 9, result.stderr
+    assert result.exit_code == DOMAIN_FAILURE_EXIT_CODE, result.stderr
     lines = _ndjson_lines(result.stdout)
     assert [line["sequence"] for line in lines] == list(range(len(lines)))
     summary = lines[-1]
     assert summary["type"] == "summary"
     assert summary["complete"] is False
     assert summary["no_response"] == 1
-    assert summary["exit_code"] == 9
+    assert summary["exit_code"] == DOMAIN_FAILURE_EXIT_CODE
     assert _stderr_envelope(result)["code"] == "backup_incomplete"
     assert out.exists()
 
@@ -1148,7 +1187,7 @@ def test_backup_ndjson_no_response_line_carries_attempts_and_the_file_row_does_n
     result = runner.invoke(
         app, ["backup", "--address", "3", "--out", str(out), "--format", "ndjson"]
     )
-    assert result.exit_code == 9, result.stderr
+    assert result.exit_code == DOMAIN_FAILURE_EXIT_CODE, result.stderr
     lines = _ndjson_lines(result.stdout)
     counted = next(line for line in lines if line["type"] == "cv" and line["cv"] == 253)
     assert counted["status"] == "no_response"
@@ -1165,11 +1204,11 @@ def test_backup_ndjson_ctrl_c_streams_the_summary_after_the_partial_file(monkeyp
     result = runner.invoke(
         app, ["backup", "--address", "3", "--out", str(out), "--format", "ndjson"]
     )
-    assert result.exit_code == 9, result.stderr
+    assert result.exit_code == exit_code_for(AbortedError("x")), result.stderr
     lines = _ndjson_lines(result.stdout)
     summary = lines[-1]
     assert summary["type"] == "summary"
-    assert summary["exit_code"] == 9
+    assert summary["exit_code"] == exit_code_for(AbortedError("x"))
     assert summary["path"] == str(out)
     document = read_backup(out)
     assert document.interrupted is True
@@ -1195,13 +1234,13 @@ def test_backup_ndjson_mode_refusal_still_owes_the_stream_its_summary(monkeypatc
         app,
         ["backup", "--address", "3", "--out", str(out), "--mode", "pom", "--format", "ndjson"],
     )
-    assert result.exit_code == 16, result.stderr
+    assert result.exit_code == exit_code_for(PomReadUnsupportedError("x")), result.stderr
     lines = _ndjson_lines(result.stdout)
     assert len(lines) == 1
     assert lines[0]["type"] == "summary"
     assert lines[0]["requested"] == 0
     assert lines[0]["complete"] is False
-    assert lines[0]["exit_code"] == 16
+    assert lines[0]["exit_code"] == exit_code_for(PomReadUnsupportedError("x"))
     assert _stderr_envelope(result)["code"] == "pom_read_unsupported"
 
 
@@ -1213,10 +1252,10 @@ def test_backup_ndjson_page_refusal_summarises_what_little_was_asked(monkeypatch
     result = runner.invoke(
         app, ["backup", "--address", "3", "--out", str(out), "--format", "ndjson"]
     )
-    assert result.exit_code == 17, result.stderr
+    assert result.exit_code == exit_code_for(IndexPageRequiredError("x")), result.stderr
     lines = _ndjson_lines(result.stdout)
     assert [line["type"] for line in lines] == ["summary"]
-    assert lines[0]["exit_code"] == 17
+    assert lines[0]["exit_code"] == exit_code_for(IndexPageRequiredError("x"))
     assert _stderr_envelope(result)["code"] == "index_page_required"
 
 
@@ -1229,7 +1268,7 @@ def test_backup_ndjson_with_a_stdout_target_is_refused_before_anything_opens(mon
     result = runner.invoke(
         app, ["backup", "--address", "3", "--out", "-", "--format", "ndjson", "--yes"]
     )
-    assert result.exit_code == 2, result.stderr
+    assert result.exit_code == USAGE_EXIT_CODE, result.stderr
     assert result.stdout == ""
     envelope = _stderr_envelope(result)
     assert envelope["code"] == "usage"
@@ -1246,7 +1285,7 @@ def test_backup_ndjson_stdout_refusal_with_env_format_appends_format_json(monkey
     _boom_open(monkeypatch)
     monkeypatch.setenv("RAILCTL_FORMAT", "ndjson")
     result = runner.invoke(app, ["backup", "--address", "3", "--out", "-"])
-    assert result.exit_code == 2, result.stderr
+    assert result.exit_code == USAGE_EXIT_CODE, result.stderr
     assert result.stdout == ""
     assert _stderr_envelope(result)["suggestions"] == [
         ["railctl", "backup", "--address", "3"],
@@ -1259,7 +1298,7 @@ def test_backup_ndjson_stdout_refusal_comes_before_the_missing_address(monkeypat
     # suggestions simply omit `--address` rather than inventing one.
     _boom_open(monkeypatch)
     result = runner.invoke(app, ["backup", "--out", "-", "--format", "ndjson"])
-    assert result.exit_code == 2, result.stderr
+    assert result.exit_code == USAGE_EXIT_CODE, result.stderr
     assert result.stdout == ""
     assert _stderr_envelope(result)["suggestions"] == [
         ["railctl", "backup", "--format", "ndjson"],
@@ -1279,7 +1318,7 @@ def test_backup_ndjson_a_mid_batch_station_failure_counts_what_was_measured(monk
         app,
         ["backup", "--address", "3", "--out", str(tmp_path / "short.json"), "--format", "ndjson"],
     )
-    assert result.exit_code == 11, result.stderr
+    assert result.exit_code == exit_code_for(ShortCircuitError("x")), result.stderr
     assert _stderr_envelope(result)["code"] == "short_circuit"
     summary = _ndjson_lines(result.stdout)[-1]
     assert summary["type"] == "summary"
@@ -1287,18 +1326,18 @@ def test_backup_ndjson_a_mid_batch_station_failure_counts_what_was_measured(monk
     assert summary["ok"] == 3
     assert summary["skipped"] == len(OVER_BOUND)
     assert summary["complete"] is False
-    assert summary["exit_code"] == 11
+    assert summary["exit_code"] == exit_code_for(ShortCircuitError("x"))
 
 
 def test_backup_ndjson_usage_refusal_produces_no_stream_at_all(monkeypatch):
     _boom_open(monkeypatch)
     result = runner.invoke(app, ["backup", "--address", "3", "--mode", "xml", "--format", "ndjson"])
-    assert result.exit_code == 2
+    assert result.exit_code == USAGE_EXIT_CODE
     assert result.stdout == ""
     assert _stderr_envelope(result)["code"] == "usage"
 
 
-def test_backup_ndjson_interrupt_before_the_station_opened_exits_9_quietly(monkeypatch, tmp_path):
+def test_backup_ndjson_interrupt_before_the_station_opened_leaves_no_stream(monkeypatch, tmp_path):
     def interrupted_open(*_a, **_k):
         raise KeyboardInterrupt
 
@@ -1307,7 +1346,7 @@ def test_backup_ndjson_interrupt_before_the_station_opened_exits_9_quietly(monke
     result = runner.invoke(
         app, ["backup", "--address", "3", "--out", str(out), "--format", "ndjson"]
     )
-    assert result.exit_code == 9
+    assert result.exit_code == exit_code_for(AbortedError("x"))
     assert result.stdout == ""
     assert result.stderr == ""
 
@@ -1483,7 +1522,7 @@ def test_a_sweep_past_the_minute_is_refused_on_a_non_interactive_stdin(monkeypat
     fake = _install(monkeypatch, FakeBackupStation(capabilities=SERVICE_CAPS))
     out = tmp_path / "asked.json"
     result = runner.invoke(app, _sweep_argv("--format", "json", out=str(out)))
-    assert result.exit_code == 2, result.stderr
+    assert result.exit_code == USAGE_EXIT_CODE, result.stderr
     envelope = _stderr_envelope(result)
     assert envelope["code"] == "confirmation_required"
     # The question names the count and the duration a person is agreeing to.
@@ -1517,7 +1556,7 @@ def test_the_refused_sweep_keeps_the_force_the_operator_typed(monkeypatch, tmp_p
     out = tmp_path / "already-there.json"
     out.write_text("{}", encoding="utf-8")
     result = runner.invoke(app, _sweep_argv("--force", "--format", "json", out=str(out)))
-    assert result.exit_code == 2, result.stderr
+    assert result.exit_code == USAGE_EXIT_CODE, result.stderr
     envelope = _stderr_envelope(result)
     assert envelope["code"] == "confirmation_required"
     suggestion = envelope["suggestions"][0]
@@ -1876,7 +1915,7 @@ def test_a_sweep_with_silent_cvs_exits_9_like_any_other_hole(monkeypatch, tmp_pa
     _install(monkeypatch, FakeBackupStation(capabilities=SERVICE_CAPS, read_errors=silent))
     out = tmp_path / "holes-all.json"
     result = runner.invoke(app, _sweep_argv("--yes", out=str(out)))
-    assert result.exit_code == 9, result.stderr
+    assert result.exit_code == DOMAIN_FAILURE_EXIT_CODE, result.stderr
     assert "a sweep normally exits 9" in result.stdout
     assert "the file is the product either way" in result.stdout
     assert read_backup(out).summary["no_response"] == 2
@@ -1899,7 +1938,7 @@ def test_ctrl_c_mid_sweep_leaves_a_partial_file_answering_for_the_whole_range(
     out = tmp_path / "partial-all.json"
     _install(monkeypatch, FakeBackupStation(capabilities=SERVICE_CAPS, interrupt_after=8))
     result = runner.invoke(app, _sweep_argv("--format", "json", "--yes", out=str(out)))
-    assert result.exit_code == 9, result.stderr
+    assert result.exit_code == exit_code_for(AbortedError("x")), result.stderr
     assert _stderr_envelope(result)["code"] == "aborted"
     document = read_backup(out)
     assert document.interrupted is True

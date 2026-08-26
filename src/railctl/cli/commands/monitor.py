@@ -30,7 +30,7 @@ from typing import TYPE_CHECKING, Final, NoReturn
 
 import typer
 
-from railctl.cli._errors import OutputContext, report_for, run, usage_report
+from railctl.cli._errors import OutputContext, leave, report_for, run, usage_report
 from railctl.cli._meta import MONITOR_LIMIT, command_meta, global_option, help_epilog, typer_option
 from railctl.cli.config import capabilities_path
 from railctl.cli.deps import UsageProblem, close_after, close_quietly, merged_output, open_station
@@ -111,7 +111,8 @@ def stream_monitor(station: Station, *, ndjson: NdjsonStream, limit: int | None 
     """Stream `station.events()` as ndjson `event` lines, always finishing with one
     `summary` line - even on Ctrl-C. Returns the event count.
 
-    `KeyboardInterrupt` is caught here only to record `complete=False, exit_code=9`
+    `KeyboardInterrupt` is caught here only to record `complete=False` and the
+    interrupt code
     for that closing line; the `finally` block writes it, and then the interrupt is
     RE-RAISED rather than swallowed. Catching it and returning normally instead would
     give stdout its summary line while leaving the caller with no way to know the run
@@ -184,7 +185,7 @@ def _run_ndjson(settings: Settings, output: OutputContext, limit: int | None) ->
         print(_START_NOTICE, end="", file=output.stderr)
         stream_monitor(station, ndjson=NdjsonStream(output.stdout), limit=limit)
     except KeyboardInterrupt:
-        raise typer.Exit(code=_ABORTED_EXIT_CODE) from None
+        leave(_ABORTED_EXIT_CODE)
     except ValueError as exc:
         # `run()`'s own ValueError branch, by hand, for the same reason the
         # `RailctlError` branch below is: this path never calls `run()`. Without it a
@@ -204,7 +205,7 @@ def _fail_envelope(report: ErrorReport, output: OutputContext, *, exit_code: int
     """One JSON object on stderr, then exit - the shape `render_error` gives every other
     command, written here because this path deliberately never calls `run()`."""
     output.stderr.write(json.dumps(report.envelope(), separators=(",", ":")) + "\n")
-    raise typer.Exit(code=exit_code)
+    leave(exit_code)
 
 
 def _checked_limit(limit: int | None) -> int | None:

@@ -31,6 +31,15 @@ from __future__ import annotations
 
 from typing import ClassVar, Final
 
+from railctl.exit_codes import (
+    DOMAIN_FAILURE_EXIT_CODE,
+    INTERNAL_EXIT_CODE,
+    INTERRUPTED_EXIT_CODE,
+    NOT_FOUND_EXIT_CODE,
+    RETRYABLE_EXIT_CODE,
+    USAGE_EXIT_CODE,
+)
+
 
 class RailctlError(Exception):
     """Base for everything this package raises on purpose.
@@ -493,36 +502,54 @@ class ConfirmationRequiredError(RailctlError):
         self.retry_argv = retry_argv
 
 
+#: Class -> process exit code. Eight values, declared in `railctl/exit_codes.py`;
+#: this table only says which of them each failure lands on.
+#:
+#: Most rows are absent on purpose. `exit_code_for` walks the MRO, so anything
+#: without its own row takes its nearest mapped ancestor's - and after #65 the
+#: nearest ancestor is almost always `RailctlError` itself. Before that collapse
+#: there were eighteen rows and eleven distinct numbers below, one per class,
+#: which made `$?` a second spelling of `error.code`. What a caller can now act
+#: on without reading anything is retryable-or-not; which failure it was is
+#: `error.code`.
 EXIT_CODES: Final[dict[type[RailctlError], int]] = {
-    TransportError: 3,
-    ProtocolError: 4,
-    LinkTimeout: 5,
-    UnsupportedCommandError: 6,
-    UnsupportedFeatureError: 7,
-    RailctlError: 9,
-    DecoderNoAckError: 10,
-    ShortCircuitError: 11,
-    StationBusyError: 12,
-    DecoderNotRespondingError: 13,
-    CvVerifyError: 14,
-    CvOutOfRangeError: 15,
-    PomReadUnsupportedError: 16,
-    IndexPageRequiredError: 17,
-    ServiceEncodingUnknownError: 18,
-    ProgrammingError: 19,
-    TrackPowerError: 20,
-    ConfirmationRequiredError: 2,
+    # The three the caller may usefully retry, and exactly these. Kept identical
+    # to `cli.result.RETRYABLE_CODES` by
+    # `tests/unit/test_exit_codes.py::test_exactly_the_retryable_codes_exit_with_the_retryable_status`,
+    # which compares the two sets in both directions - a class added to one and
+    # not the other is the defect this collapse was made to fix.
+    LinkTimeout: RETRYABLE_EXIT_CODE,
+    StationBusyError: RETRYABLE_EXIT_CODE,
+    PortBusy: RETRYABLE_EXIT_CODE,
+    # A port that was named and is not there. The only "not found" this tool has;
+    # a malformed reply is a domain failure, and confusing the two is what made
+    # the old 4 contradict the convention it shares a number with.
+    PortNotFound: NOT_FOUND_EXIT_CODE,
+    # Refused before anything ran, so the caller can fix the command line.
+    ConfirmationRequiredError: USAGE_EXIT_CODE,
+    # The operator stopped the run. `cli/_errors.run` raises SystemExit for this
+    # rather than typer.Exit - see its comment; typer returns an Exit's code as a
+    # plain int, which would reach `main()`'s 130 sentinel and print a second
+    # envelope.
+    AbortedError: INTERRUPTED_EXIT_CODE,
+    # Everything else. Every class not listed above inherits this through the MRO.
+    RailctlError: DOMAIN_FAILURE_EXIT_CODE,
 }
 
-UNMAPPED_EXIT_CODE: Final[int] = 1
+#: Retired as a separate name in 0.3.0: it was 1 and so is `INTERNAL_EXIT_CODE`.
+#: "No row matched" and "railctl has a bug" are the same fact - a class the map
+#: cannot resolve IS a bug - so they are one name now.
+UNMAPPED_EXIT_CODE: Final[int] = INTERNAL_EXIT_CODE
 
 
 def exit_code_for(exc: BaseException) -> int:
     """Most specific mapped exit code for `exc`, or 1 when nothing matches.
 
-    Walks `type(exc).__mro__`, so a new subclass inherits its parent's code
-    until it is given one of its own. `StationError` has no row and resolves to
-    the base 9 on purpose, exactly as the exit-code table states.
+    Walks `type(exc).__mro__`, so a subclass inherits its parent's code unless it
+    is given one of its own - and after #65 most classes have none, resolving to
+    `DOMAIN_FAILURE_EXIT_CODE` through `RailctlError`. That is the design, not an
+    omission: the number says whether to retry, and `error.code` says what
+    happened.
     """
     for klass in type(exc).__mro__:
         code = EXIT_CODES.get(klass)  # type: ignore[arg-type]

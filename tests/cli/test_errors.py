@@ -52,7 +52,9 @@ from railctl.errors import (
     UnsupportedCommandError,
     XBusChecksumError,
     XBusDecodeError,
+    exit_code_for,
 )
+from railctl.exit_codes import INTERNAL_EXIT_CODE, PARTIAL_EXIT_CODE, USAGE_EXIT_CODE
 
 
 def _tree(root: type[RailctlError] = RailctlError) -> set[type[RailctlError]]:
@@ -335,7 +337,7 @@ def test_report_for_reads_the_hint_off_the_exception():
     report = report_for(exc, command="drive")
     assert report.hint == "run `railctl power on`"
     assert report.code == "track_power"
-    assert report.exit_code == 20
+    assert report.exit_code == exit_code_for(TrackPowerError("x"))
 
 
 def test_default_suggestions_is_empty_for_an_exception_with_no_known_fix():
@@ -477,15 +479,31 @@ def _ctx(fmt: str = "json") -> OutputContext:
     )
 
 
-def test_run_converts_keyboard_interrupt_to_aborted_exit_9():
+def test_an_interrupt_inside_a_command_body_leaves_by_system_exit():
+    """The exception TYPE is load-bearing here, not only the code it carries.
+
+    `typer.core._main` runs with `standalone_mode=False`, where it RETURNS the code
+    a `typer.Exit` carries instead of raising it. Since `aborted` became 130 in
+    0.3.0, a `typer.Exit(130)` from this path would arrive at `main()` as the plain
+    integer 130 - which is exactly `main()`'s sentinel for a Ctrl-C that typer
+    caught during PARSING - and `main()` would write a second envelope for an
+    interrupt this function already reported. `SystemExit` passes through Click and
+    typer untouched, so the envelope written here is the only one.
+
+    Asserting `pytest.raises(SystemExit)` alone would not catch a regression:
+    `typer.Exit` is not a `SystemExit` subclass, but `CliRunner` converts it into
+    one, so a test driven through the runner would pass either way. This one calls
+    `run()` directly for that reason.
+    """
     ctx = _ctx()
 
     def work() -> CommandResult:
         raise KeyboardInterrupt
 
-    with pytest.raises(typer.Exit) as caught:
+    with pytest.raises(SystemExit) as caught:
         run("stop", ctx, work)
-    assert caught.value.exit_code == 9
+    assert not isinstance(caught.value, typer.Exit)
+    assert caught.value.code == exit_code_for(AbortedError("x"))
     assert ctx.stdout.getvalue() == ""
     body = json.loads(ctx.stderr.getvalue())
     assert body["code"] == "aborted"
@@ -499,7 +517,7 @@ def test_run_reports_a_value_error_as_usage_exit_2():
 
     with pytest.raises(typer.Exit) as caught:
         run("drive", ctx, work)
-    assert caught.value.exit_code == 2
+    assert caught.value.exit_code == USAGE_EXIT_CODE
     assert ctx.stdout.getvalue() == ""
     body = json.loads(ctx.stderr.getvalue())
     assert body == {
@@ -508,7 +526,7 @@ def test_run_reports_a_value_error_as_usage_exit_2():
         "message": "speed must be 0..126",
         "hint": None,
         "retryable": False,
-        "exit_code": 2,
+        "exit_code": USAGE_EXIT_CODE,
         "details": {},
         "suggestions": [],
     }
@@ -522,11 +540,11 @@ def test_run_lets_a_typer_exit_through_with_the_code_it_carries():
     ctx = _ctx()
 
     def work() -> CommandResult:
-        raise typer.Exit(code=8)
+        raise typer.Exit(code=PARTIAL_EXIT_CODE)
 
     with pytest.raises(typer.Exit) as caught:
         run("backup", ctx, work)
-    assert caught.value.exit_code == 8
+    assert caught.value.exit_code == PARTIAL_EXIT_CODE
     assert ctx.stderr.getvalue() == ""
     assert ctx.stdout.getvalue() == ""
 
@@ -552,7 +570,7 @@ def test_run_does_not_blame_the_operator_for_a_malformed_file(exc: ValueError, m
 
     with pytest.raises(typer.Exit) as caught:
         run("restore", ctx, work)
-    assert caught.value.exit_code == 1
+    assert caught.value.exit_code == INTERNAL_EXIT_CODE
     body = json.loads(ctx.stderr.getvalue())
     assert body["code"] == "internal"
 
@@ -565,7 +583,7 @@ def test_run_maps_a_railctl_error_through_exit_code_for():
 
     with pytest.raises(typer.Exit) as caught:
         run("cv write", ctx, work)
-    assert caught.value.exit_code == 14
+    assert caught.value.exit_code == exit_code_for(CvVerifyError("x"))
     assert ctx.stdout.getvalue() == ""
     body = json.loads(ctx.stderr.getvalue())
     assert body["code"] == "cv_verify"
@@ -580,7 +598,7 @@ def test_run_reports_an_unmapped_exception_as_internal_exit_1_without_a_tracebac
 
     with pytest.raises(typer.Exit) as caught:
         run("status", ctx, work)
-    assert caught.value.exit_code == 1
+    assert caught.value.exit_code == INTERNAL_EXIT_CODE
     assert ctx.stdout.getvalue() == ""
     stderr_text = ctx.stderr.getvalue()
     assert json.loads(stderr_text)["code"] == "internal"
@@ -624,7 +642,7 @@ def test_run_sends_every_format_error_to_stderr_only(fmt: str):
 
     with pytest.raises(typer.Exit) as caught:
         run("power on", ctx, work)
-    assert caught.value.exit_code == 20
+    assert caught.value.exit_code == exit_code_for(TrackPowerError("x"))
     assert ctx.stdout.getvalue() == ""
     assert ctx.stderr.getvalue() != ""
 
@@ -666,7 +684,7 @@ def test_a_decoder_not_responding_error_carrying_details_surfaces_them_in_the_en
 
     with pytest.raises(typer.Exit) as caught:
         run("cv read", ctx, work)
-    assert caught.value.exit_code == 13
+    assert caught.value.exit_code == exit_code_for(DecoderNotRespondingError("x"))
     body = json.loads(ctx.stderr.getvalue())
     assert body["details"] == {
         "address": 3,

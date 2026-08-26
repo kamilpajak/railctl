@@ -26,7 +26,11 @@ from railctl.cli.deps import HELD_LINES, RESUME_COMMAND
 from railctl.cli.main import app as real_app
 from railctl.cli.render import render
 from railctl.cli.result import LinkInfo, StationInfo
-from railctl.errors import DecoderNotRespondingError
+from railctl.errors import (
+    DecoderNotRespondingError,
+    TransportError,
+    exit_code_for,
+)
 from railctl.exit_codes import PARTIAL_EXIT_CODE
 from railctl.station import (
     UNKNOWN_IDENTITY,
@@ -50,7 +54,7 @@ def test_decoder_not_responding_never_says_unsupported():
     )
     report = report_for(exc, command="cv read")
     assert report.code == "decoder_not_responding"
-    assert report.exit_code == 13
+    assert report.exit_code == exit_code_for(DecoderNotRespondingError("x"))
     assert "unsupported" not in report.message.lower()
     assert "not supported" not in report.message.lower()
     assert report.suggestions[0] == ["railctl", "doctor"]
@@ -134,7 +138,7 @@ def test_a_failed_link_check_exits_three():
     assert report.ok is False
     result = build_doctor(report, saved_to=None)
     assert result.ok is False
-    assert result.exit_code == 3
+    assert result.exit_code == exit_code_for(TransportError("x"))
 
 
 def test_human_output_ends_with_the_four_line_verdict_and_json_carries_the_same_lines():
@@ -258,7 +262,7 @@ def test_a_probe_failure_outranks_the_partial_hold_code_but_still_warns():
         layout=LayoutState(energised=True, held=None),
     )
     result = build_doctor(report, saved_to=None)
-    assert result.exit_code == 3
+    assert result.exit_code == exit_code_for(TransportError("x"))
     assert [w.name for w in result.warnings] == ["hold_not_confirmed"]
 
 
@@ -372,7 +376,7 @@ def test_a_failed_probe_that_could_not_idle_the_loco_keeps_exit_three():
     )
     result = build_doctor(report, saved_to=None)
     assert [w.name for w in result.warnings] == ["loco_not_idled"]
-    assert result.exit_code == 3
+    assert result.exit_code == exit_code_for(TransportError("x"))
 
 
 def test_a_track_switched_back_off_is_never_reported_as_able_to_move():

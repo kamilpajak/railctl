@@ -72,7 +72,7 @@ import typer
 
 from railctl.backup import BackupDocument, PlannedWrite, plan_restore, read_backup
 from railctl.catalog import load_catalog
-from railctl.cli._errors import OutputContext, report_for, run, usage_report
+from railctl.cli._errors import OutputContext, leave, report_for, run, usage_report
 from railctl.cli._meta import (
     DIFF_FILE_ARG,
     DIFF_INCLUDE_SWEEP_OPT,
@@ -602,7 +602,7 @@ def _run_ndjson(settings: Settings, output: OutputContext, invocation: _Invocati
             stream.summary(**_summary_fields(rows), exit_code=exit_code)
         if station is not None:
             close_quietly(station)
-    raise typer.Exit(code=exit_code)
+    leave(exit_code)
 
 
 def register(app: typer.Typer) -> None:

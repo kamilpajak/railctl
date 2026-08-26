@@ -43,17 +43,26 @@ from railctl.cli.commands.restore import (
 )
 from railctl.cli.main import app
 from railctl.errors import (
+    AbortedError,
+    ConfirmationRequiredError,
+    CvOutOfRangeError,
+    CvVerifyError,
+    DecoderIdentityMismatchError,
     DecoderNoAckError,
     DecoderNotRespondingError,
     IndexPageRequiredError,
     LinkTimeout,
+    PomReadUnsupportedError,
+    ProgrammingError,
     ProtocolError,
     ServiceEncodingUnknownError,
     ShortCircuitError,
     StationBusyError,
     TrackPowerError,
     TransportError,
+    exit_code_for,
 )
+from railctl.exit_codes import DOMAIN_FAILURE_EXIT_CODE, USAGE_EXIT_CODE
 from railctl.station import (
     INDEXED_CV_RANGE,
     PAGE_SELECTOR_CVS,
@@ -355,8 +364,16 @@ def ndjson_lines(text: str) -> list[dict[str, object]]:
     return [json.loads(line) for line in text.strip().splitlines()]
 
 
-def published(code: int) -> bool:
-    return code in command_meta("restore").exit_codes
+def publishes(code: str) -> bool:
+    """Whether the manifest says `restore` can fail this way.
+
+    A claim about `error.code`, not about the exit code, and it had to move there in
+    0.3.0: `restore` publishes six exit codes now and every failure below shares one of
+    them, so `code in meta.exit_codes` would hold for failures this command cannot
+    reach. Called with the code the run actually produced, so a failure renamed in one
+    place and not the other goes red.
+    """
+    return code in command_meta("restore").error_codes
 
 
 def invoke(path: Path, *args: str, fmt: str = "json"):
@@ -376,10 +393,19 @@ def test_the_restore_row_publishes_its_safety_facts():
     assert meta.mutates is True
     assert meta.confirms is True
     assert meta.schema == RESTORE_SCHEMA
-    # 14 is the mismatch table and 15 a file value the catalog refuses; 16 is
-    # absent because `restore` has no POM path that could reach it (D1).
-    assert {2, 9, 14, 15, 17} <= set(meta.exit_codes)
-    assert 16 not in meta.exit_codes
+    # The five failures this command is judged on, and the one it cannot reach.
+    # Asserted on `error_codes` since 0.3.0 - the exit codes stopped telling these
+    # apart, and a claim they can no longer carry is a claim gone quietly vacuous.
+    assert {
+        ConfirmationRequiredError.code,
+        CvVerifyError.code,
+        CvOutOfRangeError.code,
+        IndexPageRequiredError.code,
+        DecoderNotRespondingError.code,
+    } <= set(meta.error_codes)
+    # No POM path exists here (D1), so the POM refusal is not something this command
+    # can produce - the one exclusion the family is built by.
+    assert PomReadUnsupportedError.code not in meta.error_codes
 
 
 def test_the_track_option_publishes_prog_alone():
@@ -482,10 +508,10 @@ def test_a_forced_mismatch_exits_14_with_the_whole_table(monkeypatch, tmp_path):
     # CV3 and CV5 swallow every write; CV4 takes its first one.
     fake = install(monkeypatch, FakeRestoreStation(ignore_writes={3: 99, 5: 99}))
     result = invoke(path, "--yes")
-    assert result.exit_code == 14, result.stderr
-    assert published(14)
+    assert result.exit_code == exit_code_for(CvVerifyError("x")), result.stderr
     report = envelope(result)
     assert report["code"] == "cv_verify"
+    assert publishes(report["code"])
     details = report["details"]
     assert [row["cv"] for row in details["mismatches"]] == [3, 5]
     assert details["mismatches"][0] == {
@@ -651,10 +677,10 @@ def test_a_manufacturer_mismatch_aborts_before_any_write(monkeypatch, tmp_path):
     path = backup_file(tmp_path)
     fake = install(monkeypatch, FakeRestoreStation(values={8: 99}))
     result = invoke(path, "--yes")
-    assert result.exit_code == 9, result.stderr
-    assert published(9)
+    assert result.exit_code == DOMAIN_FAILURE_EXIT_CODE, result.stderr
     report = envelope(result)
     assert report["code"] == "decoder_identity_mismatch"
+    assert publishes(report["code"])
     assert report["details"]["reason"] == "identity_mismatch"
     assert report["details"]["cv"] == 8
     assert fake.writes == []
@@ -664,7 +690,7 @@ def test_a_decoder_type_mismatch_aborts_too(monkeypatch, tmp_path):
     path = backup_file(tmp_path)
     fake = install(monkeypatch, FakeRestoreStation(values={250: 7}))
     result = invoke(path, "--yes")
-    assert result.exit_code == 9, result.stderr
+    assert result.exit_code == DOMAIN_FAILURE_EXIT_CODE, result.stderr
     assert envelope(result)["details"]["cv"] == 250
     assert fake.writes == []
 
@@ -675,7 +701,7 @@ def test_the_hard_half_of_the_gate_is_not_overridable(monkeypatch, tmp_path):
     path = backup_file(tmp_path)
     install(monkeypatch, FakeRestoreStation(values={8: 99}))
     result = invoke(path, "--yes", "--confirm", serial_token(SERIAL))
-    assert result.exit_code == 9, result.stderr
+    assert result.exit_code == DOMAIN_FAILURE_EXIT_CODE, result.stderr
     assert envelope(result)["details"]["reason"] == "identity_mismatch"
 
 
@@ -683,7 +709,7 @@ def test_a_file_with_no_manufacturer_id_is_refused_rather_than_ungated(monkeypat
     path = backup_file(tmp_path, decoder={"decoder_type": MS450_TYPE})
     fake = install(monkeypatch, FakeRestoreStation())
     result = invoke(path, "--yes")
-    assert result.exit_code == 9, result.stderr
+    assert result.exit_code == DOMAIN_FAILURE_EXIT_CODE, result.stderr
     report = envelope(result)
     assert report["details"] == {
         "reason": "identity_not_in_file",
@@ -704,7 +730,7 @@ def test_a_serial_mismatch_names_the_token_that_would_confirm_it(monkeypatch, tm
     )
     fake = install(monkeypatch, FakeRestoreStation())
     result = invoke(path, "--yes")
-    assert result.exit_code == 9, result.stderr
+    assert result.exit_code == DOMAIN_FAILURE_EXIT_CODE, result.stderr
     report = envelope(result)
     assert report["details"]["reason"] == "serial_mismatch"
     assert report["details"]["live"] == SERIAL
@@ -725,7 +751,7 @@ def test_the_serial_confirmation_is_bound_to_the_serial_just_read(monkeypatch, t
     install(monkeypatch, FakeRestoreStation())
     # The FILE's serial is not the token: only the live one is.
     refused = invoke(path, "--yes", "--confirm", "1.2.3")
-    assert refused.exit_code == 9, refused.stderr
+    assert refused.exit_code == DOMAIN_FAILURE_EXIT_CODE, refused.stderr
     install(monkeypatch, FakeRestoreStation())
     accepted = invoke(path, "--yes", "--confirm", "251.105.75")
     assert accepted.exit_code == 0, accepted.stderr
@@ -776,10 +802,10 @@ def test_an_unreadable_identity_cv_aborts_with_the_placement_guidance(monkeypatc
         ),
     )
     result = invoke(path, "--yes")
-    assert result.exit_code == 13, result.stderr
-    assert published(13)
+    assert result.exit_code == exit_code_for(DecoderNotRespondingError("x")), result.stderr
     report = envelope(result)
     assert report["code"] == "decoder_not_responding"
+    assert publishes(report["code"])
     assert report["hint"] == SILENCE_GUIDANCE
     assert fake.writes == []
 
@@ -790,7 +816,7 @@ def test_the_gate_runs_on_a_dry_run_too(monkeypatch, tmp_path):
     path = backup_file(tmp_path)
     install(monkeypatch, FakeRestoreStation(values={8: 99}))
     result = invoke(path, "--dry-run")
-    assert result.exit_code == 9, result.stderr
+    assert result.exit_code == DOMAIN_FAILURE_EXIT_CODE, result.stderr
     assert envelope(result)["code"] == "decoder_identity_mismatch"
 
 
@@ -803,10 +829,10 @@ def test_a_page_the_file_was_not_taken_on_aborts_without_writing_the_selectors(
     path = backup_file(tmp_path)
     fake = install(monkeypatch, FakeRestoreStation(values={31: 145, 32: 2}))
     result = invoke(path, "--yes")
-    assert result.exit_code == 17, result.stderr
-    assert published(17)
+    assert result.exit_code == exit_code_for(IndexPageRequiredError("x")), result.stderr
     report = envelope(result)
     assert report["code"] == "index_page_required"
+    assert publishes(report["code"])
     assert report["details"] == {"live": [145, 2], "file": [0, 0]}
     assert fake.writes == []
 
@@ -818,7 +844,7 @@ def test_cv144_is_a_lock_only_on_a_family_that_locks_on_it(monkeypatch, tmp_path
     )
     fake = install(monkeypatch, FakeRestoreStation(values={250: MX_TYPE, 144: 1}))
     result = invoke(path, "--yes")
-    assert result.exit_code == 9, result.stderr
+    assert result.exit_code == DOMAIN_FAILURE_EXIT_CODE, result.stderr
     report = envelope(result)
     assert report["code"] == "programming_locked"
     assert report["details"] == {"cv": 144, "live": 1, "decoder_type": MX_TYPE}
@@ -858,10 +884,10 @@ def test_a_value_the_catalog_refuses_aborts_before_any_write(monkeypatch, tmp_pa
     path = backup_file(tmp_path, cvs=(record(56, 200, name="brake_distance"),))
     fake = install(monkeypatch, FakeRestoreStation())
     result = invoke(path, "--yes")
-    assert result.exit_code == 15, result.stderr
-    assert published(15)
+    assert result.exit_code == exit_code_for(CvOutOfRangeError("x")), result.stderr
     report = envelope(result)
     assert report["code"] == "cv_out_of_range"
+    assert publishes(report["code"])
     assert report["details"]["out_of_range"] == [{"cv": 56, "value": 200, "min": 0, "max": 99}]
     assert fake.writes == []
 
@@ -870,7 +896,7 @@ def test_with_address_needs_the_whole_address_set_in_the_file(monkeypatch, tmp_p
     path = backup_file(tmp_path, cvs=(record(1, 3, name="primary_address"),))
     fake = install(monkeypatch, FakeRestoreStation())
     result = invoke(path, "--yes", "--with-address")
-    assert result.exit_code == 9, result.stderr
+    assert result.exit_code == DOMAIN_FAILURE_EXIT_CODE, result.stderr
     report = envelope(result)
     assert report["code"] == "address_set_incomplete"
     assert report["details"]["missing"] == [17, 18, 29]
@@ -899,7 +925,7 @@ def test_track_main_is_refused_naming_both_reasons(monkeypatch, tmp_path):
     boom_open(monkeypatch)
     path = backup_file(tmp_path)
     result = invoke(path, "--yes", "--track", "main")
-    assert result.exit_code == 2, result.stderr
+    assert result.exit_code == USAGE_EXIT_CODE, result.stderr
     assert result.stdout == ""
     report = envelope(result)
     assert report["code"] == "usage"
@@ -916,7 +942,7 @@ def test_an_unknown_track_word_is_a_usage_error(monkeypatch, tmp_path):
     boom_open(monkeypatch)
     path = backup_file(tmp_path)
     result = invoke(path, "--track", "prg")
-    assert result.exit_code == 2, result.stderr
+    assert result.exit_code == USAGE_EXIT_CODE, result.stderr
     assert "--track must be one of" in envelope(result)["message"]
 
 
@@ -924,7 +950,7 @@ def test_with_address_and_merge_cv29_contradict_each_other(monkeypatch, tmp_path
     boom_open(monkeypatch)
     path = backup_file(tmp_path)
     result = invoke(path, "--with-address", "--merge-cv29", "--confirm", "1.2.3")
-    assert result.exit_code == 2, result.stderr
+    assert result.exit_code == USAGE_EXIT_CODE, result.stderr
     report = envelope(result)
     assert report["details"]["reason"] == "contradictory_cv29_flags"
     # One runnable argv per way out, each keeping everything else typed -
@@ -953,7 +979,7 @@ def test_a_refusals_suggestion_carries_the_global_flags_typed_after_the_verb(mon
     result = runner.invoke(
         app, ["restore", str(path), "--track", "main", "--json", "--color", "never"]
     )
-    assert result.exit_code == 2, result.stderr
+    assert result.exit_code == USAGE_EXIT_CODE, result.stderr
     assert envelope(result)["suggestions"] == [
         ["railctl", "restore", str(path), "--json", "--color", "never"]
     ]
@@ -962,7 +988,7 @@ def test_a_refusals_suggestion_carries_the_global_flags_typed_after_the_verb(mon
 def test_a_missing_file_is_the_readers_own_error_before_any_port(monkeypatch, tmp_path):
     boom_open(monkeypatch)
     result = invoke(tmp_path / "nothing-here.json")
-    assert result.exit_code == 9, result.stderr
+    assert result.exit_code == DOMAIN_FAILURE_EXIT_CODE, result.stderr
     assert envelope(result)["code"] == "backup_file"
 
 
@@ -976,7 +1002,7 @@ def test_an_incomplete_file_is_refused_before_any_port(monkeypatch, tmp_path):
         ),
     )
     result = invoke(path, "--yes")
-    assert result.exit_code == 9, result.stderr
+    assert result.exit_code == DOMAIN_FAILURE_EXIT_CODE, result.stderr
     report = envelope(result)
     assert report["code"] == "restore_file_incomplete"
     assert report["details"]["no_response"] == 1
@@ -1009,7 +1035,7 @@ def test_the_confirmation_names_the_file_the_loco_the_count_and_the_measured_cos
     path = backup_file(tmp_path)
     install(monkeypatch, FakeRestoreStation())
     result = invoke(path)
-    assert result.exit_code == 2, result.stderr
+    assert result.exit_code == USAGE_EXIT_CODE, result.stderr
     report = envelope(result)
     assert report["code"] == "confirmation_required"
     message = report["message"]
@@ -1035,7 +1061,7 @@ def test_ctrl_c_mid_run_reports_what_was_written_and_rolls_nothing_back(monkeypa
     path = backup_file(tmp_path)
     install(monkeypatch, FakeRestoreStation(interrupt_on_write=5))
     result = invoke(path, "--yes")
-    assert result.exit_code == 9, result.stderr
+    assert result.exit_code == exit_code_for(AbortedError("x")), result.stderr
     report = envelope(result)
     assert report["code"] == "aborted"
     assert report["details"]["written"] == [3, 4]
@@ -1052,7 +1078,7 @@ def test_a_write_that_fails_mid_stage_names_the_cvs_already_written(monkeypatch,
     path = backup_file(tmp_path)
     install(monkeypatch, FakeRestoreStation(write_errors={4: DecoderNoAckError("61 13", cv=4)}))
     result = invoke(path, "--yes")
-    assert result.exit_code == 10, result.stderr
+    assert result.exit_code == exit_code_for(DecoderNoAckError("x")), result.stderr
     report = envelope(result)
     # The station's verdict is still the verdict - only the details grew.
     assert report["code"] == "decoder_no_ack"
@@ -1071,7 +1097,7 @@ def test_a_verification_read_that_fails_names_what_was_written_and_verified(monk
         FakeRestoreStation(read_errors={5: DecoderNotRespondingError("no answer", cv=5)}),
     )
     result = invoke(path, "--yes")
-    assert result.exit_code == 13, result.stderr
+    assert result.exit_code == exit_code_for(DecoderNotRespondingError("x")), result.stderr
     report = envelope(result)
     assert report["code"] == "decoder_not_responding"
     assert (report["details"]["written"], report["details"]["verified"]) == ([3, 4, 5], [3, 4])
@@ -1090,7 +1116,7 @@ def test_a_failure_in_a_later_stage_names_the_stages_that_completed(monkeypatch,
         FakeRestoreStation(write_errors={28: ShortCircuitError("short on the programming track")}),
     )
     result = invoke(path, "--yes")
-    assert result.exit_code == 11, result.stderr
+    assert result.exit_code == exit_code_for(ShortCircuitError("x")), result.stderr
     details = envelope(result)["details"]
     assert (details["stages_completed"], details["stage"]) == (["A"], "B")
     assert details["verified"] == [3, 4, 5]
@@ -1214,13 +1240,13 @@ def test_the_ndjson_summary_is_last_even_on_a_mismatch(monkeypatch, tmp_path):
     path = backup_file(tmp_path)
     install(monkeypatch, FakeRestoreStation(ignore_writes={3: 99}))
     result = invoke(path, "--yes", fmt="ndjson")
-    assert result.exit_code == 14, result.stderr
+    assert result.exit_code == exit_code_for(CvVerifyError("x")), result.stderr
     lines = ndjson_lines(result.stdout)
     stage = next(line for line in lines if line["type"] == "stage")
     assert stage["mismatches"] == [{"cv": 3, "intended": 20, "read": 5}]
     summary = lines[-1]
     assert summary["type"] == "summary"
-    assert summary["exit_code"] == 14
+    assert summary["exit_code"] == exit_code_for(CvVerifyError("x"))
     assert summary["mismatches"] == 1
     assert envelope(result)["code"] == "cv_verify"
 
@@ -1229,32 +1255,32 @@ def test_the_ndjson_gate_refusal_still_owes_the_stream_its_summary(monkeypatch, 
     path = backup_file(tmp_path)
     install(monkeypatch, FakeRestoreStation(values={8: 99}))
     result = invoke(path, "--yes", fmt="ndjson")
-    assert result.exit_code == 9, result.stderr
+    assert result.exit_code == exit_code_for(DecoderIdentityMismatchError("x")), result.stderr
     lines = ndjson_lines(result.stdout)
     # The station opened, so a summary is owed - and nothing was ever planned,
     # so it carries zeros. A consumer keys on `type`, never on position.
     assert [line["type"] for line in lines] == ["summary"]
     assert lines[0]["planned"] == 0
-    assert lines[0]["exit_code"] == 9
+    assert lines[0]["exit_code"] == exit_code_for(DecoderIdentityMismatchError("x"))
 
 
 def test_an_ndjson_usage_refusal_produces_no_stream_at_all(monkeypatch, tmp_path):
     boom_open(monkeypatch)
     path = backup_file(tmp_path)
     result = invoke(path, "--track", "main", fmt="ndjson")
-    assert result.exit_code == 2, result.stderr
+    assert result.exit_code == USAGE_EXIT_CODE, result.stderr
     assert result.stdout == ""
     assert envelope(result)["code"] == "usage"
 
 
-def test_an_ndjson_interrupt_before_the_station_opened_exits_9_quietly(monkeypatch, tmp_path):
+def test_an_ndjson_interrupt_before_the_station_opened_leaves_no_stream(monkeypatch, tmp_path):
     def interrupted_open(*_a, **_k):
         raise KeyboardInterrupt
 
     monkeypatch.setattr(Station, "open", staticmethod(interrupted_open))
     path = backup_file(tmp_path)
     result = invoke(path, "--yes", fmt="ndjson")
-    assert result.exit_code == 9
+    assert result.exit_code == exit_code_for(AbortedError("x"))
     assert result.stdout == ""
 
 
@@ -1262,7 +1288,7 @@ def test_an_ndjson_interrupt_mid_run_still_ends_in_a_summary(monkeypatch, tmp_pa
     path = backup_file(tmp_path)
     install(monkeypatch, FakeRestoreStation(interrupt_on_write=5))
     result = invoke(path, "--yes", fmt="ndjson")
-    assert result.exit_code == 9, result.stderr
+    assert result.exit_code == exit_code_for(AbortedError("x")), result.stderr
     lines = ndjson_lines(result.stdout)
     assert lines[-1]["type"] == "summary"
     assert lines[-1]["written"] == [3, 4]
@@ -1318,35 +1344,42 @@ def test_the_ndjson_stream_carries_events_and_drops_the_same_one(monkeypatch, tm
 
 
 @pytest.mark.parametrize(
-    ("error", "expected"),
+    "error",
     [
-        (TransportError("the port vanished"), 3),
-        (ProtocolError("unparseable telegram"), 4),
-        (LinkTimeout("no reply"), 5),
-        (DecoderNoAckError("61 13", cv=3), 10),
-        (ShortCircuitError("short on the programming track"), 11),
-        (StationBusyError("61 1F"), 12),
-        (ServiceEncodingUnknownError("nothing probed yet"), 18),
-        (TrackPowerError("track power is off"), 20),
+        TransportError("the port vanished"),
+        ProtocolError("unparseable telegram"),
+        LinkTimeout("no reply"),
+        DecoderNoAckError("61 13", cv=3),
+        ShortCircuitError("short on the programming track"),
+        StationBusyError("61 1F"),
+        ServiceEncodingUnknownError("nothing probed yet"),
+        TrackPowerError("track power is off"),
     ],
     ids=lambda value: getattr(value, "__class__", type(value)).__name__,
 )
-def test_a_station_failure_mid_write_exits_with_a_code_restore_publishes(
-    monkeypatch, tmp_path, error, expected
-):
+def test_a_station_failure_mid_write_reports_a_code_restore_publishes(monkeypatch, tmp_path, error):
+    """One case per failure a write can hit, driven through the real command.
+
+    Each case used to name its own exit code, and that number was the whole assertion.
+    Seven of these eight share exit 9 now, so the number cannot say which failure
+    arrived - the envelope's `code` is asked instead, and checked against the family
+    `restore` publishes. Remove a class from `RESTORE_ERRORS` and its case goes red;
+    under an exit-code assertion it would not have.
+    """
     path = backup_file(tmp_path)
     install(monkeypatch, FakeRestoreStation(write_errors={3: error}))
     result = invoke(path, "--yes")
-    assert result.exit_code == expected, result.stderr
-    assert published(expected)
-    assert envelope(result)["exit_code"] == expected
+    report = envelope(result)
+    assert report["code"] == error.code, result.stderr
+    assert publishes(report["code"])
+    assert result.exit_code == exit_code_for(error)
+    assert report["exit_code"] == result.exit_code
 
 
 def test_the_programming_base_code_is_reachable_too(monkeypatch, tmp_path):
-    from railctl.errors import ProgrammingError
 
     path = backup_file(tmp_path)
     install(monkeypatch, FakeRestoreStation(write_errors={3: ProgrammingError("something else")}))
     result = invoke(path, "--yes")
-    assert result.exit_code == 19, result.stderr
-    assert published(19)
+    assert result.exit_code == exit_code_for(ProgrammingError("x")), result.stderr
+    assert publishes(envelope(result)["code"])

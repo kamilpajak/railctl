@@ -25,7 +25,6 @@ from railctl.errors import (
     RailctlError,
     TrackPowerError,
     TransportError,
-    exit_code_for,
 )
 from railctl.link import Link
 from railctl.station.capabilities import UNKNOWN_IDENTITY, Capabilities
@@ -280,10 +279,14 @@ def test_exchange_maps_an_unknown_form_to_railctl_error_carrying_the_bytes(bench
 def test_exchange_keeps_a_bad_cable_and_an_unknown_reply_form_apart(bench, monkeypatch):
     """xbus/replies.py's own docstring on `Other.reason`: "Collapsing these into one value
     leaves the station unable to tell a bad cable from a reply form we do not know." A
-    REASON_CHECKSUM/REASON_LENGTH `Other` is the LINK damaging bytes and gets `ProtocolError`
-    (exit 4); a REASON_EMPTY/REASON_UNKNOWN_FORM `Other` is an incomplete reply table and stays
-    on the base `RailctlError` (exit 9). This is the one test that pins the two exit codes
-    apart from each other - folding either mapping into the other makes this go red.
+    REASON_CHECKSUM/REASON_LENGTH `Other` is the LINK damaging bytes and gets `ProtocolError`;
+    a REASON_EMPTY/REASON_UNKNOWN_FORM `Other` is an incomplete reply table and stays on the
+    base `RailctlError`. This is the one test that pins the two apart - folding either mapping
+    into the other makes it go red.
+
+    The separation is asserted on `error.code`, and since 0.3.0 it has to be: both classes
+    exit 9 now, so an exit-code assertion here would pass with the two mappings merged - the
+    exact defect this test exists to catch, gone silent.
 
     BAD_CHECKSUM_REPLY cannot be scripted through `bench.expect()`: the LI-USB envelope
     (`railctl.envelope.liusb.LiUsbEnvelope.pop`) validates the xbus XOR itself while it hunts
@@ -296,14 +299,14 @@ def test_exchange_keeps_a_bad_cable_and_an_unknown_reply_form_apart(bench, monke
     monkeypatch.setattr(bench.link, "request", lambda telegram, *, timeout=None: BAD_CHECKSUM_REPLY)
     with pytest.raises(ProtocolError) as bad_cable:
         bench.station.version()
-    assert exit_code_for(bad_cable.value) == 4
+    assert bad_cable.value.code == ProtocolError.code
     monkeypatch.setattr(bench.link, "request", original_request)
 
     bench.expect(CMD_STATION_VERSION, UNKNOWN_FORM_REPLY)
     with pytest.raises(RailctlError) as unknown_form:
         bench.station.version()
-    assert exit_code_for(unknown_form.value) == 9
-    assert exit_code_for(bad_cable.value) != exit_code_for(unknown_form.value)
+    assert unknown_form.value.code == RailctlError.code
+    assert bad_cable.value.code != unknown_form.value.code
 
 
 @pytest.mark.parametrize(

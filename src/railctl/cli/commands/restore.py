@@ -99,7 +99,7 @@ from railctl.backup import (
 )
 from railctl.backup.plan import STAGES
 from railctl.catalog import load_catalog
-from railctl.cli._errors import OutputContext, report_for, run, usage_report
+from railctl.cli._errors import OutputContext, leave, report_for, run, usage_report
 from railctl.cli._meta import (
     RESTORE_ALLOW_INCOMPLETE_OPT,
     RESTORE_CONFIRM_OPT,
@@ -1125,7 +1125,7 @@ def _run_ndjson(settings: Settings, output: OutputContext, invocation: _Invocati
         if station is not None and state is not None:
             stream.summary(**_summary_fields(state), exit_code=exit_code)
             close_quietly(station)
-    raise typer.Exit(code=exit_code)
+    leave(exit_code)
 
 
 def register(app: typer.Typer) -> None:

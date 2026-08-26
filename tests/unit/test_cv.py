@@ -22,6 +22,7 @@ from __future__ import annotations
 import pytest
 
 from railctl.errors import CvOutOfRangeError, ProgrammingError, exit_code_for
+from railctl.exit_codes import DOMAIN_FAILURE_EXIT_CODE
 from railctl.xbus import cv as cvmod
 from railctl.xbus import dialect
 from railctl.xbus.codec import encode
@@ -155,11 +156,17 @@ def test_every_encoder_refuses_a_cv_outside_its_own_range(func, cv: int):
 
 
 def test_a_cv_range_fault_carries_the_programming_error_exit_code():
-    """The exit code reserved in M2 must actually be reachable from here."""
+    """The failure reserved in M2 must actually be reachable from here.
+
+    It had an exit code of its own until 0.3.0, which is what this test checked. The
+    number is shared now, so what is asserted is the class and the code it carries -
+    `error.code` is where a caller reads which programming fault this was.
+    """
     with pytest.raises(CvOutOfRangeError) as excinfo:
         z21_cv_fields(1025)
     assert isinstance(excinfo.value, ProgrammingError)
-    assert exit_code_for(excinfo.value) == 15
+    assert excinfo.value.code == CvOutOfRangeError.code
+    assert exit_code_for(excinfo.value) == DOMAIN_FAILURE_EXIT_CODE
 
 
 def test_cv256_is_refused_on_the_direct_opcode_and_says_why():

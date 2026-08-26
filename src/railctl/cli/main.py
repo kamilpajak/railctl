@@ -315,24 +315,26 @@ def main() -> None:
         # caller to read. A caller asking "did the operator stop this?" reads `code`, never
         # the process status.
         #
-        # Comparing against the bare number is safe because no railctl command can return
-        # it: the highest exit code any command publishes in the manifest is 20, and 130
-        # appears nowhere else in `src/railctl/`. That is an assumption about future
-        # commands, so it is pinned by
-        # `tests/cli/test_usage_envelope.py::test_no_published_exit_code_collides_with_the_interrupt_sentinel`,
-        # which walks every command's published `exit_codes` and every error row's
-        # `exit_code`. Add a command that publishes 130 and that test goes red, instead of
-        # an interrupt envelope quietly appearing on that command's ordinary run.
+        # Comparing against the bare number was safe until 0.3.0 because no railctl
+        # exit code was 130. Now `aborted` IS 130, so the guard had to change shape:
+        # what makes the sentinel unambiguous is no longer the value but the route.
+        # Nothing inside a command body can RETURN 130 to `_main`, because the one
+        # path that ends with it - `_errors.run()`'s abort branch - raises
+        # `SystemExit`, which Click and typer both leave alone. Only typer's own
+        # parse-time conversion arrives here as an integer. Pinned by
+        # `tests/cli/test_errors.py::test_an_interrupt_inside_a_command_body_leaves_by_system_exit`;
+        # break that and this branch starts writing a second envelope on top of the
+        # one `run()` already wrote, instead of an interrupt going unreported.
         #
         # The envelope is the one `run()` publishes for a `KeyboardInterrupt` inside a
-        # command body, from the same `_errors.aborted_report`, so the three interrupt routes
-        # cannot describe one event three ways. It exits 9 - `exit_code_for(AbortedError)`,
-        # the code the manifest publishes for `aborted` - and not 130: `_fail` takes the
-        # process status off the same report it just wrote, and exiting 130 next to an
-        # envelope saying
-        # `"exit_code": 9` would be two answers to one question. Exit 9 is not "interrupted"
-        # either; it is the generic domain-failure status shared with several other codes,
-        # which is exactly why the answer a caller branches on is `code: "aborted"`.
+        # command body, from the same `_errors.aborted_report`, so the three interrupt
+        # routes cannot describe one event three ways. Since 0.3.0 it exits 130 -
+        # `exit_code_for(AbortedError)`, the code the manifest publishes for `aborted`,
+        # and the shell's own convention for a run ended by SIGINT. `_fail` takes the
+        # process status off the same report it just wrote, so the envelope's
+        # `"exit_code": 130` and `$?` are one answer rather than two. What 130 does NOT
+        # do is identify the failure: it says the operator stopped the run and nothing
+        # finer, which is why the answer a caller branches on is still `code: "aborted"`.
         if outcome == TYPER_INTERRUPT_EXIT_CODE:
             _fail(aborted_report("railctl"))
         # `isinstance(True, int)` is True, so a command RETURNING `True` would exit 1 while

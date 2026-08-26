@@ -30,8 +30,21 @@ from railctl.cli._meta import (
     typer_option,
 )
 from railctl.cli.result import RESERVED_CODES, RETRYABLE_CODES
-from railctl.errors import EXIT_CODES
-from railctl.exit_codes import PARTIAL_EXIT_CODE
+from railctl.errors import (
+    EXIT_CODES,
+    StationBusyError,
+    TrackPowerError,
+    UnsupportedCommandError,
+    exit_code_for,
+)
+from railctl.exit_codes import (
+    DOMAIN_FAILURE_EXIT_CODE,
+    EXIT_MEANINGS,
+    INTERNAL_EXIT_CODE,
+    PARTIAL_EXIT_CODE,
+    RETRYABLE_EXIT_CODE,
+    USAGE_EXIT_CODE,
+)
 
 # `PARTIAL_EXIT_CODE` names no exception class - a partial run is a RESULT, not an
 # error - so it reaches this set from `result.py` rather than from the exit-code map.
@@ -317,30 +330,42 @@ def test_help_epilog_includes_headings_and_meanings_for_every_exit_code():
     assert "EXIT CODES" in epilog
     assert "EXAMPLES" in epilog
     assert "railctl/status/v1" in epilog
-    # Code 5 is LinkTimeout - pin the actual meaning, not just "a line exists",
-    # so a rewrite that hard-codes a placeholder string here goes red too.
-    assert "5: No reply arrived within the budget" in epilog
+    # The retryable code's line, read off `EXIT_MEANINGS` rather than retyped, so a
+    # rewrite that hard-codes a placeholder string here goes red too. It used to pin
+    # `LinkTimeout`'s own docstring; since 0.3.0 the sentence belongs to the CODE and
+    # not to any one class - seven classes cannot each own the prose for the number
+    # they share.
+    assert f"{RETRYABLE_EXIT_CODE}: {EXIT_MEANINGS[RETRYABLE_EXIT_CODE]}" in epilog
     # Codes 0/1/2 have no exception class; this is the branch that does not
     # go through errors.EXIT_CODES at all.
     assert "2: usage error" in epilog
 
 
 def test_a_command_explains_its_own_reason_for_an_exit_code_not_the_classs():
-    """Exit 12 out of `drive` is the pre-flight finding a service-mode session.
+    """A throttle command's 9 is the pre-flight, and its help page has to say so.
 
     `StationBusyError`'s docstring opens "The station reported 61 1F: a programming
     operation is already running" - true of the class, and not why a throttle command
-    ever exits 12: neither `drive` nor `function` sends anything that could provoke that
+    ever refuses: neither `drive` nor `function` sends anything that could provoke that
     reply. The class summary stays right where it describes the class, in the error-code
     table.
+
+    Since 0.3.0 the override earns its place twice over. The shared sentence for 9 says
+    only "the operation failed for a real reason", which on these two commands is most
+    often a refusal that never touched the layout - and the two conditions behind it are
+    told apart by `error.code`, so the override is where their names get printed.
     """
     for path in ("drive", "function"):
         section = help_epilog(command_meta(path))
-        assert "12: a service-mode programming session is active" in section, path
+        assert f"{DOMAIN_FAILURE_EXIT_CODE}: the command was refused" in section, path
+        assert StationBusyError.code in section, path
+        assert TrackPowerError.code in section, path
         assert "61 1F" not in section, path
-    # Unchanged where no override applies: the class docstring is the right answer for
-    # every other code, and this must not have become a blanket rewrite.
-    assert "5: No reply arrived within the budget" in help_epilog(command_meta("drive"))
+    # Unchanged where no override applies: the contract's own sentence is the right
+    # answer for every other code, and this must not have become a blanket rewrite.
+    assert f"{RETRYABLE_EXIT_CODE}: {EXIT_MEANINGS[RETRYABLE_EXIT_CODE]}" in help_epilog(
+        command_meta("drive")
+    )
     # And the error-code table still publishes the class's own summary.
     rows = {row["code"]: row for row in error_codes()}
     assert rows["station_busy"]["summary"].startswith("The station reported 61 1F")
@@ -406,20 +431,24 @@ def test_error_code_rows_read_their_facts_off_the_class():
     rows = {row["code"]: row for row in error_codes()}
     assert rows["link_timeout"] == {
         "code": "link_timeout",
-        "exit_code": 5,
+        "exit_code": RETRYABLE_EXIT_CODE,
         "retryable": True,
         "summary": "No reply arrived within the budget. Silence - never a negative answer.",
     }
-    # StationError has no row in EXIT_CODES on purpose and resolves to the base 9.
-    assert rows["station"]["exit_code"] == 9
+    # StationError has no row in EXIT_CODES on purpose and resolves to the base code.
+    assert rows["station"]["exit_code"] == DOMAIN_FAILURE_EXIT_CODE
+    # The `retryable` field and the exit code have to agree, and after the collapse
+    # this row is where that is easiest to see: `link_timeout` is the retryable code
+    # AND `retryable: true`, while `station` shares neither.
+    assert rows["station"]["retryable"] is False
     assert rows["unsupported_command"]["retryable"] is False
     assert set(rows) >= RETRYABLE_CODES
 
 
 def test_the_two_reserved_codes_carry_the_cli_exit_codes_they_are_defined_by():
     rows = {row["code"]: row for row in error_codes()}
-    assert rows["usage"]["exit_code"] == 2
-    assert rows["internal"]["exit_code"] == 1
+    assert rows["usage"]["exit_code"] == USAGE_EXIT_CODE
+    assert rows["internal"]["exit_code"] == INTERNAL_EXIT_CODE
     assert rows["usage"]["retryable"] is False
     assert rows["internal"]["retryable"] is False
     for code in RESERVED_CODES:
@@ -510,12 +539,11 @@ import sys  # noqa: E402
 import typer  # noqa: E402
 from typer.testing import CliRunner  # noqa: E402
 
+from railctl.cli._click_errors import ClickUsageError  # noqa: E402
 from railctl.cli._meta import _COMMAND_EXIT_MEANINGS, CommandMeta  # noqa: E402
 from railctl.cli.main import app  # noqa: E402
 from railctl.errors import (  # noqa: E402
     LinkTimeout,
-    TrackPowerError,
-    UnsupportedCommandError,
 )
 from railctl.station import (  # noqa: E402
     Capabilities,
@@ -949,7 +977,7 @@ def test_a_station_that_refuses_exits_with_a_code_the_command_publishes(meta, mo
 
     monkeypatch.setattr(Station, "open", staticmethod(lambda *a, **k: Refusing()))
     result = runner.invoke(app, [*_invocation(meta), "--format", "json", "--non-interactive"])
-    assert result.exit_code == 6, result.stderr
+    assert result.exit_code == exit_code_for(UnsupportedCommandError("x")), result.stderr
     assert result.exit_code in meta.exit_codes
     # The LAST line, not the whole stream: stderr carries logs, progress notices and
     # warnings as well as the error object, by design - `monitor` prints "monitoring
@@ -963,33 +991,45 @@ PREFLIGHT_COMMANDS = [c for c in COMMANDS if c.path in ("drive", "function")]
 
 @pytest.mark.parametrize("meta", PREFLIGHT_COMMANDS, ids=lambda m: m.path)
 @pytest.mark.parametrize(
-    ("raw_status", "expected_exit"),
-    [(0x02, 20), (0x01, 20), (0x08, 12)],
+    ("raw_status", "expected_code"),
+    [
+        (0x02, TrackPowerError.code),
+        (0x01, TrackPowerError.code),
+        (0x08, StationBusyError.code),
+    ],
     ids=["emergency-off", "emergency-stop", "service-mode"],
 )
-def test_a_preflight_refusal_exits_with_a_code_the_command_publishes(
-    monkeypatch, meta: CommandMeta, raw_status: int, expected_exit: int
+def test_a_preflight_refusal_reports_a_code_the_command_publishes(
+    monkeypatch, meta: CommandMeta, raw_status: int, expected_code: str
 ):
-    """The third and fourth reachable codes, and the reason two drives are not enough.
+    """The two refusals only this drive can reach, and what pins them since 0.3.0.
 
-    `drive SPEED>0` and `function` refuse on emergency off (20), emergency stop (20) and an
-    active service-mode session (12). None of those can arrive through the `z21:` target or
-    through a station that refuses everything, so without this drive both codes could be
-    dropped from `THROTTLE_EXIT_CODES` with the whole suite still green - the same silent
-    omission that once shipped for 6 and 7.
+    `drive SPEED>0` and `function` refuse on emergency off, emergency stop and an active
+    service-mode session. None of those can arrive through the `z21:` target or through a
+    station that refuses everything, so without this drive both could be dropped from
+    `THROTTLE_ERRORS` with the whole suite still green - the same silent omission that once
+    shipped for the refusal and out-of-scope codes.
+
+    The claim is made on `error.code`, and it has to be. All three refusals exit 9 now,
+    and so does the station family every command already carries, so an exit-code
+    assertion here would pass with `TrackPowerError` and `StationBusyError` deleted from
+    the family - it would be checking nothing. `error_codes` still separates them, which
+    is the whole reason that field exists.
 
     Bits 0 and 1 are the MEASURED order on this hardware, the reverse of the Lenz spec
     (docs/probe-results.md), so 0x01 is emergency stop and 0x02 is emergency off. This is a
-    check on our own refusal paths and their exit codes; it is not a measurement of the
+    check on our own refusal paths and their published codes; it is not a measurement of the
     station, and no locomotive was watched not moving.
     """
     monkeypatch.setattr(
         Station, "open", staticmethod(lambda *a, **k: _FakeStatusStation(raw_status))
     )
     result = runner.invoke(app, [*_invocation(meta), "--format", "json", "--non-interactive"])
-    assert result.exit_code == expected_exit, result.stderr
+    envelope = json.loads(result.stderr)
+    assert envelope["code"] == expected_code, result.stderr
+    assert expected_code in meta.error_codes
     assert result.exit_code in meta.exit_codes
-    assert json.loads(result.stderr)["exit_code"] == result.exit_code
+    assert envelope["exit_code"] == result.exit_code
 
 
 def test_the_status_that_refuses_every_other_speed_does_not_refuse_the_stop(monkeypatch):
@@ -1029,7 +1069,7 @@ def test_power_off_reaches_the_track_power_exit_code_it_publishes(monkeypatch):
     result = runner.invoke(
         app, ["power", "off", "--address", "3", "--format", "json", "--non-interactive"]
     )
-    assert result.exit_code == 20, result.stderr
+    assert result.exit_code == exit_code_for(TrackPowerError("x")), result.stderr
     assert result.exit_code in command_meta("power").exit_codes
     assert json.loads(result.stderr)["code"] == "track_power"
 
@@ -1050,7 +1090,7 @@ def test_power_resume_on_a_dead_track_reaches_the_same_published_code(monkeypatc
     result = runner.invoke(
         app, ["power", "resume", "--address", "3", "--format", "json", "--non-interactive"]
     )
-    assert result.exit_code == 20, result.stderr
+    assert result.exit_code == exit_code_for(TrackPowerError("x")), result.stderr
     assert result.exit_code in command_meta("power").exit_codes
     payload = json.loads(result.stderr)
     assert payload["code"] == "track_power"
@@ -1202,7 +1242,7 @@ def test_schema_json_prints_one_envelope_with_the_registered_paths_in_tree_order
 
 def test_schema_for_a_not_yet_implemented_command_is_exit_2_with_near_misses():
     result = runner.invoke(app, ["--format", "json", "schema", "power", "on"])
-    assert result.exit_code == 2
+    assert result.exit_code == USAGE_EXIT_CODE
     assert result.stdout == ""
     payload = json.loads(result.stderr)
     assert payload["code"] == "usage"
@@ -1304,7 +1344,7 @@ def test_a_command_that_does_read_the_config_file_still_reports_a_broken_one(
     monkeypatch.setattr(sys, "argv", ["railctl", "status", "--format=json"])
     with pytest.raises(SystemExit) as caught:
         cli_main.main()
-    assert caught.value.code == 2
+    assert caught.value.code == USAGE_EXIT_CODE
     payload = json.loads(capsys.readouterr().err)
     assert payload["code"] == "usage"
     assert "config.toml" in payload["message"]
@@ -1350,7 +1390,11 @@ def test_schema_never_opens_a_station(monkeypatch):
 
 def test_no_fuzzy_abbreviation_for_status():
     result = runner.invoke(app, ["st"])
-    assert result.exit_code == 2
+    # Click's own 2, not `USAGE_EXIT_CODE`: `CliRunner` invokes the app directly and
+    # never reaches `main()`, so this refusal is answered by Click before any railctl
+    # code runs. The two numbers are equal by design; naming railctl's constant here
+    # would claim this path goes through the railctl contract, and it does not.
+    assert result.exit_code == ClickUsageError.exit_code
     assert "track power" not in result.stdout.lower()
 
 
@@ -1484,7 +1528,7 @@ def test_a_bad_value_after_the_subcommand_exits_2_with_the_usage_envelope(
     monkeypatch.setattr(sys, "argv", ["railctl", *argv])
     with pytest.raises(SystemExit) as caught:
         cli_main.main()
-    assert caught.value.code == 2
+    assert caught.value.code == USAGE_EXIT_CODE
     captured = capsys.readouterr()
     assert captured.out == ""
     assert json.loads(captured.err)["code"] == "usage"
@@ -1553,7 +1597,7 @@ def test_an_unusable_environment_value_still_answers_with_the_error_envelope(
     monkeypatch.setattr(sys, "argv", ["railctl", "schema"])
     with pytest.raises(SystemExit) as caught:
         cli_main.main()
-    assert caught.value.code == 2
+    assert caught.value.code == USAGE_EXIT_CODE
     captured = capsys.readouterr()
     assert captured.out == ""
     payload = json.loads(captured.err)

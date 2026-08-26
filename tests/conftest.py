@@ -33,6 +33,8 @@ import os
 # "tidying" `main()`'s sentinel into railctl's constant - a change that looks
 # right and is wrong.
 if os.environ.get("RAILCTL_EXIT_CODE_CANARY"):
+    from types import MappingProxyType
+
     from railctl import errors, exit_codes
 
     _SHIFT = 100
@@ -41,6 +43,28 @@ if os.environ.get("RAILCTL_EXIT_CODE_CANARY"):
         if _value:
             setattr(exit_codes, _name, _value + _SHIFT)
     errors.EXIT_CODES.update({k: v + _SHIFT for k, v in errors.EXIT_CODES.items()})
+    # The two derived tables are rebuilt, not just the scalars: both were evaluated
+    # when `exit_codes` was imported, a moment before this runs, so shifting the
+    # constants alone would leave `EXIT_MEANINGS` keyed by the old numbers and every
+    # `--help` page would raise KeyError instead of the suite reporting a real result.
+    exit_codes.EXIT_MEANINGS = MappingProxyType(
+        {k + _SHIFT if k else k: v for k, v in exit_codes.EXIT_MEANINGS.items()}
+    )
+    exit_codes.PUBLISHED_EXIT_CODES = frozenset(
+        c + _SHIFT if c else c for c in exit_codes.PUBLISHED_EXIT_CODES
+    )
+
+    def pytest_ignore_collect(collection_path, config):
+        """`tests/unit/test_exit_codes.py` is the one file the canary must not run.
+
+        That file is the contract's second copy and its literals are deliberate - it
+        exists so that an edit to `railctl/exit_codes.py` shows up in a diff as a
+        contract change rather than a refactor. Under the canary every one of those
+        literals is wrong by design, so 33 red tests there would say nothing except
+        that the shift happened, while burying the failures that mean something.
+        """
+        return collection_path.name == "test_exit_codes.py"
+
 
 from hypothesis import HealthCheck, Verbosity, settings
 

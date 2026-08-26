@@ -76,7 +76,7 @@ from railctl.backup import (
     write_backup_to,
 )
 from railctl.catalog import CATALOG_FAMILY, CATALOG_SCHEMA, curated_cvs, load_catalog
-from railctl.cli._errors import OutputContext, report_for, run, usage_report
+from railctl.cli._errors import OutputContext, leave, report_for, run, usage_report
 from railctl.cli._meta import (
     BACKUP_ALL_OPT,
     BACKUP_FORCE_OPT,
@@ -1416,7 +1416,7 @@ def _run_ndjson(
                 exit_code=exit_code,
             )
             close_quietly(station)
-    raise typer.Exit(code=exit_code)
+    leave(exit_code)
 
 
 def register(app: typer.Typer) -> None:
