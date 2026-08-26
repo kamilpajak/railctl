@@ -12,7 +12,7 @@ CV inside `_sweep.sweep_bound` instead of the 80 the catalog names, so a
 decoder's undocumented settings land in the file too. Everything else holds -
 the same order, the same page gate, the same three-valued rows - and the file
 says which set it is (`"set": "all"`, `sweep_range`, `source: sweep` on the
-rows no catalog entry names). A sweep NORMALLY exits 9: most CV numbers are
+rows no catalog entry names). A sweep NORMALLY ends `backup_incomplete`: most CV numbers are
 not implemented in any decoder, this hardware cannot tell that from silence,
 and nothing here special-cases the sweep to hide it.
 
@@ -20,7 +20,7 @@ Three properties are load-bearing here rather than emergent:
 
 * **a backup never writes the decoder.** The one CV pair a read path could
   write - the CV31/CV32 page selectors - is exactly what this command refuses
-  to touch: a pair outside `NEUTRAL_PAGES` aborts (exit 17) unless `--page`
+  to touch: a pair outside `NEUTRAL_PAGES` aborts (`index_page_required`) unless `--page`
   acknowledges it, and the file records the pair as READ, never as declared.
   The reference decoder rests at 0:1 and cannot be moved off it, which is why
   neutral is a set and not the single pair 0:0 this once assumed;
@@ -31,10 +31,10 @@ Three properties are load-bearing here rather than emergent:
 * **the file is the product, the exit code is its label.** A hole
   (`no_response`/`error`) still delivers the document - the file (or the
   stdout document with `--out -`) plus the buffered envelope carrying it -
-  and exits 9, the holes named in a `backup.incomplete` warning (buffered)
+  and ends `backup_incomplete`, the holes named in a `backup.incomplete` warning (buffered)
   or the `backup_incomplete` stderr envelope (ndjson, where the document
   already streamed); Ctrl-C writes the partial file with
-  `"interrupted": true` and exits 9 as `aborted`; a `skipped` row is a
+  `"interrupted": true` and exits 130 as `aborted`; a `skipped` row is a
   recorded decision and never changes the exit code.
 
 NDJSON is this command's streaming mode and bypasses `run()` the same way
@@ -158,7 +158,7 @@ _SWEEP_ESTIMATE_EVENT: Final[str] = "sweep.estimate"
 #: status for the difference, and inventing one in the exit code would make
 #: every other command's 9 mean less.
 _SWEEP_EXIT_NOTE: Final[str] = (
-    "a sweep normally exits 9: most CV numbers are not implemented in any decoder, and "
+    "a sweep normally ends incomplete: most CV numbers are not implemented in any decoder, and "
     "this hardware cannot tell that from silence, so they are recorded as no_response - "
     "the file is the product either way"
 )
@@ -413,7 +413,7 @@ def resolve_backup_mode(mode_word: str, capabilities: Capabilities) -> ProgMode:
     (unprobed) falls to the programming track, where `cv read`'s AUTO would
     try POM and record the outcome. One exploratory read is a fair probe; 80
     silent POM attempts at 6.7 s each is not a backup. An explicit
-    `--mode pom` is refused only on a measured no (exit 16), naming both
+    `--mode pom` is refused only on a measured no (`pom_read_unsupported`), naming both
     remedies - the re-probe, and the programming track.
     """
     if mode_word == ProgMode.POM.value:
@@ -995,7 +995,7 @@ class _BackupRun:
             f"sweep {bound} CVs (CV1..CV{bound}) off the decoder - about "
             f"{format_duration(seconds)} at the measured {SWEEP_SECONDS_PER_CV} s per CV "
             f"(docs/probe-results.md, 2026-08-19). Nothing is written to the decoder, and "
-            f"the run normally ends at exit 9 because most CV numbers answer nothing. "
+            f"the run normally ends incomplete because most CV numbers answer nothing. "
             f"Proceed",
             settings=self._settings,
             stdin=sys.stdin,
@@ -1021,7 +1021,7 @@ class _BackupRun:
         return report
 
     def _abort(self, context: _Context) -> NoReturn:
-        """Ctrl-C: write what was measured, then exit 9 as `aborted`.
+        """Ctrl-C: write what was measured, then exit 130 as `aborted`.
 
         The partial file needs the page and the curated list to be honest
         about what it covers; an interrupt before CV29 answered has nothing
@@ -1086,7 +1086,7 @@ def incomplete_report(
 ) -> tuple[str, dict[str, object]] | None:
     """The one composition of "this file has holes" - message and details -
     with two consumers: `_work` marks its outcome with them (the document is
-    delivered; exit 9 is its label), and `require_complete` raises them as
+    delivered; `backup_incomplete` is its label), and `require_complete` raises them as
     `BackupIncompleteError` for the ndjson path. `None` for a complete
     document."""
     summary = document.summary

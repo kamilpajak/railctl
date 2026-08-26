@@ -1922,7 +1922,7 @@ def test_a_sweep_with_silent_cvs_is_incomplete_like_any_other_hole(monkeypatch, 
     out = tmp_path / "holes-all.json"
     result = runner.invoke(app, _sweep_argv("--yes", out=str(out)))
     assert result.exit_code == DOMAIN_FAILURE_EXIT_CODE, result.stderr
-    assert "a sweep normally exits 9" in result.stdout
+    assert "a sweep normally ends incomplete" in result.stdout
     assert "the file is the product either way" in result.stdout
     assert read_backup(out).summary["no_response"] == 2
 

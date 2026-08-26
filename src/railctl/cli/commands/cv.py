@@ -14,7 +14,7 @@ Silence is not a value.
 safety property is explicit here rather than emergent:
 
 * the catalog's min/max are ENFORCING on write - the refusal goes out before
-  any telegram, exit 15 - and only ADVISORY on read, where the decoder's own
+  any telegram, `cv_out_of_range` - and only ADVISORY on read, where the decoder's own
   value is the measurement and the catalog is the opinion;
 
 * writes to `CONFIRM_CVS` ({1, 8, 17, 18, 29, 31, 32, 144}: the address CVs,
@@ -391,7 +391,7 @@ def build_cv_write(
     """The one write, with `verified` carried honestly: `true` only when an
     independent read-back (or a decoder-level Ready) confirmed it, `null` when
     nothing measured the decoder - never `false`, which would claim a mismatch
-    nobody measured (a real mismatch raises `CvVerifyError`, exit 14) - and
+    nobody measured (a real mismatch raises `CvVerifyError`) - and
     the reason it is not `true` said out loud."""
     result = CommandResult(schema=CV_WRITE_SCHEMA, command="cv write")
     label = _label(written.cv, name)
@@ -650,7 +650,7 @@ def register(app: typer.Typer) -> None:
             name = entry.slug if entry is not None else ""
             if entry is not None and not entry.min <= value <= entry.max:
                 # ENFORCING on write (ADDENDUM A3): refused before any
-                # telegram, the bound named, exit 15.
+                # telegram, the bound named, `cv_out_of_range`.
                 raise CvOutOfRangeError(
                     f"CV{number} ({entry.slug}) takes {entry.min}..{entry.max}, got "
                     f"{value}; refused before any telegram went out - the catalog is "

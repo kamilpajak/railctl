@@ -270,10 +270,10 @@ class Station:
         * any other `InterfaceStatus` -> `TransportError` - the interface had a problem; this is
           never a capability verdict.
         * `Unsupported` (61 82) -> `UnsupportedCommandError` - the one reply that IS a real "no".
-        * `Other` with reason `checksum` or `length` -> `ProtocolError` (exit 4): the LINK
+        * `Other` with reason `checksum` or `length` -> `ProtocolError` (code `protocol`): the LINK
           damaged or truncated the reply. Collapsing this into the row below would make a bad
           cable and an incomplete reply table indistinguishable at the exit code.
-        * `Other` with reason `empty` or `unknown_form` -> the base `RailctlError` (exit 9): the
+        * `Other` with reason `empty` or `unknown_form` -> the base `RailctlError` (code `railctl`): the
           reply arrived intact, but this REPLY TABLE has no row for it yet - the station is not
           at fault.
         * `StationStatus` - returned with bits 0 and 1 re-derived from its own `raw` under

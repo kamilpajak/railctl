@@ -935,7 +935,7 @@ MS450P22 (loco 3) on the programming track, isolated config dir, 2 min 18 s tota
 | 1 | doctor, no `--power-on` | D5/D6/D7 ok, D3/D4/D10 honest `unknown` (track power off), capabilities saved |
 | 2 | batch read CV1,3,8,29 | all ok: CV1=3, CV3=26, CV8=145, CV29=14 |
 | 3 | verified write, restored | CV3: 26 → 20 → 26, every step `verified: true` by independent read-back |
-| 4 | CV1025 refusal | exit 15 `cv_out_of_range`, `1..1024` named, `railctl doctor` suggested, no telegram |
+| 4 | CV1025 refusal | `cv_out_of_range` (exit 15 when measured, exit 9 since 0.3.0), `1..1024` named, `railctl doctor` suggested, no telegram |
 
 The retry-once fix was visible working, not idle: stage 3's four back-to-back commands (write,
 read-back, restore, final read) each opened their first session moments after the previous
@@ -973,20 +973,20 @@ run's measured `true` values instead of letting `unknown` overwrite them.
 
 ## The ZIMO index bank rests at 0:1 and will not leave it — SETTLED 2026-08-13
 
-The first `railctl backup` run against the MS450P22 refused with exit 17: the decoder's index
+The first `railctl backup` run against the MS450P22 refused with `index_page_required`: the decoder's index
 selectors read **CV31=0, CV32=1**, and the command treated anything but 0:0 as "parked on a CV
 page". The refusal itself was correct behaviour - a backup never writes the selectors - but the
 premise was wrong, and this section is what replaced it.
 
 **The bank cannot be moved.** `cv write 32 0` was accepted by the station and the independent
-read-back returned 1, so the write did not stick (exit 14 `cv_verify`, which is the verification
+read-back returned 1, so the write did not stick (`cv_verify`, which is the verification
 doing its job). A `select_page` to 0:1 in the same session verified fine, so this is not
 session volatility: the decoder accepts CV32=1 and refuses CV32=0.
 
 | operation | result |
 | --- | --- |
 | `cv read 31 32 --mode service` | CV31=0, CV32=1 |
-| `cv write 32 0` (service, verified) | station accepted, read-back 1 → `cv_verify`, exit 14 |
+| `cv write 32 0` (service, verified) | station accepted, read-back 1 → `cv_verify` |
 | `select_page((0,1))` inside `cv read 265 --page 0:1` | wrote and verified, decoder unchanged |
 
 **On that bank the CVs above 256 read as the NORMAL ones.** Read with no page selection at all
@@ -1358,8 +1358,8 @@ track there is no asymmetry to measure at all. That mechanism is consistent with
 everything measured here and is not itself proven here - what is proven is that CV100
 never answers and its neighbours always do.
 
-**What the tool does with it is already right.** `no_response` in a backup, exit 10 as a
-single read. The decoder genuinely did not acknowledge; recording anything else would
+**What the tool does with it is already right.** `no_response` in a backup, `decoder_no_ack`
+as a single read. The decoder genuinely did not acknowledge; recording anything else would
 invent a value.
 
 One wart, worth its own issue: the `61 13` hint says to check the wheel contact and warns

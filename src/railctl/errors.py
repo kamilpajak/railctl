@@ -11,20 +11,33 @@ The distinction this project exists to preserve is between three answers:
 * `UnsupportedCommandError` - the station said **no** (`61 82`). A real answer.
 * `UnsupportedFeatureError` - **we** decided it is out of scope. Never measured.
 
-They are three classes with three exit codes (5, 6, 7) because collapsing them
-is exactly how milestone M1 recorded four capabilities as absent when the
-instrument, not the hardware, was at fault.
+They are three classes with three `error.code` strings because collapsing them is
+exactly how milestone M1 recorded four capabilities as absent when the
+instrument, not the hardware, was at fault. They had three exit codes too (5, 6
+and 7) until 0.3.0, and they no longer do: `LinkTimeout` is the retryable code
+and the other two share the domain-failure code. That was given up deliberately -
+see `railctl/CLAUDE.md` and issue #65 - because `error.code` already carried the
+distinction and a second copy of it in the process status was what made this tool
+publish twenty-one exit codes.
 
-These exit codes are a versioned public contract. Within a major version no code
-may be renumbered, repurposed, or retired; a new error class claims an unused
-code above 20 instead of reusing one of these. The one code below that range is
-`ConfirmationRequiredError: 2`, and it is not an exception to the rule so much as
-the rule's other half: 2 is the CLI's documented *usage* code, shared with a
-malformed argument, because both tell a script the same thing - fix the
-invocation, do not retry. A domain failure never claims a low code. A future JSON envelope (M5
-and later) can carry a stable machine-readable `error.code` string alongside the
-process exit status, and that is where new domain detail belongs, not in a new
-exit code.
+**`error.code` is the versioned public contract, not the number.** Within a major
+version no `code` string may be renamed, repurposed or retired, and a new error
+class declares its own rather than reusing one. What the process status still
+separates is the one thing a caller can act on without reading anything:
+`RETRYABLE_EXIT_CODE` means the same invocation may succeed later, and every
+other non-zero value means it will not. Which failure it was is read from
+`error.code`, and `railctl schema` lists every value it can take, per command as
+well as in one table.
+
+The eight published statuses and their meanings live in `railctl/exit_codes.py`;
+`EXIT_CODES` below maps classes onto them, and most classes are deliberately not
+in it - inheriting the base code is the normal case now, not an omission.
+
+Numbers do not belong in the class docstrings below. `_meta._class_error_row`
+publishes each one's first paragraph as the `summary` in `railctl schema`, so a
+docstring naming an exit code becomes a row whose prose contradicts its own
+`exit_code` field the moment the map changes. It did: `AbortedError` said "exit
+9" while the row said 130.
 """
 
 from __future__ import annotations
@@ -322,7 +335,7 @@ class CvOutOfRangeError(ProgrammingError):
 
 
 #: `CvOutOfRangeError.details["reason"]` when the refused number is the VALUE
-#: being written, not the CV. Both refusals share the class and exit code 15 -
+#: being written, not the CV. Both refusals share the class and the code -
 #: the catalog's min/max are enforcing on write - but not the remedy: a CV the
 #: mode cannot reach suggests `railctl doctor` (a re-probe is what could move
 #: the bound), while nothing the doctor measures changes 300 not fitting in
@@ -472,7 +485,7 @@ class ProgrammingLockedError(RailctlError):
 
 
 class AbortedError(RailctlError):
-    """The operator interrupted the run. Cleanup ran; exit 9."""
+    """The operator interrupted the run. Cleanup ran."""
 
     code: ClassVar[str] = "aborted"
 

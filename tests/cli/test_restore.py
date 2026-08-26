@@ -58,7 +58,6 @@ from railctl.errors import (
     ServiceEncodingUnknownError,
     ShortCircuitError,
     StationBusyError,
-    TrackPowerError,
     TransportError,
     exit_code_for,
 )
@@ -1353,7 +1352,6 @@ def test_the_ndjson_stream_carries_events_and_drops_the_same_one(monkeypatch, tm
         ShortCircuitError("short on the programming track"),
         StationBusyError("61 1F"),
         ServiceEncodingUnknownError("nothing probed yet"),
-        TrackPowerError("track power is off"),
     ],
     ids=lambda value: getattr(value, "__class__", type(value)).__name__,
 )
@@ -1361,10 +1359,18 @@ def test_a_station_failure_mid_write_reports_a_code_restore_publishes(monkeypatc
     """One case per failure a write can hit, driven through the real command.
 
     Each case used to name its own exit code, and that number was the whole assertion.
-    Seven of these eight share exit 9 now, so the number cannot say which failure
+    Six of these seven share exit 9 now, so the number cannot say which failure
     arrived - the envelope's `code` is asked instead, and checked against the family
     `restore` publishes. Remove a class from `RESTORE_ERRORS` and its case goes red;
     under an exit-code assertion it would not have.
+
+    `TrackPowerError` was an eighth case until a review asked whether `restore` can
+    really reach it. It cannot: it is raised by the POM pre-flight and by
+    `Station._settle_power`, and `restore` runs at `ProgMode.SERVICE` only (M10 D1)
+    while service mode energises the track by sending `21 81` through `exchange`
+    rather than through `power_on()`. Injecting it here proved only that a fake can
+    raise anything, and it was the last thing keeping `track_power` in the family
+    `restore` publishes. The case went with the claim.
     """
     path = backup_file(tmp_path)
     install(monkeypatch, FakeRestoreStation(write_errors={3: error}))

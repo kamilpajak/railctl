@@ -25,7 +25,7 @@ Four more properties are load-bearing here rather than emergent:
   which is most of the times anyone wants one;
 * **nothing is written, on either form.** Not a CV, and not the CV31/CV32
   index selectors - which is why a decoder sitting on a different page than the
-  file was taken on is a refusal (exit 17) rather than a re-selection: the
+  file was taken on is a refusal (`index_page_required`) rather than a re-selection: the
   curated CVs above 256 do not name the same registers on two banks, so
   comparing them across a page boundary would report differences that are only
   a change of subject. The same check runs offline between the two files'

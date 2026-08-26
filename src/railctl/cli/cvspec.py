@@ -12,7 +12,7 @@ piece, a backwards range, an unknown slug) is a `UsageProblem`: the
 invocation is malformed, exit 2, with runnable suggestions - an unknown slug
 names the three closest catalog slugs, ranked, the same way `command_meta`
 answers a mistyped command path. A CV NUMBER outside 1..1024 is
-`CvOutOfRangeError`, exit 15, naming the bound: that is the design's rule for
+`CvOutOfRangeError`, code `cv_out_of_range`, naming the bound: that is the design's rule for
 a CV above the bound of the resolved mode, and both modes share the same
 CLI-level bound (`MAX_CV_POM == MAX_CV_EXT == 1024`), so nothing here needs
 to know which mode later resolves. The deeper per-encoding bounds - the

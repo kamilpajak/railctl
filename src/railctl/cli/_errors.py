@@ -120,7 +120,7 @@ def default_suggestions(
         # absent. `report_for` reaches for `cv` with the same default for the same reason.
         return _argv_arrays([getattr(exc, "retry_argv", None)])
     if isinstance(exc, CvOutOfRangeError):
-        # The design's rule for a CV the resolved mode cannot reach: exit 15 with
+        # The design's rule for a CV the resolved mode cannot reach: `cv_out_of_range` with
         # `railctl doctor`, because the bound is a fact about what this station has
         # proven and a re-probe is the one thing that could move it. A VALUE outside
         # the catalog's min/max shares the class and the exit code but not the

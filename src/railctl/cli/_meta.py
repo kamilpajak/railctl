@@ -55,6 +55,7 @@ from railctl.exit_codes import (
     EXIT_MEANINGS,
     INTERNAL_EXIT_CODE,
     PARTIAL_EXIT_CODE,
+    RETRYABLE_EXIT_CODE,
     SUCCESS_EXIT_CODE,
     USAGE_EXIT_CODE,
 )
@@ -735,6 +736,21 @@ CONFIRM_ERRORS: Final[ErrorFamily] = (errors.ConfirmationRequiredError,)
 #: takes one.
 CATALOG_ERRORS: Final[ErrorFamily] = (errors.CatalogError,)
 
+#: What a command that only ever speaks to the programming track cannot reach.
+#: `restore` and `diff` both run at `ProgMode.SERVICE` and nothing else (M10 D1),
+#: so neither can raise the POM refusal - and neither can raise `TrackPowerError`,
+#: which comes from the POM pre-flight and from `Station._settle_power`. Service
+#: mode energises the track by sending `21 81` through `exchange` directly, never
+#: through `power_on()`, so the settle check that raises it is not on this path.
+#:
+#: Publishing a failure a command cannot produce costs a caller one unused branch
+#: and is the safe direction - but it also makes `error_codes` stop being an
+#: answer to "can this command hit this condition", which is the whole reason the
+#: field exists. Where a path demonstrably does not exist, say so.
+_SERVICE_ONLY_EXCLUSIONS: Final[frozenset[type[errors.RailctlError]]] = frozenset(
+    {errors.PomReadUnsupportedError, errors.TrackPowerError}
+)
+
 CV_READ_ERRORS: Final[ErrorFamily] = (
     *STATION_ERRORS,
     *CV_PROGRAMMING_ERRORS,
@@ -1001,7 +1017,7 @@ RESTORE_CONFIRM_OPT = Option(
 #: has no POM path at all (D1). Several restore-specific failures share the
 #: domain-failure exit code - see `_COMMAND_EXIT_MEANINGS`.
 RESTORE_ERRORS: Final[ErrorFamily] = (
-    *(klass for klass in CV_WRITE_ERRORS if klass is not errors.PomReadUnsupportedError),
+    *(klass for klass in CV_WRITE_ERRORS if klass not in _SERVICE_ONLY_EXCLUSIONS),
     errors.AddressSetIncompleteError,
     errors.BackupFileError,
     errors.DecoderIdentityMismatchError,
@@ -1096,7 +1112,7 @@ DIFF_ERRORS: Final[ErrorFamily] = (
     *(
         klass
         for klass in CV_READ_ERRORS
-        if klass not in {errors.CvVerifyError, errors.PomReadUnsupportedError}
+        if klass not in {errors.CvVerifyError, *_SERVICE_ONLY_EXCLUSIONS, *CONFIRM_ERRORS}
     ),
     errors.AddressSetIncompleteError,
     errors.BackupFileError,
@@ -1292,17 +1308,26 @@ def global_option(name: str) -> Any:
     return typer_option(replace(row, default=_bare_default(row), late_default=False))
 
 
-#: Why a THROTTLE command exits 12 - the pre-flight found the station in a
+#: Why a THROTTLE command refuses - the pre-flight found the station in a
 #: service-mode session, which is not the `61 1F` reply `StationBusyError`'s
 #: own docstring describes.
-#: `drive` and `function` share one preflight, so they share one sentence. Both
-#: refusals were their own exit codes before 0.3.0; they are two `error.code`
-#: values under one code now, which is why the sentence has to name them.
+#: `drive` and `function` share one preflight, so they share one sentence.
+#:
+#: It names `track_power` and NOT `station_busy`, and that is the correction a
+#: review caught: the two refusals come from the same preflight and read as a
+#: pair, but `StationBusyError` is retryable and resolves to a different code -
+#: the session it names ends on its own. Naming it here would have put a code
+#: under a number it does not carry, which is the same documented lie in
+#: miniature that #65 was raised to remove. `test_every_code_a_help_sentence_names
+#: _carries_the_code_it_is_filed_under` is the guard.
 _THROTTLE_MEANING: Final[str] = (
-    "the command was refused or the station failed. The error.code says which: station_busy "
-    "(a service-mode programming session is active; it must finish or be cancelled before a "
-    "throttle command can run), track_power (the layout is in emergency off or emergency "
-    "stop), or one of the station and link failures every command shares"
+    "the command was refused or the station failed. The error.code says which: track_power "
+    "(the layout is in emergency off or emergency stop - nothing was sent, and the layout was "
+    "not touched), function_group_unreadable (the current state of the function group could "
+    "not be read, so flipping one bit would have cleared the rest), or one of the station and "
+    "link failures every command shares. A service-mode session blocking the throttle is "
+    f"station_busy and exits {RETRYABLE_EXIT_CODE}, not this - it ends on its own, so that "
+    "one is worth retrying and this one is not"
 )
 
 # `_BASE_EXIT_MEANINGS` was the four codes that named no exception class, kept here
@@ -1411,7 +1436,7 @@ def _output_lines(schema: str) -> list[str]:
 
 
 #: Where an exception's own docstring is not why THIS command exits with that
-#: code. `drive`/`function` exit 12 from the pre-flight finding a service-mode
+#: code. `drive`/`function` refuse from the pre-flight finding a service-mode
 #: session on the station, and `StationBusyError`'s docstring opens "The station
 #: reported 61 1F" - a reply neither command has sent anything to provoke. The
 #: class summary is right for the error-code table, where it describes the
@@ -1474,7 +1499,10 @@ _COMMAND_EXIT_MEANINGS: Final[dict[str, dict[int, str]]] = {
             "--allow-incomplete was not given); programming_locked (live CV144 is not 0 on a "
             "decoder family that locks on it); address_set_incomplete (--with-address with "
             "CV1/CV17/CV18/CV29 not all ok in the file); or backup_file (the file is "
-            "unreadable or malformed). Ctrl-C is exit 130, and nothing is rolled back"
+            "unreadable or malformed). It can also be one of the programming and station "
+            "failures every CV command inherits - decoder_no_ack, decoder_not_responding, "
+            "short_circuit and the rest - which stop a stage part-way rather than refusing "
+            "it. Ctrl-C is exit 130, and nothing is rolled back"
         ),
     },
     # 0 is the row this command exists to state out loud. Every other command's
@@ -1496,7 +1524,9 @@ _COMMAND_EXIT_MEANINGS: Final[dict[str, dict[int, str]]] = {
             "different CV31/CV32 index page than the file was taken on, so the CVs above 256 "
             "do not name the same registers); backup_file (a file is unreadable or "
             "malformed); or address_set_incomplete (--with-address with CV1/CV17/CV18/CV29 "
-            "not all ok in the file, so there is no address set to compare)"
+            "not all ok in the file, so there is no address set to compare). It can also be "
+            "one of the programming and station failures every CV command inherits, which "
+            "stop the live pass part-way rather than refusing it"
         ),
         ABORTED_EXIT_CODE: (
             "the operator stopped the comparison (error.code aborted). The online form "

@@ -9,6 +9,7 @@ same tuple in their own later commits.
 from __future__ import annotations
 
 import dataclasses
+import re
 from pathlib import Path
 
 import pytest
@@ -1641,3 +1642,61 @@ def test_a_command_specific_exit_meaning_reaches_that_command_s_help(path: str):
     for code, meaning in _COMMAND_EXIT_MEANINGS[path].items():
         assert code in meta.exit_codes, f"{path} overrides {code} but does not publish it"
         assert meaning in epilog, f"{path}'s override for {code} never reaches its help"
+
+
+def test_every_code_a_help_sentence_names_carries_the_code_it_is_filed_under():
+    """A `--help` sentence keyed by exit N may only name failures that exit N.
+
+    This is the guard for the mistake that produced it. `drive`'s and `function`'s
+    override sat under the domain-failure code and named `station_busy`, which is
+    retryable and exits with a different code - so `railctl drive --help` told a
+    caller to expect a number that condition never produces. It is the same
+    documented lie #65 was raised to remove, one sentence wide instead of a whole
+    table, and nothing but this scan would have found it.
+
+    Scans for every known `error.code` as a whole word in every override sentence,
+    then asks the map what that code really exits with. A sentence may mention a
+    code filed elsewhere only by printing that code's own number alongside, which
+    is what `drive`'s sentence does for `station_busy`.
+
+    Only codes containing an underscore are scanned, and that is a real limitation
+    rather than an oversight. Seven codes are ordinary English words - `station`,
+    `railctl`, `protocol`, `transport`, `catalog`, `programming`, `aborted` - and
+    "the station never confirmed the hold" is a sentence, not a reference to
+    `StationError`. A scan that flagged it would be weakened or deleted within the
+    week. Every code where the mistake is plausible is a compound: `station_busy`,
+    `track_power`, `cv_verify`, `pom_read_unsupported`. This narrows where a
+    violation can hide; it does not prove there is none.
+    """
+    by_code = {row["code"]: row["exit_code"] for row in error_codes() if "_" in str(row["code"])}
+    wrong: list[str] = []
+    for path, overrides in _COMMAND_EXIT_MEANINGS.items():
+        for code, sentence in overrides.items():
+            for name, exits_with in by_code.items():
+                if not re.search(rf"\b{re.escape(name)}\b", sentence):
+                    continue
+                if exits_with != code and str(exits_with) not in sentence:
+                    wrong.append(
+                        f"{path}: the sentence for {code} names {name}, which exits {exits_with}"
+                    )
+    assert wrong == []
+
+
+def test_every_code_a_help_sentence_names_is_one_that_command_publishes():
+    """The other half: a sentence may not name a failure the command cannot reach.
+
+    `restore`'s row named `pom_read_unsupported` at no point, which is right - it has
+    no POM path - but nothing said so. A command whose help enumerates a condition
+    absent from its own `error_codes` is describing another command's failure.
+    """
+    known = {row["code"] for row in error_codes() if "_" in str(row["code"])}
+    unreachable: list[str] = []
+    for path, overrides in _COMMAND_EXIT_MEANINGS.items():
+        published = set(command_meta(path).error_codes)
+        for code, sentence in overrides.items():
+            for name in known:
+                if re.search(rf"\b{re.escape(name)}\b", sentence) and name not in published:
+                    unreachable.append(
+                        f"{path}: the sentence for {code} names {name}, which it does not publish"
+                    )
+    assert unreachable == []
