@@ -1,12 +1,46 @@
 # railctl
 
-Drive a YaMoRC YD7010 and read or write ZIMO decoder CVs over XpressNet. macOS only.
+Drive a YaMoRC YD7010 and read or write ZIMO decoder CVs over XpressNet. macOS and Linux
+(Linux measured under WSL2 with usbipd; bare metal unverified).
 
 ## Install
 
 ```sh
 uv sync
 ```
+
+## Platforms
+
+The serial layer is POSIX `termios` on both. What differs is how the station's three CDC
+functions are named, so `auto` carries one pattern per platform: `/dev/cu.usbmodem*3` on
+macOS and `/dev/serial/by-id/usb-YaMoRC_YD700x*-if02` on Linux. The numbers are not a typo
+on either side — macOS names a node after each function's data interface (1, 3, 5) and
+Linux's `by-id` after its control interface (`if00`, `if02`, `if04`), so macOS `3` and Linux
+`-if02` are the same wire and `-if03` matches nothing. A platform with no measured pattern
+is refused by name rather than reported as a missing port; `--target serial:<device path>`
+needs no discovery and works anywhere `termios` does.
+
+On Linux `auto` needs `/dev/serial/by-id`, which udev creates — without udev there is
+nothing to glob. The node is usually owned by the `dialout` group, so a first run that says
+*Permission denied* means the account is not in that group yet; `railctl` says so rather
+than reporting the port as busy. The port path is also the key `capabilities.json` is stored
+under, so a `railctl doctor` run on macOS does not carry over to Linux: the second platform
+starts at `unknown`, never at `no`.
+
+**What has been measured, and where.** macOS is the bench this tool was written on. The
+Linux measurements were taken on 2026-10-14 under WSL2 with the station forwarded by
+`usbipd`, where `railctl version` answers XpressNet 4.0 and command station id `0x12` over
+the `-if02` path. **Bare-metal Linux has not been tested by anyone.** On that bench the
+first exchange after each `usbipd attach` answered `61 80`, a Transfer Error; the handshake
+now resends once, so it is invisible, but whether the cause is Linux, usbip or the station
+is not established — `docs/probe-results.md` has the bytes and the reasoning. The automated
+suite runs on Linux in CI with no station attached, so it measures the port-discovery logic
+and not the port.
+
+`tools/probe/` is frozen M1 output and still looks for `/dev/cu.usbmodem7010*`. On Linux it
+reports the station as not connected whatever is attached, by design: its mutation baseline
+was measured against that exact source and reformatting it would invalidate a measured
+number. Use `railctl` itself there.
 
 ## Start here
 

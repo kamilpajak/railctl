@@ -9,14 +9,18 @@ cosmetic; we set it because Lenz 23151 section 1.1 specifies it.
 The rate goes through `getattr(termios, f"B{rate}")` rather than straight into
 the termios list. On Darwin the constant IS the literal value (B57600 == 57600)
 so the lookup changes nothing, but on Linux the speed constants are small
-indices and passing 57600 makes tcsetattr fail with EINVAL. railctl is macOS
-only, yet CI runs on Linux, and the pty test for read()'s end-of-file handling
-opens a real terminal through this method - so the literal made that test fail
-on every CI run while passing locally. A capability the tests cannot reach on
-the machine that runs them is a capability nobody is measuring.
+indices and passing 57600 makes tcsetattr fail with EINVAL. The literal was
+first caught by CI, which runs on Linux and opens a real terminal through this
+method in the pty test for read()'s end-of-file handling - it failed on every CI
+run while passing locally. Since 2026-10-14 Linux is a supported platform rather
+than only the CI host, so that lookup is production code on a real bench. A
+capability the tests cannot reach on the machine that runs them is a capability
+nobody is measuring.
 
-Flags that are load-bearing: /dev/cu.* never /dev/tty.* (call-out, does not
-block on DCD); O_NOCTTY (a line BREAK would otherwise deliver SIGINT); lflag 0
+Flags that are load-bearing: on macOS /dev/cu.* never /dev/tty.* (call-out, does
+not block on DCD); Linux has no call-out twin, so there we open the ttyACM node
+a /dev/serial/by-id symlink points at and O_NONBLOCK plus CLOCAL give the same
+guarantee; O_NOCTTY (a line BREAK would otherwise deliver SIGINT); lflag 0
 (ISIG turns an incoming 0x03 into SIGINT, ICANON waits for 0x0A); iflag 0
 (PARMRK duplicates 0xFF, ISTRIP clears bit 7, ICRNL/INLCR rewrite 0x0D/0x0A -
 and our payloads legitimately contain all of those); cflag CS8|CREAD|CLOCAL (no
