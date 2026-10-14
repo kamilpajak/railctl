@@ -37,6 +37,21 @@ All notable changes to this project are documented in this file. The format foll
   by `sys.platform`, read through `discovery_for()`. Nothing outside the module imported the
   old name.
 
+### Fixed
+
+- **A `61 80` Transfer Error on the handshake no longer condemns the port.** `Link.open()`
+  checked the reply header and raised `port_not_xpressnet` on anything else, so a Transfer
+  Error — the station saying our telegram did not arrive intact, which says nothing about what
+  kind of port it is — was reported as "this is not an XpressNet port". `request()` has always
+  treated `61 80` as resend-and-continue, and `xbus/replies.py` files it under
+  `TRANSIENT_REPLIES` for exactly that reason, so the one exchange in the tool that could not
+  tolerate it was the first one it ever sends. The handshake now resends once, under the same
+  `MAX_RETRIES` bound, and a second Transfer Error raises `link_protocol` rather than the same
+  false verdict one attempt later. A reply that is simply wrong — an ASCII line from the
+  YD.Control telemetry interface, say — still fails on the first attempt with its bytes quoted.
+  This was costing every first command on the Linux bench: measured 2026-10-14, the first
+  exchange after each `usbipd attach` answered `61 80` and every later one succeeded.
+
 ## [0.3.0] - 2026-08-26
 
 ### Changed

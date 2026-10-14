@@ -108,26 +108,62 @@ class Link:
             self._envelope.reset()
             seen = bytearray()
             try:
-                self._requests += 1
-                self._envelope.note_request(_HANDSHAKE_TELEGRAM)
-                self._transport.write(self._envelope.wrap(_HANDSHAKE_TELEGRAM))
-                deadline = self._clock.monotonic() + HANDSHAKE_TIMEOUT
-                frame = self._pump(deadline, seen)
-                if frame is None:
-                    self._envelope.note_abandoned()
-                    self._timeouts += 1
-                    raise self._not_xpressnet(seen)
-                self._envelope.note_reply(frame)
-                if (
-                    len(frame.payload) < 2
-                    or frame.payload[0] != _VERSION_HEADER
-                    or frame.payload[1] != _VERSION_MARKER
-                ):
-                    # A different failure from silence, and it gets a different
-                    # message: the station answered, and the bytes it answered
-                    # with are the evidence.
-                    raise self._wrong_version_reply(frame)
-                self._version_telegram = frame.payload
+                attempts = 0
+                while True:
+                    self._requests += 1
+                    self._envelope.note_request(_HANDSHAKE_TELEGRAM)
+                    self._transport.write(self._envelope.wrap(_HANDSHAKE_TELEGRAM))
+                    deadline = self._clock.monotonic() + HANDSHAKE_TIMEOUT
+                    frame = self._pump(deadline, seen)
+                    if frame is None:
+                        self._envelope.note_abandoned()
+                        self._timeouts += 1
+                        raise self._not_xpressnet(seen)
+                    self._envelope.note_reply(frame)
+                    if frame.payload[:2] in _RETRY_PREFIXES:
+                        # The handshake is the one exchange in this tool that
+                        # could not tolerate a Transfer Error, and it is the
+                        # first one we ever send. 61 80 means the station did not
+                        # receive our telegram intact, which says nothing about
+                        # what kind of port this is - replies.py files it under
+                        # TRANSIENT_REPLIES for exactly that reason. Condemning
+                        # the port on it recorded `false` from evidence this
+                        # project classifies as no answer either way. Measured on
+                        # the Linux bench 2026-10-14: the first exchange after a
+                        # usbipd attach answered 61 80 and every later one
+                        # succeeded, so every first command failed. See
+                        # docs/probe-results.md, section "The first exchange
+                        # after the port is opened answers 61 80".
+                        #
+                        # No flush between attempts, unlike the one before the
+                        # first write: that one clears junk left by opening the
+                        # port, and the port has not been reopened. Anything
+                        # still buffered is a frame the station sent, and reading
+                        # it is the point.
+                        if attempts >= MAX_RETRIES:
+                            raise LinkProtocolError(
+                                f"{self._transport.description} rejected the "
+                                f"version request {hex_bytes(_HANDSHAKE_TELEGRAM)} "
+                                f"twice (last reply {hex_bytes(frame.payload)})",
+                                hint=self._transport.diagnostic_hint,
+                            )
+                        attempts += 1
+                        self._retries += 1
+                        continue
+                    if (
+                        len(frame.payload) < 2
+                        or frame.payload[0] != _VERSION_HEADER
+                        or frame.payload[1] != _VERSION_MARKER
+                    ):
+                        # A different failure from silence, and it gets a
+                        # different message: the station answered, and the bytes
+                        # it answered with are the evidence. Reserved for a reply
+                        # that is NOT transient - an ASCII telemetry line from
+                        # the YD.Control interface still lands here, which is the
+                        # diagnosis this error exists to give.
+                        raise self._wrong_version_reply(frame)
+                    self._version_telegram = frame.payload
+                    break
             except BaseException:
                 # close() itself can fail - os.close() on a tty whose USB
                 # device has just been unplugged is exactly the moment that
