@@ -209,9 +209,19 @@ def test_the_nothing_found_hint_belongs_to_its_platform(monkeypatch):
     this suite has a station attached, and an unfaked glob here would find it.
     """
     linux_hint = discovery_for("linux").nothing_found_hint
+    darwin_hint = discovery_for("darwin").nothing_found_hint
+
+    # Both platforms keep the physical check, which is right on either. Only
+    # Linux names udev and usbipd, and asserting their ABSENCE on macOS is not
+    # enough on its own: every string that is not the Linux hint satisfies that,
+    # so the macOS hint has to be pinned for what it does say. Measured by
+    # mutation - replacing it passed the whole file before this line existed.
+    assert "cable" in linux_hint
+    assert "cable" in darwin_hint
     assert "udev" in linux_hint
     assert "usbipd" in linux_hint
-    assert "udev" not in discovery_for("darwin").nothing_found_hint
+    assert "udev" not in darwin_hint
+    assert "usbipd" not in darwin_hint
 
     monkeypatch.setattr(transport_module.glob, "glob", lambda pattern: [])
 
