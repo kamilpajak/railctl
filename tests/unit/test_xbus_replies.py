@@ -259,9 +259,10 @@ def test_each_extended_cv_result_band_is_parsed_and_keeps_its_ident(telegram: st
 def test_the_z21_cv_result_joins_both_address_bytes():
     """64 14 MSB LSB VAL is DOC ONLY - spec line 573.
 
-    It has never been seen on this station. probe-results.md line 34 records that
-    a POM read returned no 64 14 at all, and every CV read the probe measured came
-    back as 63 14 or 63 15 (probe-results.md lines 148-152). It is parsed now so
+    It has never been seen on this station. probe-results.md, section "R1 - POM CV
+    read", records that a POM read returned no 64 14 at all, and every CV read the
+    probe measured came back as 63 14 or 63 15 (same file, section "CVs read from
+    the ZIMO MS450P22"). It is parsed now so
     that if the Z21 LAN transport or a firmware update ever emits it, the value is
     not lost the way the missing 21 10 poll lost the Lenz results in M1.
 

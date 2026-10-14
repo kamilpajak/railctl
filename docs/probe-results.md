@@ -6,11 +6,18 @@
   to the **programming track** for the R2 / R4 service-mode section below.
 - Run: 2026-08-04; power-state section added 2026-08-05
 
+> **Added 2026-10-14.** The port name above is the macOS bench's. The same station on Linux
+> enumerates the same three CDC functions under different numbers, and one failure was found
+> there that has no macOS counterpart — see "Linux enumerates the same three CDC functions under
+> different numbers" and "The first exchange after the port is opened answers 61 80" at the end
+> of this file. Nothing above is withdrawn.
+
 ## Settled
 
 | Question | Answer | Evidence |
 | --- | --- | --- |
 | Port map | `…41` LocoNet (silent), `…43` XpressNet, `…45` YD.Control telemetry | passive listen |
+| Port map on Linux | `-if00` LocoNet, `-if02` XpressNet, `-if04` telemetry — the same three functions | `/dev/serial/by-id` + dmesg + handshake, 2026-10-14 |
 | Identity | XpressNet 4.0, id `0x12` | `63 21 40 12` |
 | R5 — single function `E4 F8` | **works** | `E4 F8 00 03 40` accepted, headlight lit |
 | Function groups 4 and 5 (F13–F28) | **work** | `E4 23` / `E4 28` accepted |
@@ -1423,3 +1430,94 @@ cannot make its encoders agree with ours by accident.
 That a CV which answered `0` is implemented at all. That is the ordinary silence-versus-zero
 ambiguity and it applies at every CV number, not only above 511 - it is not a property of
 the high range and no read can settle it.
+
+## Linux enumerates the same three CDC functions under different numbers — SETTLED 2026-10-14
+
+Bench: WSL2 (Ubuntu 24.04) with the station forwarded from the Windows host by `usbipd` over
+`vhci_hcd`. One composite USB device, `03eb:245a`, "YaMoRC YD700x MultiBus Command Station",
+USB serial `7010A0001194`, three CDC-ACM functions.
+
+| `/dev/serial/by-id/usb-YaMoRC_YD700x_MultiBus_Command_Station_7010A0001194-…` | node | dmesg | bus |
+| --- | --- | --- | --- |
+| `-if00` | `ttyACM0` | `cdc_acm 1-1:1.0` | LocoNet |
+| `-if02` | `ttyACM1` | `cdc_acm 1-1:1.2` | **XpressNet** |
+| `-if04` | `ttyACM2` | `cdc_acm 1-1:1.4` | YD.Control telemetry |
+
+**The numbering is the trap, and it is worth stating twice.** macOS names a node after each
+function's CDC *data* interface — 1, 3, 5 — which is where `/dev/cu.usbmodem*3` came from.
+Linux's `by-id` names it after the function's *control* interface — `if00`, `if02`, `if04`. The
+XpressNet function is the middle one on both, so macOS `…43` and Linux `-if02` are the same
+wire, and a glob written `-if03` matches nothing at all. dmesg's `1-1:1.0` / `1-1:1.2` /
+`1-1:1.4` is a third view of the same three numbers.
+
+| step | command | result |
+| --- | --- | --- |
+| 1 | `ls -l /dev/serial/by-id/` | the three symlinks above |
+| 2 | `glob.glob("/dev/serial/by-id/usb-YaMoRC_YD700x*-if02")` | exactly one path |
+| 3 | `railctl --target serial:<that path> version` | XpressNet **4.0**, command station id **0x12** (18), four runs of four |
+
+Step 3's bytes are the ordinary handshake: `21 21 00` out, `63 21 40 12 10` back — byte for byte
+what this file records for the macOS bench on 2026-08-04, through a different kernel and a
+different driver.
+
+`os.open` follows the symlink, so the serial transport needed no change: a `by-id` path opens the
+`ttyACM` node behind it and the line settings are applied to that node. One macOS invariant does
+**not** survive the crossing, and it is recorded here rather than left implicit: "`/dev/cu.*`,
+never `/dev/tty.*`" has no Linux equivalent, because a `ttyACM` node has no call-out twin. On
+Linux the open does not block on carrier for a different reason — `O_NONBLOCK` on the open plus
+`CLOCAL` in `cflag` — and four opens of four returned immediately.
+
+With no serial device attached, udev removes `/dev/serial/by-id/` entirely rather than leaving it
+empty, so on a machine that has never seen a YD7010 the Linux pattern matches nothing and the
+answer is `PortNotFound`. That is the same answer the macOS pattern gives there, reached without
+a special case.
+
+### What this does NOT establish
+
+That railctl works on bare-metal Linux. Every Linux byte above went through usbip. The kernel's
+CDC-ACM driver is the same either way, which is an argument and not a measurement.
+
+## The first exchange after the port is opened answers 61 80 — FOUND 2026-10-14, cause NOT established
+
+Reproduced twice, both times on the first command after a fresh `usbipd attach`:
+
+| attempt | command | reply | outcome |
+| --- | --- | --- | --- |
+| first | `railctl --target serial:…-if02 version` | `61 80 E1` | **failed**, `PortNotXpressNet` |
+| every one after | the same command | `63 21 40 12 10` | XpressNet 4.0, id `0x12` |
+
+`61 80` is Transfer Error, and the direction matters: it is the station reporting that **our**
+telegram did not reach it intact. The reply itself is well formed, with a correct `E1` XOR — but
+that constrains the reply only. A clean `E1` is not evidence that nothing was corrupted; the
+content of the reply is evidence that something was.
+
+**Why the tool failed on it instead of resending.** `Link.request()` already treats `61 80` as
+resend-and-continue, and the comment on `_RETRY_PREFIXES` gives the reason: every command this
+tool sends is idempotent. `Link.open()`'s handshake did not go through `request()` — it checked
+the reply header against `0x63` directly and raised `PortNotXpressNet`. So the one exchange in
+the whole tool that could not tolerate a Transfer Error was the first one it ever sends, and the
+error it raised asserted that the port is not an XpressNet port, which is a `false` verdict built
+from a reply this project classifies as no answer either way. Corrected in the same series as
+this measurement: the handshake now retries under the existing `MAX_RETRIES` bound and reserves
+`PortNotXpressNet` for a reply that is not transient.
+
+**The transport caveat, stated plainly.** The only Linux bench is WSL2 with the device forwarded
+by `usbipd` over `vhci_hcd`. A usbip round trip is not a plain CDC-ACM open: the first URB after
+an attach crosses a network transport that has itself just come up. So "Linux answers `61 80`
+first" is **not** what was measured. What was measured is "this WSL2-plus-usbipd bench answered
+`61 80` on the first exchange after each attach, twice". Whether the trigger is the attach, the
+enumeration, or simply the first open of a session cannot be separated by two observations on one
+transport. Bare-metal Linux has not been tried by anyone, and no macOS open has ever shown this
+reply.
+
+**A neighbour worth comparing it against, and it is a different anomaly.** The M1 probe carries
+`DISCOVERY_ATTEMPTS = 2` for something measured on **macOS** on 2026-08-04, with no usbip
+anywhere: the first exchange after the device enumerates can take over 1.5 s where every later
+one answers in under 300 ms. That is a *latency* anomaly, not a `61 80`. Same position in the
+sequence, different symptom. They are placed side by side here for whoever investigates the
+cause, not as evidence that they are one phenomenon.
+
+### What this does NOT establish
+
+Whether the cause is Linux, usbip, the station, or the first open of any session. Separating them
+needs a second Linux host with the station plugged in directly.
