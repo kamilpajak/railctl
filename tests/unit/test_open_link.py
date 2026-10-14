@@ -7,7 +7,14 @@ import railctl.transport as transport_module
 from railctl.envelope import Kind
 from railctl.envelope.liusb import LiUsbEnvelope
 from railctl.errors import AmbiguousPort, PortNotFound, TransportError, UnsupportedFeatureError
-from railctl.transport import find_xpressnet_port, list_candidate_ports, open_link, transport_for
+from railctl.transport import (
+    PORT_DISCOVERY,
+    discovery_for,
+    find_xpressnet_port,
+    list_candidate_ports,
+    open_link,
+    transport_for,
+)
 from railctl.transport.fake import FakeClock, FakeTransport
 from railctl.transport.serial_posix import BAUDRATE, CDC_INDEX_HINT, SerialTransport
 
@@ -15,6 +22,20 @@ PORT_43 = "/dev/cu.usbmodem7010A00011943"
 PORT_OTHER = "/dev/cu.usbmodemAAAA3"
 VERSION_REQUEST = b"\x21\x21\x00"
 VERSION_REPLY = b"\x63\x21\x40\x12\x10"
+
+#: The two patterns auto-detection is allowed to use, spelled out a second time
+#: here because this is still the only test that would notice a wrong one - and a
+#: wrong one is not hypothetical. macOS names a CDC node after each function's
+#: DATA interface (1, 3, 5); Linux's /dev/serial/by-id names it after the CONTROL
+#: interface (if00, if02, if04). XpressNet is the middle function on both, so
+#: macOS "3" and Linux "-if02" are one interface and "-if03" - the number that
+#: looks right - matches nothing. Measured 2026-10-14 on 03eb:245a, serial
+#: 7010A0001194; docs/probe-results.md, section "Linux enumerates the same three
+#: CDC functions under different numbers".
+EXPECTED_GLOBS = {
+    "darwin": "/dev/cu.usbmodem*3",
+    "linux": "/dev/serial/by-id/usb-YaMoRC_YD700x*-if02",
+}
 
 # str(exc) is the message alone and exc.hint is the hint, because the CLI prints
 # them on separate lines (spec line 159). Anything asserted about advice is read
@@ -83,11 +104,38 @@ def test_the_baudrate_is_the_one_lenz_23151_specifies():
     assert BAUDRATE == 57600
 
 
-def test_list_candidate_ports_globs_the_xpressnet_pattern_and_sorts(monkeypatch):
-    """PORT_GLOB picks the CDC interface railctl talks to. Get the pattern wrong
-    - for example "*1", the silent LocoNet interface - and this is the only test
-    that would notice. sorted() is what decides which port AmbiguousPort names
-    first in its hint, so an unsorted glob.glob() result must come back sorted.
+def test_the_pattern_names_the_xpressnet_interface_on_both_platforms():
+    """These two patterns are what pick the CDC function railctl talks to. Get
+    one wrong - "*1", the silent LocoNet interface, or "-if03", which exists on
+    no Linux system - and this is the only test that would notice.
+
+    They are deliberately NOT the same interface number, and the parameter is
+    what makes both of them checkable from whichever machine happens to be
+    running the suite: CI is Linux and the bench that owns the station is macOS,
+    so neither could reach the other's branch on its own.
+    """
+    assert discovery_for("darwin").pattern == EXPECTED_GLOBS["darwin"]
+    assert discovery_for("linux").pattern == EXPECTED_GLOBS["linux"]
+
+
+def test_the_discovery_table_holds_exactly_the_two_measured_platforms():
+    """A third entry in that table is a platform claim, and the README, CLAUDE.md
+    and the design spec all name the platforms this tool supports. Nothing else
+    in the suite compares those documents against the code that does the
+    detecting; this is the one place the count is pinned.
+    """
+    assert {name: entry.pattern for name, entry in PORT_DISCOVERY.items()} == EXPECTED_GLOBS
+
+
+def test_list_candidate_ports_globs_the_pattern_once_and_sorts(monkeypatch):
+    """sorted() is what decides which port AmbiguousPort names first in its hint,
+    so an unsorted glob.glob() result must come back sorted.
+
+    Which pattern is right is pinned by the two tests above; what this one holds
+    is that exactly one glob call happens and that it uses the table's pattern
+    rather than a second literal spelled out again here. glob.glob is faked, so
+    no default-selected test ever reads the real /dev - which matters now that
+    the bench running this suite has a station attached.
     """
     seen_patterns = []
     unsorted = [PORT_OTHER, PORT_43]
@@ -100,8 +148,78 @@ def test_list_candidate_ports_globs_the_xpressnet_pattern_and_sorts(monkeypatch)
 
     result = list_candidate_ports()
 
-    assert seen_patterns == ["/dev/cu.usbmodem*3"]
+    assert seen_patterns == [discovery_for().pattern]
     assert result == sorted(unsorted)
+
+
+@pytest.mark.parametrize("platform", sorted(EXPECTED_GLOBS))
+def test_discovery_defaults_to_the_platform_it_is_running_on(platform, monkeypatch):
+    """The platform parameter exists for the tests above; production passes
+    nothing. Two ways to get that wrong and have every other test here still
+    pass: default the parameter to one platform's name, or write it as
+    `platform: str = sys.platform`, which Python evaluates once at import and
+    freezes. Either one makes every run on the other platform glob a pattern
+    that cannot match and report the station as missing.
+
+    Parametrized over BOTH platforms on purpose. Patching sys.platform to the
+    value the host already has is a no-op, so a single-platform version of this
+    test passes while both of those mutations survive - measured, not assumed.
+    """
+    seen_patterns = []
+    monkeypatch.setattr(transport_module.sys, "platform", platform)
+    monkeypatch.setattr(
+        transport_module.glob, "glob", lambda pattern: seen_patterns.append(pattern) or []
+    )
+
+    list_candidate_ports()
+
+    assert seen_patterns == [EXPECTED_GLOBS[platform]]
+
+
+def test_a_platform_nobody_measured_is_refused_rather_than_reported_empty(monkeypatch):
+    """PortNotFound here would read as "the station is not plugged in" - a
+    capability recorded as absent because the instrument was never built for
+    this machine. The refusal names the platform and still offers serial:, which
+    needs no discovery at all.
+    """
+    monkeypatch.setattr(transport_module.sys, "platform", "win32")
+    monkeypatch.setattr(
+        transport_module.glob,
+        "glob",
+        lambda pattern: pytest.fail(f"globbed {pattern!r} on an unmeasured platform"),
+    )
+
+    with pytest.raises(UnsupportedFeatureError) as caught:
+        list_candidate_ports()
+
+    assert "win32" in str(caught.value)
+    assert "serial:" in caught.value.hint
+
+
+def test_the_nothing_found_hint_belongs_to_its_platform(monkeypatch):
+    """The hint travels with the pattern because they are one measurement. On
+    Linux "check the USB cable" is the wrong advice: the usual cause is that
+    udev never made the by-id directory, or that the device was never attached
+    to this kernel. Without this test the two platforms' hints can be swapped,
+    or the udev sentence deleted, and the whole suite stays green.
+
+    The second half pins the WIRING, not the strings: the hint PortNotFound
+    carries has to be this platform's, not whichever one the code reached for.
+    glob.glob is faked empty so the raise is deterministic - the bench running
+    this suite has a station attached, and an unfaked glob here would find it.
+    """
+    linux_hint = discovery_for("linux").nothing_found_hint
+    assert "udev" in linux_hint
+    assert "usbipd" in linux_hint
+    assert "udev" not in discovery_for("darwin").nothing_found_hint
+
+    monkeypatch.setattr(transport_module.glob, "glob", lambda pattern: [])
+
+    with pytest.raises(PortNotFound) as caught:
+        find_xpressnet_port()
+
+    assert caught.value.hint == discovery_for().nothing_found_hint
+    assert discovery_for().pattern in str(caught.value)
 
 
 def test_z21_host_with_no_port_is_unsupported_not_malformed():

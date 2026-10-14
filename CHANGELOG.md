@@ -6,6 +6,37 @@ All notable changes to this project are documented in this file. The format foll
 
 ## [Unreleased]
 
+### Added
+
+- **`--target auto` now finds the station on Linux as well as macOS.** Discovery globs
+  `/dev/serial/by-id/usb-YaMoRC_YD700x*-if02` there. The interface number differs from the
+  macOS `/dev/cu.usbmodem*3` and that is not a typo: macOS names a device node after each
+  CDC function's data interface (1, 3, 5) while Linux's by-id name is the control interface
+  (if00, if02, if04), so macOS's "3" and Linux's "-if02" are the same wire and a pattern
+  written `-if03` matches nothing at all. Measured 2026-10-14 on 03eb:245a, serial
+  7010A0001194, over usbipd/WSL2; `docs/probe-results.md` carries the bytes. There is no
+  fallback to `/dev/ttyACM*`: where udev has not populated `/dev/serial/by-id`,
+  `PortNotFound` is the right answer, because a bare `ttyACM` number says nothing about
+  which of this one composite device's three functions it names. An explicit
+  `serial:/dev/serial/by-id/...` target needed no change and already worked.
+
+- **A platform with no measured pattern is refused by name.** `auto` on anything other than
+  macOS or Linux raises `unsupported_feature` naming the platform and pointing at
+  `serial:<device path>`, rather than reporting `port_not_found` — which would have recorded
+  the station as absent because the instrument was never built for that machine.
+
+### Changed
+
+- **The device paths are gone from the error hints.** `use serial:/dev/cu.usbmodem... or
+  auto` told a Linux operator to type a path their kernel cannot produce; the hints now say
+  `serial:<device path>`. The `port_not_found` hint is per platform, so on Linux it names
+  udev and usbipd instead of advising a cable check that is rarely the cause there.
+
+- **`railctl.transport.PORT_GLOB` no longer exists.** It was a single module-level string and
+  could not describe two platforms. The replacement is `PORT_DISCOVERY`, a sealed table keyed
+  by `sys.platform`, read through `discovery_for()`. Nothing outside the module imported the
+  old name.
+
 ## [0.3.0] - 2026-08-26
 
 ### Changed

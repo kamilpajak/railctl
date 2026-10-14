@@ -1,8 +1,10 @@
 # tests/hardware/test_m4_acceptance.py
 """M4 acceptance. NEEDS THE PHYSICAL YD7010 ATTACHED.
 
-Run explicitly:  .venv/bin/python -m pytest -m hardware -q -s
-These are skipped by the default addopts.
+Run explicitly:  uv run pytest -m hardware -s
+These are skipped by the default addopts, which already carries -q: adding a
+second one raises the quiet level to 2 and suppresses the summary line you came
+here to read.
 """
 
 from __future__ import annotations
@@ -16,6 +18,7 @@ from railctl.errors import PortNotXpressNet
 from railctl.link import HANDSHAKE_TIMEOUT, Link
 from railctl.transport import find_xpressnet_port, open_link
 from railctl.transport.serial_posix import SerialConfig, SerialTransport
+from tests.hardware.ports import port_shape, telemetry_sibling
 
 pytestmark = pytest.mark.hardware
 
@@ -30,10 +33,20 @@ TELEMETRY_ATTEMPTS = 5
 
 
 def test_auto_detection_finds_the_xpressnet_port():
+    """The shape is the assertion, because a glob of one cannot certify itself.
+
+    Comparing the result against list_candidate_ports() would be circular -
+    find_xpressnet_port() only returns at all when that list held exactly one
+    entry - and would pass for "-if03", for /dev/ttyACM*, or for "*1", the silent
+    LocoNet interface. The prefix and suffix come from the per-platform table in
+    tests/hardware/ports.py.
+    """
+    prefix, xpressnet, _telemetry = port_shape()
     port = find_xpressnet_port()
     print(f"\nXpressNet port: {port}")
-    assert port.startswith("/dev/cu.usbmodem")
-    assert port.endswith("3")
+    assert port.startswith(prefix)
+    assert port.endswith(xpressnet)
+    assert os.path.exists(port)
 
 
 def test_open_link_auto_completes_the_handshake():
@@ -76,9 +89,18 @@ def test_the_telemetry_port_shows_bytes_dropped_climbing_with_no_frames():
     counters can tell silence from noise, and it was itself reading a gap in
     the noise as silence.
     """
-    telemetry = find_xpressnet_port()[:-1] + "5"
-    if not os.path.exists(telemetry):
-        pytest.skip(f"{telemetry} is not present")
+    # A FAILURE, not a skip. The XpressNet port was just found, and this station
+    # exposes three CDC functions - so a missing third one is a finding about the
+    # hardware or about the derivation, never a reason to stop measuring. The
+    # skip this replaced is how the old port[:-1] + "5" hid itself on Linux: it
+    # produced "-if05", which no station has, and the counters acceptance quietly
+    # stopped running while -if04 sat there the whole time.
+    telemetry = telemetry_sibling(find_xpressnet_port())
+    assert os.path.exists(telemetry), (
+        f"{telemetry} is not present even though the XpressNet port was found; "
+        f"either the station is not exposing its telemetry function or the port "
+        f"shape table in tests/hardware/ports.py is stale"
+    )
 
     envelope = LiUsbEnvelope()
     link = Link(SerialTransport(SerialConfig(telemetry)), envelope)
