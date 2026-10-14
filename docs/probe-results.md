@@ -1501,6 +1501,43 @@ from a reply this project classifies as no answer either way. Corrected in the s
 this measurement: the handshake now retries under the existing `MAX_RETRIES` bound and reserves
 `PortNotXpressNet` for a reply that is not transient.
 
+### The resend needs a gap, and the gap is the whole mechanism — SETTLED 2026-10-14
+
+Adding the retry was not enough, and the way it failed is worth keeping: it fired, counted
+itself, and still failed. The wire log of a first `railctl version` after an attach, with the
+retry in but no wait:
+
+```
+TX FF FE 21 21 00          attempt 1
+RX FF FE 61 80 E1          Transfer Error
+TX FF FE 21 21 00          the resend
+                           nothing, for the whole 2.0 s handshake budget
+```
+
+`requests=2 retries=1 timeouts=1` — the retry worked exactly as written and the station simply
+did not answer. Three fresh attaches, one variable changed in each:
+
+| before the resend | reply to the resend |
+| --- | --- |
+| nothing, sent immediately | **none**, 2003 ms, the full budget |
+| `flush_input()` then immediately | **none**, 2011 ms |
+| a 50 ms wait (`SETTLE_TIME`) | `FF FE 63 21 40 12 10` in **2 ms** |
+
+So the gap is the mechanism and the input buffer is not: flushing is no better than not
+flushing, and waiting fixes it. That also explains why a *second invocation* always worked
+before the retry existed — closing and reopening the port, plus starting a new process, is
+itself far more than 50 ms of gap.
+
+`SETTLE_TIME` already existed for `send_no_reply` and is now also the handshake's resend gap.
+With it in place, the first `railctl version` after a fresh attach answers XpressNet 4.0 and
+command station id `0x12` with no `--target` and no config file.
+
+### What the gap does NOT establish
+
+Why the station needs it. 50 ms is the first value tried and it worked; the threshold was not
+bisected, and nothing says whether the station is busy, the usbip round trip is settling, or
+`cdc_acm` is. A value that works is not a mechanism.
+
 **The transport caveat, stated plainly.** The only Linux bench is WSL2 with the device forwarded
 by `usbipd` over `vhci_hcd`. A usbip round trip is not a plain CDC-ACM open: the first URB after
 an attach crosses a network transport that has itself just come up. So "Linux answers `61 80`

@@ -55,7 +55,12 @@ All notable changes to this project are documented in this file. The format foll
   false verdict one attempt later. A reply that is simply wrong — an ASCII line from the
   YD.Control telemetry interface, say — still fails on the first attempt with its bytes quoted.
   This was costing every first command on the Linux bench: measured 2026-10-14, the first
-  exchange after each `usbipd attach` answered `61 80` and every later one succeeded.
+  exchange after each `usbipd attach` answered `61 80` and every later one succeeded. The
+  resend waits `SETTLE_TIME` first, and that wait is the mechanism rather than caution: a
+  resend sent immediately is never answered, a resend after flushing the input is never
+  answered either, and a resend 50 ms later is answered in 2 ms — three fresh attaches, one
+  variable each. Without the wait the retry fires, counts itself and still fails, which is how
+  the missing wait was found.
 
 - **A permission denial on the port no longer reports itself as an occupied port.** Opening
   the device raised `port_busy` for every `OSError` that was not `FileNotFoundError`, so an

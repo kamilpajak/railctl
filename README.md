@@ -32,8 +32,9 @@ Linux measurements were taken on 2026-10-14 under WSL2 with the station forwarde
 `usbipd`, where `railctl version` answers XpressNet 4.0 and command station id `0x12` over
 the `-if02` path. **Bare-metal Linux has not been tested by anyone.** On that bench the
 first exchange after each `usbipd attach` answered `61 80`, a Transfer Error; the handshake
-now resends once, so it is invisible, but whether the cause is Linux, usbip or the station
-is not established — `docs/probe-results.md` has the bytes and the reasoning. The automated
+resends once after a 50 ms gap, which is enough to make it invisible, but why the station
+needs that gap is not established — `docs/probe-results.md` has the bytes and the
+reasoning. The automated
 suite runs on Linux in CI with no station attached, so it measures the port-discovery logic
 and not the port.
 

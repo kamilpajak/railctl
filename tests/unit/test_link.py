@@ -153,9 +153,15 @@ def test_open_resends_the_handshake_once_after_a_transfer_error(station):
     assert station.transport.is_open is True
     assert station.link.stats().retries == 1
     assert station.link.stats().requests == 2
-    # One flush, before the FIRST write. A retry does not flush: that flush
-    # clears junk left by opening the port, and the port has not been reopened.
+    # One flush, before the FIRST write. A retry does not flush, and that is
+    # measured rather than assumed: on the bench a resend after flush_input()
+    # was no more answered than one sent with no gap at all.
     assert station.transport.flushes == 1
+    # The gap is the thing that makes the resend work. Measured 2026-10-14: the
+    # station answers a resend 50 ms after a 61 80 in 2 ms, and never answers one
+    # sent immediately - so a retry without this wait fires, counts itself and
+    # still fails, which is exactly how the missing wait was found.
+    assert station.clock.monotonic() >= SETTLE_TIME
 
 
 def test_open_gives_up_on_a_second_transfer_error_without_condemning_the_port(station):

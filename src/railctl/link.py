@@ -29,7 +29,12 @@ if TYPE_CHECKING:
 DEFAULT_TIMEOUT = 5.0  # LI-USB normal-operation exchange budget
 PROGRAMMING_TIMEOUT = 95.0  # service-mode budget: 1.5 min plus margin
 HANDSHAKE_TIMEOUT = 2.0
-SETTLE_TIME = 0.05  # send_no_reply only
+# send_no_reply, and the gap before a handshake resend. Measured 2026-10-14 on
+# the Linux bench: after a 61 80 the station answers a resend sent 50 ms later in
+# 2 ms, and does not answer one sent immediately at all - three fresh attaches,
+# one variable each. Flushing instead of waiting does not help, so the gap is the
+# mechanism and not the buffer.
+SETTLE_TIME = 0.05
 MAX_RETRIES = 1
 _READ_CHUNK = 256
 _READ_SLICE = 0.2  # max blocking time per read, keeps Ctrl-C responsive
@@ -135,11 +140,19 @@ class Link:
                         # docs/probe-results.md, section "The first exchange
                         # after the port is opened answers 61 80".
                         #
-                        # No flush between attempts, unlike the one before the
-                        # first write: that one clears junk left by opening the
-                        # port, and the port has not been reopened. Anything
-                        # still buffered is a frame the station sent, and reading
-                        # it is the point.
+                        # SETTLE_TIME before the resend, and it is load-bearing
+                        # rather than cautious: measured on the Linux bench
+                        # 2026-10-14 across three fresh attaches, one variable
+                        # each, a resend sent immediately is never answered,
+                        # a resend after flush_input() is never answered either,
+                        # and a resend 50 ms later is answered in 2 ms. The gap
+                        # is the mechanism; the buffer is not. Without it this
+                        # retry fires, counts itself, and still fails - which is
+                        # how it was found.
+                        #
+                        # No flush, for the same measurement: it does not help,
+                        # and anything still buffered is a frame the station
+                        # sent, which reading is the point of.
                         if attempts >= MAX_RETRIES:
                             raise LinkProtocolError(
                                 f"{self._transport.description} rejected the "
@@ -149,6 +162,7 @@ class Link:
                             )
                         attempts += 1
                         self._retries += 1
+                        self._clock.sleep(SETTLE_TIME)
                         continue
                     if (
                         len(frame.payload) < 2
