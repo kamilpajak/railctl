@@ -111,18 +111,46 @@ class Link:
             self._transport.open()
             self._transport.flush_input()
             self._envelope.reset()
-            seen = bytearray()
             try:
                 attempts = 0
+                transient: bytes | None = None
                 while True:
+                    # Per ATTEMPT, not per open(). One shared buffer let the
+                    # first attempt spend the whole _ERROR_SAMPLE budget, so a
+                    # telemetry line arriving on the resend - the diagnosis this
+                    # error exists to give - sat invisible behind 32 bytes of
+                    # whatever came first.
+                    seen = bytearray()
                     self._requests += 1
                     self._envelope.note_request(_HANDSHAKE_TELEGRAM)
                     self._transport.write(self._envelope.wrap(_HANDSHAKE_TELEGRAM))
+                    # Recomputed per attempt on purpose: a resend gets a whole
+                    # HANDSHAKE_TIMEOUT of its own. Sharing one deadline makes
+                    # the retry a no-op whenever the first attempt used the
+                    # budget up, which is the case it exists for.
                     deadline = self._clock.monotonic() + HANDSHAKE_TIMEOUT
                     frame = self._pump(deadline, seen)
                     if frame is None:
                         self._envelope.note_abandoned()
                         self._timeouts += 1
+                        if transient is not None:
+                            # The station DID speak XpressNet - it rejected our
+                            # telegram with a transient reply - and then stopped
+                            # answering. PortNotXpressNet here would assert
+                            # `false` ("not an XpressNet port") about a port that
+                            # had just proved otherwise, from evidence the reply
+                            # tables file as no answer either way. A timeout is
+                            # the honest verdict, and it is retryable, which is
+                            # also true: the next invocation usually succeeds.
+                            raise LinkTimeout(
+                                f"{self._transport.description} answered "
+                                f"{hex_bytes(transient)} and then stopped "
+                                f"answering the version request "
+                                f"{hex_bytes(_HANDSHAKE_TELEGRAM)} within "
+                                f"{HANDSHAKE_TIMEOUT} s; bytes received after "
+                                f"the resend: {self._sample(seen)}",
+                                hint=self._transport.diagnostic_hint,
+                            )
                         raise self._not_xpressnet(seen)
                     self._envelope.note_reply(frame)
                     if frame.payload[:2] in _RETRY_PREFIXES:
@@ -157,9 +185,14 @@ class Link:
                             raise LinkProtocolError(
                                 f"{self._transport.description} rejected the "
                                 f"version request {hex_bytes(_HANDSHAKE_TELEGRAM)} "
-                                f"twice (last reply {hex_bytes(frame.payload)})",
+                                f"{attempts + 1} times (last reply "
+                                f"{hex_bytes(frame.payload)})",
                                 hint=self._transport.diagnostic_hint,
                             )
+                        # Remembered so a later timeout cannot be reported as
+                        # "this is not an XpressNet port": this reply proves it
+                        # is one.
+                        transient = frame.payload
                         attempts += 1
                         self._retries += 1
                         self._clock.sleep(SETTLE_TIME)
@@ -196,13 +229,21 @@ class Link:
                     )
                 raise
 
+    @staticmethod
+    def _sample(seen: bytes) -> str:
+        """The bytes an open() failure quotes, bounded and never empty.
+
+        One definition, because both handshake failures quote it and a second
+        copy of the slice is a second thing that can drift.
+        """
+        return hex_bytes(bytes(seen[:_ERROR_SAMPLE])) or "(none)"
+
     def _not_xpressnet(self, seen: bytes) -> PortNotXpressNet:
         """Nothing came back at all within the handshake budget."""
-        sample = hex_bytes(bytes(seen[:_ERROR_SAMPLE])) or "(none)"
         return PortNotXpressNet(
             f"{self._transport.description} did not answer the XpressNet version "
             f"request {hex_bytes(_HANDSHAKE_TELEGRAM)} within {HANDSHAKE_TIMEOUT} s; "
-            f"first bytes received: {sample}",
+            f"first bytes received: {self._sample(seen)}",
             hint=self._transport.diagnostic_hint,
         )
 
