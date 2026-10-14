@@ -77,7 +77,9 @@ def test_the_telemetry_port_shows_bytes_dropped_climbing_with_no_frames():
     Why this opens the port more than once. The stream is periodic, not
     continuous: measured on 2026-08-05 over 30 s, 24 arrivals totalling 554
     bytes, mean gap 1.27 s and MAX GAP 4.83 s. `open()` gives up after
-    HANDSHAKE_TIMEOUT (2.0 s), so a single attempt can legitimately see zero
+    HANDSHAKE_TIMEOUT (2.0 s) here - its resend path needs a reply in
+    `_RETRY_PREFIXES`, and no amount of this ASCII stream ever assembles into a
+    frame, which is the assertion below - so a single attempt can see zero
     bytes on a perfectly healthy station - which is exactly what happened on
     that date, after this test had been passing on luck since M4. The envelope's
     counters are per session and survive `reset()` (only the buffer is per

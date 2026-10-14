@@ -18,29 +18,29 @@ All notable changes to this project are documented in this file. The format foll
   fallback to `/dev/ttyACM*`: where udev has not populated `/dev/serial/by-id`,
   `PortNotFound` is the right answer, because a bare `ttyACM` number says nothing about
   which of this one composite device's three functions it names. An explicit
-  `serial:/dev/serial/by-id/...` target needed no change and already worked.
+  `serial:/dev/serial/by-id/...` target needed no change and already worked (#67).
 
 - **A platform with no measured pattern is refused by name.** `auto` on anything other than
   macOS or Linux raises `unsupported_feature` naming the platform and pointing at
   `serial:<device path>`, rather than reporting `port_not_found` — which would have recorded
-  the station as absent because the instrument was never built for that machine.
+  the station as absent because the instrument was never built for that machine (#67).
 
 ### Changed
 
 - **The device paths are gone from the error hints.** `use serial:/dev/cu.usbmodem... or
   auto` told a Linux operator to type a path their kernel cannot produce; the hints now say
   `serial:<device path>`. The `port_not_found` hint is per platform, so on Linux it names
-  udev and usbipd instead of advising a cable check that is rarely the cause there.
+  udev and usbipd instead of advising a cable check that is rarely the cause there (#67).
 
 - **The failed-handshake hint names both platforms' interface numbering.** It said "3 is
   XpressNet", which on Linux points at a node that cannot exist, so it sent an operator
   looking for hardware instead of at their own command. It now names the interface by its
-  position — the middle of the station's three CDC functions — and gives both numberings.
+  position — the middle of the station's three CDC functions — and gives both numberings (#67).
 
-- **`railctl.transport.PORT_GLOB` no longer exists.** It was a single module-level string and
+- **BREAKING: `railctl.transport.PORT_GLOB` no longer exists.** It was a single module-level string and
   could not describe two platforms. The replacement is `PORT_DISCOVERY`, a sealed table keyed
   by `sys.platform`, read through `discovery_for()`. Nothing outside the module imported the
-  old name.
+  old name (#67).
 
 ### Fixed
 
@@ -51,7 +51,9 @@ All notable changes to this project are documented in this file. The format foll
   treated `61 80` as resend-and-continue, and `xbus/replies.py` files it under
   `TRANSIENT_REPLIES` for exactly that reason, so the one exchange in the tool that could not
   tolerate it was the first one it ever sends. The handshake now resends once, under the same
-  `MAX_RETRIES` bound, and a second Transfer Error raises `link_protocol` rather than the same
+  `MAX_RETRIES` bound, for either reply in `_RETRY_PREFIXES` - `61 80` and `01 0a`, the
+  latter being "the station did not understand the telegram", which says no more about the
+  port than a bad XOR does - and a second Transfer Error raises `link_protocol` rather than the same
   false verdict one attempt later. A reply that is simply wrong — an ASCII line from the
   YD.Control telemetry interface, say — still fails on the first attempt with its bytes quoted.
   This was costing every first command on the Linux bench: measured 2026-10-14, the first
@@ -60,7 +62,11 @@ All notable changes to this project are documented in this file. The format foll
   resend sent immediately is never answered, a resend after flushing the input is never
   answered either, and a resend 50 ms later is answered in 2 ms — three fresh attaches, one
   variable each. Without the wait the retry fires, counts itself and still fails, which is how
-  the missing wait was found.
+  the missing wait was found. Two consequences worth knowing: the resend gets a handshake
+  budget of its own, so the worst case before `open()` gives up is now `2 x 2.0 + 0.05 =
+  4.05` s rather than 2.0 s; and a timeout that follows a retry raises `link_timeout`, not
+  `port_not_xpressnet`, because a station that answered `61 80` has proved the port speaks
+  XpressNet and a later silence says nothing against it (#67).
 
 - **A permission denial on the port no longer reports itself as an occupied port.** Opening
   the device raised `port_busy` for every `OSError` that was not `FileNotFoundError`, so an
@@ -71,7 +77,8 @@ All notable changes to this project are documented in this file. The format foll
   There is now a `port_permission_denied` code, non-retryable, whose hint names `ls -l` and
   `usermod -aG dialout`. This adds a published error code, so a caller enumerating them will
   see 42 where it saw 41; `port_busy` keeps its code and its meaning, minus the permission
-  case its summary used to claim.
+  case its summary used to claim (#67).
+
 
 ## [0.3.0] - 2026-08-26
 

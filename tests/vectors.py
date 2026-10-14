@@ -232,7 +232,7 @@ DECODE_VECTORS: tuple[DecodeVector, ...] = (
         # arrives whole and that z21_form is True, which is how the caller knows
         # which resolution rule to apply.
         CvValue(raw_cv=7, value=145, ident=0x14, z21_form=True),
-        "doc only (spec line 573); never seen on this station, parsed so a Z21 LAN "
+        "doc only (spec line 575); never seen on this station, parsed so a Z21 LAN "
         "transport or a firmware update cannot lose the value",
     ),
     DecodeVector(

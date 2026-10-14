@@ -9,7 +9,7 @@
 > **Added 2026-10-14.** The port name above is the macOS bench's. The same station on Linux
 > enumerates the same three CDC functions under different numbers, and one failure was found
 > there that has no macOS counterpart — see "Linux enumerates the same three CDC functions under
-> different numbers" and "The first exchange after the port is opened answers 61 80" at the end
+> different numbers" and "The first exchange after a fresh usbipd attach answers 61 80" at the end
 > of this file. Nothing above is withdrawn.
 
 ## Settled
@@ -1439,9 +1439,14 @@ USB serial `7010A0001194`, three CDC-ACM functions.
 
 | `/dev/serial/by-id/usb-YaMoRC_YD700x_MultiBus_Command_Station_7010A0001194-…` | node | dmesg | bus |
 | --- | --- | --- | --- |
-| `-if00` | `ttyACM0` | `cdc_acm 1-1:1.0` | LocoNet |
-| `-if02` | `ttyACM1` | `cdc_acm 1-1:1.2` | **XpressNet** |
-| `-if04` | `ttyACM2` | `cdc_acm 1-1:1.4` | YD.Control telemetry |
+| `-if00` | `ttyACM0` | `cdc_acm 1-1:1.0` | LocoNet — **inferred from interface order, not measured** |
+| `-if02` | `ttyACM1` | `cdc_acm 1-1:1.2` | **XpressNet — handshaked, see step 3** |
+| `-if04` | `ttyACM2` | `cdc_acm 1-1:1.4` | YD.Control telemetry — **measured, see step 4** |
+
+Only two of those three bus identities were measured. `-if02` answered the version request;
+`-if04` produced the ASCII stream (step 4). `-if00` is positional inference: LocoNet is recorded
+as silent on the macOS bench, so listening to it cannot confirm anything, and nothing was sent
+to it.
 
 **The numbering is the trap, and it is worth stating twice.** macOS names a node after each
 function's CDC *data* interface — 1, 3, 5 — which is where `/dev/cu.usbmodem*3` came from.
@@ -1455,10 +1460,16 @@ wire, and a glob written `-if03` matches nothing at all. dmesg's `1-1:1.0` / `1-
 | 1 | `ls -l /dev/serial/by-id/` | the three symlinks above |
 | 2 | `glob.glob("/dev/serial/by-id/usb-YaMoRC_YD700x*-if02")` | exactly one path |
 | 3 | `railctl --target serial:<that path> version` | XpressNet **4.0**, command station id **0x12** (18), four runs of four |
+| 4 | `Link.open()` against the `-if04` node, five attempts (M4 acceptance) | `PortNotXpressNet`, `frames_ok=0`, `bytes_dropped=7`, first bytes `59 44 2E 51 3A 56 0D` |
 
 Step 3's bytes are the ordinary handshake: `21 21 00` out, `63 21 40 12 10` back — byte for byte
 what this file records for the macOS bench on 2026-08-04, through a different kernel and a
 different driver.
+
+Step 4 is what identifies `-if04` rather than assuming it. `59 44 2E 51 3A 56 0D` is `YD.Q:V\r` —
+ASCII, not XpressNet — and `frames_ok=0` after five full handshake windows is the measurement
+that no amount of that stream ever assembles into a frame. Same verdict as the macOS `…45`
+node, through a different kernel.
 
 `os.open` follows the symlink, so the serial transport needed no change: a `by-id` path opens the
 `ttyACM` node behind it and the line settings are applied to that node. One macOS invariant does
@@ -1474,10 +1485,20 @@ a special case.
 
 ### What this does NOT establish
 
-That railctl works on bare-metal Linux. Every Linux byte above went through usbip. The kernel's
-CDC-ACM driver is the same either way, which is an argument and not a measurement.
+- That railctl works on bare-metal Linux. Every Linux byte above went through usbip. The
+  kernel's CDC-ACM driver is the same either way, which is an argument and not a measurement.
+- That `-if00` is LocoNet. Nothing was sent to it; the identity is interface order plus the
+  macOS port map.
+- That one unit generalises to the `usb-YaMoRC_YD700x*` pattern the code now ships. One
+  station, serial `7010A0001194`, one firmware. The `YD700x` wildcard is a guess about a
+  product family, narrowed by the handshake as every pattern here is.
+- That udev's by-id naming is stable across distributions and udev versions. It was read on one
+  Ubuntu 24.04 under WSL2.
+- That `O_NONBLOCK` plus `CLOCAL` substitutes for the macOS `cu` invariant anywhere but this
+  bench. "Four opens of four returned immediately" is four opens on one machine, and spec line
+  202 now states it as an invariant on the strength of that.
 
-## The first exchange after the port is opened answers 61 80 — FOUND 2026-10-14, cause NOT established
+## The first exchange after a fresh usbipd attach answers 61 80 — FOUND 2026-10-14, cause NOT established
 
 Reproduced twice, both times on the first command after a fresh `usbipd attach`:
 
@@ -1501,7 +1522,7 @@ from a reply this project classifies as no answer either way. Corrected in the s
 this measurement: the handshake now retries under the existing `MAX_RETRIES` bound and reserves
 `PortNotXpressNet` for a reply that is not transient.
 
-### The resend needs a gap, and the gap is the whole mechanism — SETTLED 2026-10-14
+### A 50 ms gap before the resend is answered where no gap is not — FOUND 2026-10-14, mechanism NOT established
 
 Adding the retry was not enough, and the way it failed is worth keeping: it fired, counted
 itself, and still failed. The wire log of a first `railctl version` after an attach, with the
@@ -1523,10 +1544,20 @@ did not answer. Three fresh attaches, one variable changed in each:
 | `flush_input()` then immediately | **none**, 2011 ms |
 | a 50 ms wait (`SETTLE_TIME`) | `FF FE 63 21 40 12 10` in **2 ms** |
 
-So the gap is the mechanism and the input buffer is not: flushing is no better than not
-flushing, and waiting fixes it. That also explains why a *second invocation* always worked
-before the retry existed — closing and reopening the port, plus starting a new process, is
-itself far more than 50 ms of gap.
+What that supports, and no more: waiting 50 ms changed the outcome; flushing without waiting did
+not; flush-plus-wait was never tried, so "the buffer does not matter" is known only at wait = 0.
+One trial per condition, in a system whose own documented behaviour is attach-to-attach
+non-determinism — the least forgiving place for single-shot cells.
+
+**An earlier version of this section claimed the gap explains why a *second invocation* always
+worked, and that was wrong.** A second invocation sent one telegram and succeeded; it never
+received a `61 80`, so no resend and no gap were involved. And if the rule were "50 ms of quiet
+since our last telegram", the very first exchange after an attach — preceded by no telegram at
+all — would be the one exchange that could never fail, where in fact it is the only one that
+does. The two observations do not reduce to one mechanism, and the inference is withdrawn. What
+the data supports is narrower: the failure is scoped to the first exchange after an attach,
+which is why a later invocation never saw it, and separately a resend with no gap goes
+unanswered.
 
 `SETTLE_TIME` already existed for `send_no_reply` and is now also the handshake's resend gap.
 With it in place, the first `railctl version` after a fresh attach answers XpressNet 4.0 and
@@ -1534,9 +1565,15 @@ command station id `0x12` with no `--target` and no config file.
 
 ### What the gap does NOT establish
 
-Why the station needs it. 50 ms is the first value tried and it worked; the threshold was not
-bisected, and nothing says whether the station is busy, the usbip round trip is settling, or
-`cdc_acm` is. A value that works is not a mechanism.
+- Why the station needs it. 50 ms is the first value tried and it worked; the threshold was not
+  bisected, and nothing says whether the station is busy, the usbip round trip is settling, or
+  `cdc_acm` is. A value that works is not a mechanism.
+- That the live variable is the gap since *our last write* rather than the time since the attach
+  or the enumeration. Each row above is a different fresh attach, and the row that succeeded is
+  also the row whose resend happened latest in absolute time after its attach. Those two
+  explanations are not separated by these trials — which is the same separation the section
+  above says two observations on one transport cannot make.
+- That the input buffer is irrelevant when a gap IS taken. Flush-plus-wait is the untried cell.
 
 **The transport caveat, stated plainly.** The only Linux bench is WSL2 with the device forwarded
 by `usbipd` over `vhci_hcd`. A usbip round trip is not a plain CDC-ACM open: the first URB after

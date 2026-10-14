@@ -171,7 +171,7 @@ class Link:
                         # usbipd attach answered 61 80 and every later one
                         # succeeded, so every first command failed. See
                         # docs/probe-results.md, section "The first exchange
-                        # after the port is opened answers 61 80".
+                        # after a fresh usbipd attach answers 61 80".
                         #
                         # SETTLE_TIME before the resend, and it is load-bearing
                         # rather than cautious: on the bench a resend sent with

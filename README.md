@@ -18,7 +18,7 @@ on either side — macOS names a node after each function's data interface (1, 3
 Linux's `by-id` after its control interface (`if00`, `if02`, `if04`), so macOS `3` and Linux
 `-if02` are the same wire and `-if03` matches nothing. A platform with no measured pattern
 is refused by name rather than reported as a missing port; `--target serial:<device path>`
-needs no discovery and works anywhere `termios` does.
+needs no discovery, and has been run on macOS and on Linux under WSL2 — nowhere else.
 
 On Linux `auto` needs `/dev/serial/by-id`, which udev creates — without udev there is
 nothing to glob. The node is usually owned by the `dialout` group, so a first run that says
@@ -32,16 +32,19 @@ Linux measurements were taken on 2026-10-14 under WSL2 with the station forwarde
 `usbipd`, where `railctl version` answers XpressNet 4.0 and command station id `0x12` over
 the `-if02` path. **Bare-metal Linux has not been tested by anyone.** On that bench the
 first exchange after each `usbipd attach` answered `61 80`, a Transfer Error; the handshake
-resends once after a 50 ms gap, which is enough to make it invisible, but why the station
-needs that gap is not established — `docs/probe-results.md` has the bytes and the
-reasoning. The automated
-suite runs on Linux in CI with no station attached, so it measures the port-discovery logic
-and not the port.
+resends once after a 50 ms gap, which was enough that the bench stopped seeing it. Why the
+station needs that gap is not established, and a resend that is itself unanswered still
+fails — `docs/probe-results.md` has the bytes and the reasoning. The automated suite runs on
+Linux in CI with no station attached, so it measures the port-discovery logic and not the
+port. Every hardware number quoted here comes from one bench and one operator, and cannot
+be re-run from this repository.
 
-`tools/probe/` is frozen M1 output and still looks for `/dev/cu.usbmodem7010*`. On Linux it
-reports the station as not connected whatever is attached, by design: its mutation baseline
-was measured against that exact source and reformatting it would invalidate a measured
-number. Use `railctl` itself there.
+`tools/probe/` is frozen M1 output and still looks for `/dev/cu.usbmodem7010*`, so on Linux
+it reports the station as not connected whatever is attached. That is an instrument calling
+a present station absent, which this project otherwise treats as the defect to avoid; it
+stays because its mutation baseline was measured against that exact source and editing it
+would invalidate a measured number. Frozen, therefore wrong on Linux — use `railctl` itself
+there.
 
 ## Start here
 
