@@ -57,6 +57,48 @@ def test_two_candidates_raise_ambiguous_port_naming_both():
     assert PORT_43 in str(caught.value)
     assert PORT_OTHER in str(caught.value)
     assert "serial:" in caught.value.hint
+    # No pattern quoted: nothing was globbed, so naming one would be a fiction
+    # about a search that never happened.
+    assert "matching" not in str(caught.value)
+
+
+def test_a_globbed_ambiguous_port_names_the_pattern_it_matched(monkeypatch):
+    """The other half of the conditional above. `auto` DID glob, so the pattern
+    is the most useful thing in the message - it says which search produced two
+    answers.
+    """
+    monkeypatch.setattr(transport_module.glob, "glob", lambda pattern: [PORT_43, PORT_OTHER])
+
+    with pytest.raises(AmbiguousPort) as caught:
+        find_xpressnet_port()
+
+    assert f"matching {discovery_for().pattern}" in str(caught.value)
+
+
+@pytest.mark.parametrize("platform", ["win32", "freebsd14"])
+def test_candidates_offered_on_an_unmeasured_platform_are_still_port_not_found(
+    platform, monkeypatch
+):
+    """A caller who supplies candidates touches no glob, no platform and no
+    device path, so neither the message nor the exception class may depend on
+    which kernel is running.
+
+    Resolving the discovery before the candidates branch turned this into
+    UnsupportedFeatureError - the same question, a different exit code - on
+    every POSIX platform outside the table. Nothing noticed, because the host
+    running the suite is always in the table.
+    """
+    monkeypatch.setattr(transport_module, "_current_platform", lambda: platform)
+
+    with pytest.raises(PortNotFound) as caught:
+        find_xpressnet_port([])
+    assert "candidates offered" in str(caught.value)
+    assert "udev" not in str(caught.value.hint)
+
+    with pytest.raises(AmbiguousPort):
+        find_xpressnet_port([PORT_43, PORT_OTHER])
+
+    assert find_xpressnet_port([PORT_43]) == PORT_43
 
 
 def test_an_explicit_serial_target_is_used_verbatim():
@@ -166,7 +208,7 @@ def test_discovery_defaults_to_the_platform_it_is_running_on(platform, monkeypat
     test passes while both of those mutations survive - measured, not assumed.
     """
     seen_patterns = []
-    monkeypatch.setattr(transport_module.sys, "platform", platform)
+    monkeypatch.setattr(transport_module, "_current_platform", lambda: platform)
     monkeypatch.setattr(
         transport_module.glob, "glob", lambda pattern: seen_patterns.append(pattern) or []
     )
@@ -182,7 +224,7 @@ def test_a_platform_nobody_measured_is_refused_rather_than_reported_empty(monkey
     this machine. The refusal names the platform and still offers serial:, which
     needs no discovery at all.
     """
-    monkeypatch.setattr(transport_module.sys, "platform", "win32")
+    monkeypatch.setattr(transport_module, "_current_platform", lambda: "win32")
     monkeypatch.setattr(
         transport_module.glob,
         "glob",
@@ -211,17 +253,15 @@ def test_the_nothing_found_hint_belongs_to_its_platform(monkeypatch):
     linux_hint = discovery_for("linux").nothing_found_hint
     darwin_hint = discovery_for("darwin").nothing_found_hint
 
-    # Both platforms keep the physical check, which is right on either. Only
-    # Linux names udev and usbipd, and asserting their ABSENCE on macOS is not
-    # enough on its own: every string that is not the Linux hint satisfies that,
-    # so the macOS hint has to be pinned for what it does say. Measured by
-    # mutation - replacing it passed the whole file before this line existed.
+    # The macOS hint is pinned to its text, not to what it lacks. Asserting only
+    # the absence of "udev" is satisfied by every string that is not the Linux
+    # hint - measured by mutation twice: first replacing the hint outright passed
+    # all twenty tests, then "cable" in darwin_hint still let it shrink to that
+    # one word.
+    assert darwin_hint == "check the USB cable and that the station is powered"
     assert "cable" in linux_hint
-    assert "cable" in darwin_hint
     assert "udev" in linux_hint
     assert "usbipd" in linux_hint
-    assert "udev" not in darwin_hint
-    assert "usbipd" not in darwin_hint
 
     monkeypatch.setattr(transport_module.glob, "glob", lambda pattern: [])
 

@@ -29,11 +29,16 @@ if TYPE_CHECKING:
 DEFAULT_TIMEOUT = 5.0  # LI-USB normal-operation exchange budget
 PROGRAMMING_TIMEOUT = 95.0  # service-mode budget: 1.5 min plus margin
 HANDSHAKE_TIMEOUT = 2.0
-# send_no_reply, and the gap before a handshake resend. Measured 2026-10-14 on
-# the Linux bench: after a 61 80 the station answers a resend sent 50 ms later in
-# 2 ms, and does not answer one sent immediately at all - three fresh attaches,
-# one variable each. Flushing instead of waiting does not help, so the gap is the
-# mechanism and not the buffer.
+# TWO call sites now: send_no_reply, and the gap before a handshake resend.
+# Retuning it for one retunes the other, and the two rest on unrelated
+# measurements - split it before changing it for either.
+#
+# What was measured, 2026-10-14 on the Linux bench, one trial per condition:
+# after a 61 80 the station answered a resend sent 50 ms later in 2 ms, did not
+# answer one sent immediately, and did not answer one sent immediately after
+# flush_input() either. 50 ms is the FIRST value tried; the threshold was not
+# bisected, flush-plus-wait was not tried, and the cause is not established -
+# see docs/probe-results.md. A value that works is not a mechanism.
 SETTLE_TIME = 0.05
 MAX_RETRIES = 1
 _READ_CHUNK = 256
@@ -169,18 +174,18 @@ class Link:
                         # after the port is opened answers 61 80".
                         #
                         # SETTLE_TIME before the resend, and it is load-bearing
-                        # rather than cautious: measured on the Linux bench
-                        # 2026-10-14 across three fresh attaches, one variable
-                        # each, a resend sent immediately is never answered,
-                        # a resend after flush_input() is never answered either,
-                        # and a resend 50 ms later is answered in 2 ms. The gap
-                        # is the mechanism; the buffer is not. Without it this
+                        # rather than cautious: on the bench a resend sent with
+                        # no wait was not answered at all, so without it this
                         # retry fires, counts itself, and still fails - which is
-                        # how it was found.
+                        # how the missing wait was found. One trial per
+                        # condition; why the station needs it is not
+                        # established.
                         #
-                        # No flush, for the same measurement: it does not help,
-                        # and anything still buffered is a frame the station
-                        # sent, which reading is the point of.
+                        # No flush: flushing without waiting was no better than
+                        # not flushing, and anything still buffered is a frame
+                        # the station sent, which reading is the point of.
+                        # Flush-plus-wait was never tried, so "the buffer does
+                        # not matter" is only known at wait=0.
                         if attempts >= MAX_RETRIES:
                             raise LinkProtocolError(
                                 f"{self._transport.description} rejected the "

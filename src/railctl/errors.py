@@ -224,7 +224,16 @@ class UnsupportedCommandError(RailctlError):
 
 
 class UnsupportedFeatureError(RailctlError):
-    """Outside this tool's declared scope (consists, unprobed F13+)."""
+    """Outside this tool's declared scope (consists, unprobed F13+), or asked of
+    a platform whose port discovery has never been measured.
+
+    The second half was added when `auto` learned two platforms. It is NOT the
+    same as "the station is not there": the refusal says nobody built the
+    instrument for this machine, which is why it is not `port_not_found`. The
+    summary says so explicitly because this is the published one, and "out of
+    scope" alone would have read as a decision where the truth is an absence of
+    measurement.
+    """
 
     code: ClassVar[str] = "unsupported_feature"
 

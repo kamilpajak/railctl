@@ -46,6 +46,33 @@ def test_a_port_that_does_not_fit_the_table_is_an_error_not_a_guess():
         telemetry_sibling("/dev/cu.usbmodem7010A00011941", "darwin")
 
 
+def test_the_prefix_is_checked_and_not_only_the_suffix():
+    """On darwin the suffix is the single character "3", so a suffix-only guard
+    accepts almost anything - including a node from another device family, or a
+    *1 LocoNet node from a station whose serial happens to end in 3. Both ends
+    have to match before the arithmetic is allowed to run.
+    """
+    with pytest.raises(AssertionError, match="port shape table is stale"):
+        telemetry_sibling("/dev/ttyACM3", "darwin")
+    with pytest.raises(AssertionError, match="port shape table is stale"):
+        telemetry_sibling("/dev/ttyACM1-if02", "linux")
+
+
+def test_the_suffix_is_replaced_at_the_end_only_never_everywhere():
+    """A bounded slice, not str.replace. replace() rewrites the suffix wherever
+    it occurs, which is wrong in two ways nothing else here would catch: a darwin
+    serial that contains the suffix character, and a by-id path where "-if02"
+    appears twice.
+    """
+    darwin_with_a_3_inside = "/dev/cu.usbmodem7010A00031943"
+    assert telemetry_sibling(darwin_with_a_3_inside, "darwin") == ("/dev/cu.usbmodem7010A00031945")
+
+    doubled = "/dev/serial/by-id/usb-YaMoRC_YD700x_Station-if02-if02"
+    assert telemetry_sibling(doubled, "linux") == (
+        "/dev/serial/by-id/usb-YaMoRC_YD700x_Station-if02-if04"
+    )
+
+
 def test_an_unmeasured_platform_is_named_rather_than_guessed_at():
     with pytest.raises(KeyError, match="win32"):
         port_shape("win32")

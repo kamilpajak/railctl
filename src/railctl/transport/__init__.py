@@ -6,10 +6,10 @@ its problem. write() writes everything or raises TransportError.
 
 diagnostic_hint is here rather than in link.py on purpose. When a handshake or an
 exchange fails, the useful advice is about the CONNECTION, and only the transport
-knows what kind of connection it is - which CDC function of a composite device the
-serial port is, a network address for the future Z21 UDP transport. Spec line 583 requires the LAN
-transport to land with no edit to link.py, so link.py must not hold either
-sentence.
+knows what kind of connection it is - which CDC function of a composite device
+the serial port is, a network address for the future Z21 UDP transport. Spec
+line 583 requires the LAN transport to land with no edit to link.py, so link.py
+must not hold either sentence.
 """
 
 from __future__ import annotations
@@ -83,10 +83,12 @@ class Discovery:
 # See docs/probe-results.md, section "Linux enumerates the same three CDC
 # functions under different numbers".
 #
-# MappingProxyType rather than a bare dict: the table is a platform claim, and
-# tests/unit/test_open_link.py is the only place its contents are checked, so a
-# later PORT_DISCOVERY[...] = ... would pass that check by mutating what it
-# compares against. EXIT_MEANINGS in exit_codes.py is sealed the same way.
+# MappingProxyType rather than a bare dict, for what it actually buys: a platform
+# cannot be added or replaced by item assignment at runtime, so the table a
+# reader sees here is the table `auto` uses. It does NOT stop the module
+# attribute being rebound, and nothing needs it to - the contents are compared
+# against a separate literal in tests/unit/test_open_link.py, not against
+# themselves. EXIT_MEANINGS in exit_codes.py is sealed the same way.
 #
 # Either pattern is still a guess, exactly as the single one was: confirmation
 # is Link.open()'s handshake and it is mandatory.
@@ -110,20 +112,35 @@ PORT_DISCOVERY: Final[Mapping[str, Discovery]] = MappingProxyType(
 Z21_DEFAULT_PORT = 21105
 
 
+def _current_platform() -> str:
+    """`sys.platform` behind a seam, so a test can replace it without reaching
+    into the real `sys` module.
+
+    `import sys` binds the module object itself, so
+    `monkeypatch.setattr(transport.sys, "platform", ...)` changes `sys.platform`
+    for pytest, hypothesis and every other module for the duration of the test.
+    It happened to be harmless here, but the blast radius was the interpreter
+    rather than this package, and a flake caused that way is very hard to
+    localise.
+    """
+    return sys.platform
+
+
 def discovery_for(platform: str | None = None) -> Discovery:
     """How `auto` looks for the station on `platform` - or a refusal to guess.
 
-    sys.platform is read HERE and deliberately not captured as a default
+    The platform is read HERE and deliberately not captured as a default
     argument value: a default is evaluated once, at import, so
-    `platform: str = sys.platform` would freeze whichever machine imported the
-    module. Every `auto` run on the other platform would then glob a pattern
-    that cannot match, and no test that patched sys.platform afterwards could
-    tell - it would be reading the frozen constant back to itself.
+    `platform: str = _current_platform()` would freeze whichever machine
+    imported the module. Every `auto` run on the other platform would then glob
+    a pattern that cannot match, and no test that replaced the platform
+    afterwards could tell - it would be reading the frozen constant back to
+    itself.
 
     Resolution is lazy for a second reason: an unmeasured platform raises, and
     raising at import time would take `railctl --help` down with it.
     """
-    name = sys.platform if platform is None else platform
+    name = _current_platform() if platform is None else platform
     found = PORT_DISCOVERY.get(name)
     if found is None:
         # Not PortNotFound. Nobody looked: there is no measured pattern for this
@@ -160,9 +177,13 @@ def find_xpressnet_port(candidates: Sequence[str] | None = None) -> str:
                 f"no XpressNet CDC port matching {discovery.pattern}",
                 hint=discovery.nothing_found_hint,
             )
+        # No platform-flavoured advice on this path: the caller chose the
+        # candidates, so a cable check is a guess about a machine this branch
+        # knows nothing about - and the darwin wording was the one thing the
+        # per-platform hints exist to stop a Linux operator reading.
         raise PortNotFound(
             "no XpressNet CDC port among the candidates offered",
-            hint="check the USB cable and that the station is powered",
+            hint="name a device explicitly, for example serial:<device path>",
         )
     if len(found) > 1:
         joined = ", ".join(found)

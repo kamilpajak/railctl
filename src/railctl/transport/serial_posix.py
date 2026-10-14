@@ -112,9 +112,12 @@ class SerialTransport:
             # whose published meaning is "another process holds it, retry may
             # work". No retry clears a group membership, and an agent reading
             # retryable: true will try for ever.
+            # "refused access", not "the device exists": EACCES also comes from
+            # a parent directory this process cannot search, in which case the
+            # node may not be there at all and `ls -l` on it fails the same way.
             raise PortPermissionDenied(
-                f"cannot open {self._config.port}: {exc.strerror} - the device "
-                f"exists and this process may not open it",
+                f"cannot open {self._config.port}: {exc.strerror} - the OS "
+                f"refused this process access to it",
                 hint=(
                     "this is not another process holding the port and retrying "
                     "will not clear it; check the owner and group with "

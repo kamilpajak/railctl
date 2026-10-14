@@ -56,8 +56,20 @@ def telemetry_sibling(port: str, platform: str | None = None) -> str:
 
     A port that does not fit the table raises rather than returning a guess, so
     a stale table cannot turn into a skip either.
+
+    BOTH ends are checked. Checking only the suffix was close to vacuous on
+    macOS, where the suffix is the single character "3": every path ending in a
+    3 satisfied it, including a *1 LocoNet node from a station whose serial ends
+    in 3.
+
+    The arithmetic is a bounded slice, not str.replace, and that is the case the
+    unit test pins: replace() rewrites the suffix wherever it occurs, so a
+    darwin serial containing the suffix character ("...0003194 3") or a by-id
+    path where "-if02" appears twice both come out wrong, silently.
     """
-    _prefix, xpressnet, telemetry = port_shape(platform)
-    if not port.endswith(xpressnet):
-        raise AssertionError(f"{port} does not end in {xpressnet!r}; the port shape table is stale")
+    prefix, xpressnet, telemetry = port_shape(platform)
+    if not (port.startswith(prefix) and port.endswith(xpressnet)):
+        raise AssertionError(
+            f"{port} is not {prefix!r}...{xpressnet!r}; the port shape table is stale"
+        )
     return port[: -len(xpressnet)] + telemetry

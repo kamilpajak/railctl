@@ -45,7 +45,10 @@ def test_a_permission_denial_says_so_instead_of_blaming_another_process(monkeypa
     with pytest.raises(PortPermissionDenied) as caught:
         transport.open()
 
-    assert "may not open it" in str(caught.value)
+    assert "refused this process access" in str(caught.value)
+    # NOT "the device exists": EACCES also comes from an unsearchable parent
+    # directory, where the node may not be there at all.
+    assert "exists" not in str(caught.value)
     assert "dialout" in caught.value.hint
     assert "retrying will not clear it" in caught.value.hint
     assert transport.is_open is False
