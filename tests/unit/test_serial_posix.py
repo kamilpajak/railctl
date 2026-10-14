@@ -1,11 +1,13 @@
 # tests/unit/test_serial_posix.py
 from __future__ import annotations
 
+import errno
 import os
 
 import pytest
 
-from railctl.errors import PortConfigError, TransportError
+from railctl.errors import PortConfigError, PortPermissionDenied, TransportError
+from railctl.transport import serial_posix
 from railctl.transport.serial_posix import SerialConfig, SerialTransport
 
 
@@ -20,6 +22,32 @@ def test_open_on_a_non_serial_device_raises_port_config_error():
     with pytest.raises(PortConfigError, match="is not a serial device"):
         transport.open()
 
+    assert transport.is_open is False
+
+
+def test_a_permission_denial_says_so_instead_of_blaming_another_process(monkeypatch):
+    """The ordinary first run on Linux: the CDC node is owned by dialout and the
+    account is not in the group yet.
+
+    It used to be reported in the words of the one port failure it is not -
+    PortBusy, "another process holds it", whose published meaning is that
+    retrying may work. It is the one failure a retry can never clear, so an agent
+    reading retryable: true would try for ever and a human would go looking for a
+    process that was never there.
+    """
+
+    def deny(*_args, **_kwargs):
+        raise PermissionError(errno.EACCES, "Permission denied")
+
+    monkeypatch.setattr(serial_posix.os, "open", deny)
+    transport = SerialTransport(SerialConfig("/dev/does-not-matter"))
+
+    with pytest.raises(PortPermissionDenied) as caught:
+        transport.open()
+
+    assert "may not open it" in str(caught.value)
+    assert "dialout" in caught.value.hint
+    assert "retrying will not clear it" in caught.value.hint
     assert transport.is_open is False
 
 

@@ -30,7 +30,14 @@ import select
 import termios
 from dataclasses import dataclass
 
-from railctl.errors import PortBusy, PortConfigError, PortNotFound, PortNotOpen, TransportError
+from railctl.errors import (
+    PortBusy,
+    PortConfigError,
+    PortNotFound,
+    PortNotOpen,
+    PortPermissionDenied,
+    TransportError,
+)
 
 BAUDRATE = 57600
 # Suggested read size for callers; Link uses its own private _READ_CHUNK, a
@@ -78,6 +85,24 @@ class SerialTransport:
             fd = os.open(self._config.port, os.O_RDWR | os.O_NOCTTY | os.O_NONBLOCK)
         except FileNotFoundError as exc:
             raise PortNotFound(f"{self._config.port} does not exist") from exc
+        except PermissionError as exc:
+            # Split out of the blanket OSError below because the two share an
+            # errno class and nothing else. On Linux the CDC node is owned by
+            # the dialout group, so this is the ordinary first run of a new
+            # account - and the blanket branch reported it under port_busy,
+            # whose published meaning is "another process holds it, retry may
+            # work". No retry clears a group membership, and an agent reading
+            # retryable: true will try for ever.
+            raise PortPermissionDenied(
+                f"cannot open {self._config.port}: {exc.strerror} - the device "
+                f"exists and this process may not open it",
+                hint=(
+                    "this is not another process holding the port and retrying "
+                    "will not clear it; check the owner and group with "
+                    f"ls -l {self._config.port}, then on Linux "
+                    "sudo usermod -aG dialout $USER and log in again"
+                ),
+            ) from exc
         except OSError as exc:
             raise PortBusy(f"cannot open {self._config.port}: {exc.strerror}") from exc
         try:

@@ -52,6 +52,17 @@ All notable changes to this project are documented in this file. The format foll
   This was costing every first command on the Linux bench: measured 2026-10-14, the first
   exchange after each `usbipd attach` answered `61 80` and every later one succeeded.
 
+- **A permission denial on the port no longer reports itself as an occupied port.** Opening
+  the device raised `port_busy` for every `OSError` that was not `FileNotFoundError`, so an
+  `EACCES` — on Linux the ordinary first run of an account that is not yet in the `dialout`
+  group — was reported as "another process holds it", under a code whose published meaning is
+  "transient, retry may work". No retry clears a group membership: a human went looking for a
+  process that was never there, and an agent reading `retryable: true` would try for ever.
+  There is now a `port_permission_denied` code, non-retryable, whose hint names `ls -l` and
+  `usermod -aG dialout`. This adds a published error code, so a caller enumerating them will
+  see 42 where it saw 41; `port_busy` keeps its code and its meaning, minus the permission
+  case its summary used to claim.
+
 ## [0.3.0] - 2026-08-26
 
 ### Changed

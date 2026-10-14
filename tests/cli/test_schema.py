@@ -393,8 +393,9 @@ def test_a_summary_is_a_whole_thought_not_the_first_physical_line():
     # fragment "...another process holds it," as the summary a caller reads.
     rows = {row["code"]: row for row in error_codes()}
     assert rows["port_busy"]["summary"] == (
-        "The port exists but could not be opened - another process holds it, or permission "
-        "was denied. The message carries the OS strerror either way."
+        "The port exists but could not be opened - another process holds it, or the OS "
+        "refused for a reason with no class of its own. The message carries the OS strerror "
+        "either way."
     )
     # And the clause this whole project turns on survives, which a first-SENTENCE rule
     # would have cut off after "budget.".
@@ -425,7 +426,10 @@ def test_error_codes_list_exactly_the_exception_tree_plus_the_two_reserved_codes
     published = {row["code"] for row in error_codes()}
     assert published == set(PUBLISHED_ERROR_CODES.values()) | RESERVED_CODES
     assert len(error_codes()) == len(published)  # no duplicate rows
-    assert len(published) == 41
+    # 42 since port_permission_denied split out of port_busy: the two shared an
+    # errno class and nothing else, and port_busy is retryable where a group
+    # membership never clears on a retry.
+    assert len(published) == 42
 
 
 def test_error_code_rows_read_their_facts_off_the_class():
