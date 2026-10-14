@@ -32,6 +32,11 @@ All notable changes to this project are documented in this file. The format foll
   `serial:<device path>`. The `port_not_found` hint is per platform, so on Linux it names
   udev and usbipd instead of advising a cable check that is rarely the cause there.
 
+- **The failed-handshake hint names both platforms' interface numbering.** It said "3 is
+  XpressNet", which on Linux points at a node that cannot exist, so it sent an operator
+  looking for hardware instead of at their own command. It now names the interface by its
+  position — the middle of the station's three CDC functions — and gives both numberings.
+
 - **`railctl.transport.PORT_GLOB` no longer exists.** It was a single module-level string and
   could not describe two platforms. The replacement is `PORT_DISCOVERY`, a sealed table keyed
   by `sys.platform`, read through `discovery_for()`. Nothing outside the module imported the

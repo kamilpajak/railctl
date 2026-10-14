@@ -47,9 +47,24 @@ WRITE_SELECT_TIMEOUT = 1.0
 # Link quotes this whenever a handshake or an exchange fails on a serial port.
 # It lives here and not in link.py because the future Z21 LAN transport must be
 # a pure addition: spec line 583 allows no edit to link.py.
+#
+# It names the interface by its POSITION among the station's three CDC functions
+# and then gives both numberings, because the two kernels number the same three
+# differently: macOS after each function's data interface (1, 3, 5), Linux's
+# /dev/serial/by-id after its control interface (if00, if02, if04). The previous
+# wording said only "3 is XpressNet", which on Linux points at a node that
+# cannot exist - "-if03" matches nothing - so this hint sent a Linux operator
+# looking for hardware instead of at their own command. Measured 2026-10-14; see
+# docs/probe-results.md, section "Linux enumerates the same three CDC functions
+# under different numbers".
+#
+# The constant keeps its name: it is still the hint about which CDC function you
+# are talking to, and tests/unit/test_open_link.py imports it.
 CDC_INDEX_HINT = (
-    "on this hardware the CDC interface index picks the bus: 1 is LocoNet, "
-    "3 is XpressNet, 5 is the YD.Control telemetry stream"
+    "the station exposes three CDC functions and only the middle one speaks "
+    "XpressNet: first LocoNet (silent), second XpressNet, third the YD.Control "
+    "telemetry stream - macOS numbers them 1, 3, 5 and Linux /dev/serial/by-id "
+    "names them -if00, -if02, -if04"
 )
 
 
