@@ -1460,16 +1460,22 @@ wire, and a glob written `-if03` matches nothing at all. dmesg's `1-1:1.0` / `1-
 | 1 | `ls -l /dev/serial/by-id/` | the three symlinks above |
 | 2 | `glob.glob("/dev/serial/by-id/usb-YaMoRC_YD700x*-if02")` | exactly one path |
 | 3 | `railctl --target serial:<that path> version` | XpressNet **4.0**, command station id **0x12** (18), four runs of four |
-| 4 | `Link.open()` against the `-if04` node, five attempts (M4 acceptance) | `PortNotXpressNet`, `frames_ok=0`, `bytes_dropped=7`, first bytes `59 44 2E 51 3A 56 0D` |
+| 4 | `Link.open()` against the `-if04` node (M4 acceptance, up to five attempts, stops once bytes are dropped) | `PortNotXpressNet`, `frames_ok=0`, first bytes `59 44 2E 51 3A 56 0D`. Two runs: 5 attempts / `bytes_dropped=7`, and 1 attempt / `bytes_dropped=35` |
 
 Step 3's bytes are the ordinary handshake: `21 21 00` out, `63 21 40 12 10` back — byte for byte
 what this file records for the macOS bench on 2026-08-04, through a different kernel and a
 different driver.
 
 Step 4 is what identifies `-if04` rather than assuming it. `59 44 2E 51 3A 56 0D` is `YD.Q:V\r` —
-ASCII, not XpressNet — and `frames_ok=0` after five full handshake windows is the measurement
-that no amount of that stream ever assembles into a frame. Same verdict as the macOS `…45`
-node, through a different kernel.
+ASCII, not XpressNet — the longer run decodes further as `[CS0] V:8.2.8 7010A00011…`, the
+station's own firmware banner — and `frames_ok=0` is the measurement that no amount of that
+stream ever assembles into a frame. Same verdict as the macOS `…45` node, through a different
+kernel.
+
+`bytes_dropped` is not a constant and must not be read as one: the test stops as soon as the
+counter moves, so it reports however much of the stream happened to arrive in the window it
+needed. `frames_ok` is the load-bearing half, which is why the acceptance test asserts that and
+not the byte count.
 
 `os.open` follows the symlink, so the serial transport needed no change: a `by-id` path opens the
 `ttyACM` node behind it and the line settings are applied to that node. One macOS invariant does
