@@ -35,8 +35,27 @@ jobs:
         # The whole non-hardware suite must pass on a machine that has never seen
         # a YD7010. If a runner ever grew a serial device, a test could start
         # passing for the wrong reason and nothing would say so.
+        #
+        # This used to be `! ls /dev/ttyUSB* /dev/ttyACM* 2>/dev/null`, and that
+        # guard could not see the device class it most needed to. With no
+        # nullglob an unmatched pattern is passed through literally, GNU ls exits
+        # 2 on an inaccessible operand, and the `!` turns that failure into a
+        # pass - so it only ever fired when BOTH globs matched. A runner carrying
+        # a YD7010 is a CDC-ACM device and nothing else, which is exactly the
+        # single-glob case it waved through. Measured on coreutils 9.4: only
+        # ttyACM0 present -> ls exit 2 -> guard exit 0.
+        #
+        # Testing each path on its own is what fixes it. /dev/serial/by-id is in
+        # the list because that is where `auto` looks on Linux now; -e follows
+        # the symlink, so a dangling by-id entry is ignored and a live one trips.
         run: |
-          ! ls /dev/ttyUSB* /dev/ttyACM* 2>/dev/null
+          for p in /dev/ttyUSB* /dev/ttyACM* /dev/serial/by-id/*; do
+            if [ -e "$p" ]; then
+              echo "serial device present: $p" >&2
+              exit 1
+            fi
+          done
+          exit 0
 
       - name: Ruff check
         run: uv run ruff check .
