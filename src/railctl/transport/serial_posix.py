@@ -29,6 +29,7 @@ CRTSCTS, no HUPCL so closing does not reset the adapter).
 
 from __future__ import annotations
 
+import errno
 import os
 import select
 import termios
@@ -42,6 +43,12 @@ from railctl.errors import (
     PortPermissionDenied,
     TransportError,
 )
+
+# Structural facts about the path, not conditions that clear on a retry: a
+# directory, a non-directory used as one, or a symlink chain too deep to follow.
+# They say "this is not a serial device" exactly as a rejected tcgetattr does,
+# and routing them to PortBusy published them as retryable.
+_NOT_A_DEVICE_ERRNOS = frozenset({errno.EISDIR, errno.ENOTDIR, errno.ELOOP})
 
 BAUDRATE = 57600
 # Suggested read size for callers; Link uses its own private _READ_CHUNK, a
@@ -126,6 +133,18 @@ class SerialTransport:
                 ),
             ) from exc
         except OSError as exc:
+            if exc.errno in _NOT_A_DEVICE_ERRNOS:
+                # Same wording and same class as the tcgetattr failure below,
+                # because it is the same fact about the path. Found by pointing
+                # the tool at a directory: EISDIR was landing in the blanket
+                # branch under port_busy, which publishes "transient, retry may
+                # work" - and /tmp will not become a serial port on the second
+                # attempt. /dev/null already reported this correctly, through
+                # termios rather than open(), so the right bucket existed and
+                # these errnos simply never reached it.
+                raise PortConfigError(
+                    f"{self._config.port} is not a serial device: {exc.strerror}"
+                ) from exc
             raise PortBusy(f"cannot open {self._config.port}: {exc.strerror}") from exc
         try:
             cc = list(termios.tcgetattr(fd)[6])

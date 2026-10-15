@@ -68,6 +68,14 @@ All notable changes to this project are documented in this file. The format foll
   `port_not_xpressnet`, because a station that answered `61 80` has proved the port speaks
   XpressNet and a later silence says nothing against it (#67).
 
+- **A path that cannot be a serial device is no longer reported as a busy port.** Pointing
+  `--target serial:` at a directory gave `port_busy`, exit 7, `retryable: true` — "transient,
+  retry may work" — and a directory does not become a serial port on the second attempt.
+  `EISDIR`, `ENOTDIR` and `ELOOP` are structural facts about the path, so they now give
+  `port_config` with the same "is not a serial device" wording that `/dev/null` already
+  produced through `termios`: the right class existed and these errnos never reached it. Found
+  by exploratory testing, and the same misdiagnosis as the permission case below (#67).
+
 - **A permission denial on the port no longer reports itself as an occupied port.** Opening
   the device raised `port_busy` for every `OSError` that was not `FileNotFoundError`, so an
   `EACCES` — on Linux the ordinary first run of an account that is not yet in the `dialout`
