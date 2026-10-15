@@ -1513,12 +1513,48 @@ protect, measured here against an instrument that had nothing to measure.
 `--no-save` was honoured (`saved_to: null`, nothing written to the config directory), and the
 run energised nothing: no `--power-on` was passed, and the status byte was `0x06` on both sides.
 
+### Two railctl processes can hold the same port, and the second one looks like a slow station — FOUND 2026-10-15
+
+Measured while trying to watch broadcasts: `railctl monitor` was left running and a second
+`railctl status` was issued against the same `auto` target.
+
+| | |
+| --- | --- |
+| expected | `port_busy` — "another process holds it", exit 7 |
+| measured | `link_timeout`, exit 7, `retryable: true` |
+
+Both opens succeeded. Nothing on this platform makes the second one fail: `os.open` on a
+`ttyACM` node is not exclusive unless the opener asks for it with `ioctl(TIOCEXCL)`, and
+railctl does not. So the second process wrote its telegram, the first consumed the reply, and
+the second waited out its budget and reported silence.
+
+Two consequences, and the second is the interesting one:
+
+- The LI-USB one-command-in-flight rule is enforced **within** a process, by the lock in
+  `link.py`, and not **across** processes. Nothing warns an operator who runs two at once.
+- `PortBusy`'s published summary opens with "another process holds it", and on this bench no
+  process ever does. A second railctl is reported as a timeout instead, which is retryable and
+  true in the sense that the other process will eventually finish — but the diagnosis points at
+  the station rather than at the other invocation.
+
+`TIOCEXCL` after open is the POSIX mechanism that would make the second open fail with `EBUSY`,
+which is what `PortBusy` already claims to mean. It is deliberately **not** changed here: it
+alters the serial layer on both platforms, it cannot be verified on the macOS bench from this
+one, and it would newly break anyone deliberately running a reader alongside another tool.
+
 ### What this does NOT establish
 
 - That railctl works on bare-metal Linux. Every Linux byte above went through usbip. The
   kernel's CDC-ACM driver is the same either way, which is an argument and not a measurement.
 - Anything about the decoder-dependent checks themselves. They were `unknown` because nothing
   was on the track; this run says the verdict is honest, not that the probes work.
+- That `monitor` decodes a broadcast on Linux. It opens the port and waits, and on this bench
+  nothing ever broadcast while it watched: the state changes that would provoke one come from
+  `railctl` itself, and a second `railctl` on the one XpressNet port corrupts the session, as
+  above. The M6 acceptance test gets around this by asking a human to press the station's own
+  STOP button. `monitor`'s decode path is therefore still unexercised on Linux.
+- That `port_busy` is reachable at all on this platform. Two concurrent opens succeed, and the
+  errnos that remain in its branch are the ones nothing was observed to produce.
 - That `-if00` is LocoNet. Nothing was sent to it; the identity is interface order plus the
   macOS port map.
 - That one unit generalises to the `usb-YaMoRC_YD700x*` pattern the code now ships. One
