@@ -9,14 +9,18 @@ cosmetic; we set it because Lenz 23151 section 1.1 specifies it.
 The rate goes through `getattr(termios, f"B{rate}")` rather than straight into
 the termios list. On Darwin the constant IS the literal value (B57600 == 57600)
 so the lookup changes nothing, but on Linux the speed constants are small
-indices and passing 57600 makes tcsetattr fail with EINVAL. railctl is macOS
-only, yet CI runs on Linux, and the pty test for read()'s end-of-file handling
-opens a real terminal through this method - so the literal made that test fail
-on every CI run while passing locally. A capability the tests cannot reach on
-the machine that runs them is a capability nobody is measuring.
+indices and passing 57600 makes tcsetattr fail with EINVAL. The literal was
+first caught by CI, which runs on Linux and opens a real terminal through this
+method in the pty test for read()'s end-of-file handling - it failed on every CI
+run while passing locally. Since 2026-10-14 Linux is a supported platform rather
+than only the CI host, so that lookup is production code on a real bench. A
+capability the tests cannot reach on the machine that runs them is a capability
+nobody is measuring.
 
-Flags that are load-bearing: /dev/cu.* never /dev/tty.* (call-out, does not
-block on DCD); O_NOCTTY (a line BREAK would otherwise deliver SIGINT); lflag 0
+Flags that are load-bearing: on macOS /dev/cu.* never /dev/tty.* (call-out, does
+not block on DCD); Linux has no call-out twin, so there we open the ttyACM node
+a /dev/serial/by-id symlink points at and O_NONBLOCK plus CLOCAL give the same
+guarantee; O_NOCTTY (a line BREAK would otherwise deliver SIGINT); lflag 0
 (ISIG turns an incoming 0x03 into SIGINT, ICANON waits for 0x0A); iflag 0
 (PARMRK duplicates 0xFF, ISTRIP clears bit 7, ICRNL/INLCR rewrite 0x0D/0x0A -
 and our payloads legitimately contain all of those); cflag CS8|CREAD|CLOCAL (no
@@ -25,12 +29,26 @@ CRTSCTS, no HUPCL so closing does not reset the adapter).
 
 from __future__ import annotations
 
+import errno
 import os
 import select
 import termios
 from dataclasses import dataclass
 
-from railctl.errors import PortBusy, PortConfigError, PortNotFound, PortNotOpen, TransportError
+from railctl.errors import (
+    PortBusy,
+    PortConfigError,
+    PortNotFound,
+    PortNotOpen,
+    PortPermissionDenied,
+    TransportError,
+)
+
+# Structural facts about the path, not conditions that clear on a retry: a
+# directory, a non-directory used as one, or a symlink chain too deep to follow.
+# They say "this is not a serial device" exactly as a rejected tcgetattr does,
+# and routing them to PortBusy published them as retryable.
+_NOT_A_DEVICE_ERRNOS = frozenset({errno.EISDIR, errno.ENOTDIR, errno.ELOOP})
 
 BAUDRATE = 57600
 # Suggested read size for callers; Link uses its own private _READ_CHUNK, a
@@ -40,9 +58,24 @@ WRITE_SELECT_TIMEOUT = 1.0
 # Link quotes this whenever a handshake or an exchange fails on a serial port.
 # It lives here and not in link.py because the future Z21 LAN transport must be
 # a pure addition: spec line 583 allows no edit to link.py.
+#
+# It names the interface by its POSITION among the station's three CDC functions
+# and then gives both numberings, because the two kernels number the same three
+# differently: macOS after each function's data interface (1, 3, 5), Linux's
+# /dev/serial/by-id after its control interface (if00, if02, if04). The previous
+# wording said only "3 is XpressNet", which on Linux points at a node that
+# cannot exist - "-if03" matches nothing - so this hint sent a Linux operator
+# looking for hardware instead of at their own command. Measured 2026-10-14; see
+# docs/probe-results.md, section "Linux enumerates the same three CDC functions
+# under different numbers".
+#
+# The constant keeps its name: it is still the hint about which CDC function you
+# are talking to, and tests/unit/test_open_link.py imports it.
 CDC_INDEX_HINT = (
-    "on this hardware the CDC interface index picks the bus: 1 is LocoNet, "
-    "3 is XpressNet, 5 is the YD.Control telemetry stream"
+    "the station exposes three CDC functions and only the middle one speaks "
+    "XpressNet: first LocoNet (silent), second XpressNet, third the YD.Control "
+    "telemetry stream - macOS numbers them 1, 3, 5 and Linux /dev/serial/by-id "
+    "names them -if00, -if02, -if04"
 )
 
 
@@ -78,7 +111,40 @@ class SerialTransport:
             fd = os.open(self._config.port, os.O_RDWR | os.O_NOCTTY | os.O_NONBLOCK)
         except FileNotFoundError as exc:
             raise PortNotFound(f"{self._config.port} does not exist") from exc
+        except PermissionError as exc:
+            # Split out of the blanket OSError below because the two share an
+            # errno class and nothing else. On Linux the CDC node is owned by
+            # the dialout group, so this is the ordinary first run of a new
+            # account - and the blanket branch reported it under port_busy,
+            # whose published meaning is "another process holds it, retry may
+            # work". No retry clears a group membership, and an agent reading
+            # retryable: true will try for ever.
+            # "refused access", not "the device exists": EACCES also comes from
+            # a parent directory this process cannot search, in which case the
+            # node may not be there at all and `ls -l` on it fails the same way.
+            raise PortPermissionDenied(
+                f"cannot open {self._config.port}: {exc.strerror} - the OS "
+                f"refused this process access to it",
+                hint=(
+                    "this is not another process holding the port and retrying "
+                    "will not clear it; check the owner and group with "
+                    f"ls -l {self._config.port}, then on Linux "
+                    "sudo usermod -aG dialout $USER and log in again"
+                ),
+            ) from exc
         except OSError as exc:
+            if exc.errno in _NOT_A_DEVICE_ERRNOS:
+                # Same wording and same class as the tcgetattr failure below,
+                # because it is the same fact about the path. Found by pointing
+                # the tool at a directory: EISDIR was landing in the blanket
+                # branch under port_busy, which publishes "transient, retry may
+                # work" - and /tmp will not become a serial port on the second
+                # attempt. /dev/null already reported this correctly, through
+                # termios rather than open(), so the right bucket existed and
+                # these errnos simply never reached it.
+                raise PortConfigError(
+                    f"{self._config.port} is not a serial device: {exc.strerror}"
+                ) from exc
             raise PortBusy(f"cannot open {self._config.port}: {exc.strerror}") from exc
         try:
             cc = list(termios.tcgetattr(fd)[6])

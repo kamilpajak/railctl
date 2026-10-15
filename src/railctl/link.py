@@ -29,7 +29,17 @@ if TYPE_CHECKING:
 DEFAULT_TIMEOUT = 5.0  # LI-USB normal-operation exchange budget
 PROGRAMMING_TIMEOUT = 95.0  # service-mode budget: 1.5 min plus margin
 HANDSHAKE_TIMEOUT = 2.0
-SETTLE_TIME = 0.05  # send_no_reply only
+# TWO call sites now: send_no_reply, and the gap before a handshake resend.
+# Retuning it for one retunes the other, and the two rest on unrelated
+# measurements - split it before changing it for either.
+#
+# What was measured, 2026-10-14 on the Linux bench, one trial per condition:
+# after a 61 80 the station answered a resend sent 50 ms later in 2 ms, did not
+# answer one sent immediately, and did not answer one sent immediately after
+# flush_input() either. 50 ms is the FIRST value tried; the threshold was not
+# bisected, flush-plus-wait was not tried, and the cause is not established -
+# see docs/probe-results.md. A value that works is not a mechanism.
+SETTLE_TIME = 0.05
 MAX_RETRIES = 1
 _READ_CHUNK = 256
 _READ_SLICE = 0.2  # max blocking time per read, keeps Ctrl-C responsive
@@ -106,28 +116,106 @@ class Link:
             self._transport.open()
             self._transport.flush_input()
             self._envelope.reset()
-            seen = bytearray()
             try:
-                self._requests += 1
-                self._envelope.note_request(_HANDSHAKE_TELEGRAM)
-                self._transport.write(self._envelope.wrap(_HANDSHAKE_TELEGRAM))
-                deadline = self._clock.monotonic() + HANDSHAKE_TIMEOUT
-                frame = self._pump(deadline, seen)
-                if frame is None:
-                    self._envelope.note_abandoned()
-                    self._timeouts += 1
-                    raise self._not_xpressnet(seen)
-                self._envelope.note_reply(frame)
-                if (
-                    len(frame.payload) < 2
-                    or frame.payload[0] != _VERSION_HEADER
-                    or frame.payload[1] != _VERSION_MARKER
-                ):
-                    # A different failure from silence, and it gets a different
-                    # message: the station answered, and the bytes it answered
-                    # with are the evidence.
-                    raise self._wrong_version_reply(frame)
-                self._version_telegram = frame.payload
+                attempts = 0
+                transient: bytes | None = None
+                while True:
+                    # Per ATTEMPT, not per open(). One shared buffer let the
+                    # first attempt spend the whole _ERROR_SAMPLE budget, so a
+                    # telemetry line arriving on the resend - the diagnosis this
+                    # error exists to give - sat invisible behind 32 bytes of
+                    # whatever came first.
+                    seen = bytearray()
+                    self._requests += 1
+                    self._envelope.note_request(_HANDSHAKE_TELEGRAM)
+                    self._transport.write(self._envelope.wrap(_HANDSHAKE_TELEGRAM))
+                    # Recomputed per attempt on purpose: a resend gets a whole
+                    # HANDSHAKE_TIMEOUT of its own. Sharing one deadline makes
+                    # the retry a no-op whenever the first attempt used the
+                    # budget up, which is the case it exists for.
+                    deadline = self._clock.monotonic() + HANDSHAKE_TIMEOUT
+                    frame = self._pump(deadline, seen)
+                    if frame is None:
+                        self._envelope.note_abandoned()
+                        self._timeouts += 1
+                        if transient is not None:
+                            # The station DID speak XpressNet - it rejected our
+                            # telegram with a transient reply - and then stopped
+                            # answering. PortNotXpressNet here would assert
+                            # `false` ("not an XpressNet port") about a port that
+                            # had just proved otherwise, from evidence the reply
+                            # tables file as no answer either way. A timeout is
+                            # the honest verdict, and it is retryable, which is
+                            # also true: the next invocation usually succeeds.
+                            raise LinkTimeout(
+                                f"{self._transport.description} answered "
+                                f"{hex_bytes(transient)} and then stopped "
+                                f"answering the version request "
+                                f"{hex_bytes(_HANDSHAKE_TELEGRAM)} within "
+                                f"{HANDSHAKE_TIMEOUT} s; bytes received after "
+                                f"the resend: {self._sample(seen)}",
+                                hint=self._transport.diagnostic_hint,
+                            )
+                        raise self._not_xpressnet(seen)
+                    self._envelope.note_reply(frame)
+                    if frame.payload[:2] in _RETRY_PREFIXES:
+                        # The handshake is the one exchange in this tool that
+                        # could not tolerate a Transfer Error, and it is the
+                        # first one we ever send. 61 80 means the station did not
+                        # receive our telegram intact, which says nothing about
+                        # what kind of port this is - replies.py files it under
+                        # TRANSIENT_REPLIES for exactly that reason. Condemning
+                        # the port on it recorded `false` from evidence this
+                        # project classifies as no answer either way. Measured on
+                        # the Linux bench 2026-10-14: the first exchange after a
+                        # usbipd attach answered 61 80 and every later one
+                        # succeeded, so every first command failed. See
+                        # docs/probe-results.md, section "The first exchange
+                        # after a fresh usbipd attach answers 61 80".
+                        #
+                        # SETTLE_TIME before the resend, and it is load-bearing
+                        # rather than cautious: on the bench a resend sent with
+                        # no wait was not answered at all, so without it this
+                        # retry fires, counts itself, and still fails - which is
+                        # how the missing wait was found. One trial per
+                        # condition; why the station needs it is not
+                        # established.
+                        #
+                        # No flush: flushing without waiting was no better than
+                        # not flushing, and anything still buffered is a frame
+                        # the station sent, which reading is the point of.
+                        # Flush-plus-wait was never tried, so "the buffer does
+                        # not matter" is only known at wait=0.
+                        if attempts >= MAX_RETRIES:
+                            raise LinkProtocolError(
+                                f"{self._transport.description} rejected the "
+                                f"version request {hex_bytes(_HANDSHAKE_TELEGRAM)} "
+                                f"{attempts + 1} times (last reply "
+                                f"{hex_bytes(frame.payload)})",
+                                hint=self._transport.diagnostic_hint,
+                            )
+                        # Remembered so a later timeout cannot be reported as
+                        # "this is not an XpressNet port": this reply proves it
+                        # is one.
+                        transient = frame.payload
+                        attempts += 1
+                        self._retries += 1
+                        self._clock.sleep(SETTLE_TIME)
+                        continue
+                    if (
+                        len(frame.payload) < 2
+                        or frame.payload[0] != _VERSION_HEADER
+                        or frame.payload[1] != _VERSION_MARKER
+                    ):
+                        # A different failure from silence, and it gets a
+                        # different message: the station answered, and the bytes
+                        # it answered with are the evidence. Reserved for a reply
+                        # that is NOT transient - an ASCII telemetry line from
+                        # the YD.Control interface still lands here, which is the
+                        # diagnosis this error exists to give.
+                        raise self._wrong_version_reply(frame)
+                    self._version_telegram = frame.payload
+                    break
             except BaseException:
                 # close() itself can fail - os.close() on a tty whose USB
                 # device has just been unplugged is exactly the moment that
@@ -146,13 +234,21 @@ class Link:
                     )
                 raise
 
+    @staticmethod
+    def _sample(seen: bytes) -> str:
+        """The bytes an open() failure quotes, bounded and never empty.
+
+        One definition, because both handshake failures quote it and a second
+        copy of the slice is a second thing that can drift.
+        """
+        return hex_bytes(bytes(seen[:_ERROR_SAMPLE])) or "(none)"
+
     def _not_xpressnet(self, seen: bytes) -> PortNotXpressNet:
         """Nothing came back at all within the handshake budget."""
-        sample = hex_bytes(bytes(seen[:_ERROR_SAMPLE])) or "(none)"
         return PortNotXpressNet(
             f"{self._transport.description} did not answer the XpressNet version "
             f"request {hex_bytes(_HANDSHAKE_TELEGRAM)} within {HANDSHAKE_TIMEOUT} s; "
-            f"first bytes received: {sample}",
+            f"first bytes received: {self._sample(seen)}",
             hint=self._transport.diagnostic_hint,
         )
 

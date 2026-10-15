@@ -2,7 +2,7 @@
 
 ## Purpose
 
-`railctl` is a command-line tool for driving and configuring DCC model locomotives from macOS through a YaMoRC YD7010 command station over USB. It speaks XpressNet across the station's LI-USB-compatible CDC port, so it can read and write decoder CVs, back them up to a file, restore them, and run a locomotive (speed, direction, functions). The immediate user is the author, with one locomotive carrying a **ZIMO MS450P22** sound decoder (MS family, PluX22, 1.2 A continuous) on a bench layout; the immediate need is tuning that decoder without a Windows programmer. That decoder has RailCom enabled — **measured 2026-08-04: CV29 = 14 (bit 3 set) and CV28 = 3 (bits 0 and 1, channel 1 and channel 2)**. The ZIMO MS manual gives 3 as the correct value for this decoder class and 67 only for large scale decoders. An earlier draft of this document asserted 67 and used it to argue that POM should be the primary CV path; both were wrong, and the measurements replaced that framing entirely — see **CV operations by track** below. The design keeps a second transport (Z21 over LAN) in view: adding it must mean adding a transport and an envelope, nothing else. Everything the station cannot be proven to support is treated as unknown until a `doctor` run measures it on the real hardware.
+`railctl` is a command-line tool for driving and configuring DCC model locomotives from macOS or Linux through a YaMoRC YD7010 command station over USB. It speaks XpressNet across the station's LI-USB-compatible CDC port, so it can read and write decoder CVs, back them up to a file, restore them, and run a locomotive (speed, direction, functions). The immediate user is the author, with one locomotive carrying a **ZIMO MS450P22** sound decoder (MS family, PluX22, 1.2 A continuous) on a bench layout; the immediate need is tuning that decoder without a Windows programmer. That decoder has RailCom enabled — **measured 2026-08-04: CV29 = 14 (bit 3 set) and CV28 = 3 (bits 0 and 1, channel 1 and channel 2)**. The ZIMO MS manual gives 3 as the correct value for this decoder class and 67 only for large scale decoders. An earlier draft of this document asserted 67 and used it to argue that POM should be the primary CV path; both were wrong, and the measurements replaced that framing entirely — see **CV operations by track** below. The design keeps a second transport (Z21 over LAN) in view: adding it must mean adding a transport and an envelope, nothing else. Everything the station cannot be proven to support is treated as unknown until a `doctor` run measures it on the real hardware.
 
 ## Scope
 
@@ -50,7 +50,7 @@ Every programming-track command prints once, on stderr: *"Programming track: thi
 - Speed step modes other than 128 for commanding (other modes are reported, not commanded).
 - Register and paged programming modes as a *usable* fallback (the replies are recognised and reported, never acted on).
 - Interactive TUI, long-lived sessions, cancellation of an in-flight service-mode operation.
-- Windows and Linux support (the `termios` layer is Darwin-specific by design).
+- Windows support (CPython on Windows has no `termios`, so even `import railctl.transport` fails). **Linux was a non-goal here until 2026-10-14**, when `auto` discovery was measured on it and this bullet was corrected - see `docs/probe-results.md`, section "Linux enumerates the same three CDC functions under different numbers".
 
 ## Architecture
 
@@ -181,25 +181,25 @@ class Transport(Protocol):
     @property
     def is_open(self) -> bool: ...
     @property
-    def description(self) -> str: ...   # "xpressnet serial /dev/cu.usbmodem...3"
+    def description(self) -> str: ...   # "xpressnet serial <device path>", e.g. /dev/cu.usbmodem...3 or .../by-id/...-if02
     @property
     def identity(self) -> str: ...      # USB serial, "host:port", or "unknown"
 
 def open_link(target: str = "auto") -> Link: ...
 #   "auto"                        -> autodetect, then handshake
-#   "serial:/dev/cu.usbmodem...3" -> that port
+#   "serial:<device path>"        -> that port (cu.usbmodem...3, or by-id ...-if02)
 #   "z21:192.168.0.111:21105"     -> future LAN transport
 ```
 
 `read()` blocks up to `timeout`, returns as soon as one byte is available, returns `b""` on timeout, and never raises on timeout — framing is not its problem. `write()` writes everything or raises `TransportError`.
 
-**Why no pyserial.** Its POSIX backend is `os.open` + `termios.tcsetattr` + `select`. We need 57600 8-N-1, which is a POSIX-standard rate whose Darwin constant is the literal value (`termios.B57600 == 57600`). The device is USB CDC-ACM, so the rate is forwarded as `SET_LINE_CODING` to a fixed-rate virtual UART and is essentially cosmetic; we set it because Lenz 23151 section 1.1 specifies it. No flow control, no DTR toggling. Result: no wheels, no ABI risk on Python 3.14. Portability note: on Linux the speed constants are small indices, so a Linux port needs a lookup table — this is the only platform assumption in the file.
+**Why no pyserial.** Its POSIX backend is `os.open` + `termios.tcsetattr` + `select`. We need 57600 8-N-1, which is a POSIX-standard rate whose Darwin constant is the literal value (`termios.B57600 == 57600`). The device is USB CDC-ACM, so the rate is forwarded as `SET_LINE_CODING` to a fixed-rate virtual UART and is essentially cosmetic; we set it because Lenz 23151 section 1.1 specifies it. No flow control, no DTR toggling. Result: no wheels, no ABI risk on Python 3.14. Portability note: on Linux the speed constants are small indices, which is why the rate goes through `getattr(termios, f"B{rate}")` rather than the literal. That lookup and the per-platform discovery patterns in `transport/__init__.py` are the platform assumptions in this layer; the `cu`-versus-`tty` invariant below is a third.
 
 `SerialTransport(SerialConfig(port, baudrate=57600))` with `open/close/read/write/flush_input`, context-manager support, and a private `_configure(fd)`. Settings that are load-bearing:
 
 | Setting | Why |
 |---|---|
-| `/dev/cu.*`, never `/dev/tty.*` | `cu` is call-out and does not block in `open()` waiting for DCD |
+| `/dev/cu.*` on macOS, never `/dev/tty.*`; on Linux a `/dev/serial/by-id` symlink onto a `ttyACM` node, which has no call-out twin | `cu` is call-out and does not block in `open()` waiting for DCD; on Linux the same guarantee comes from `O_NONBLOCK` on the open plus `CLOCAL` in `cflag` - measured 2026-10-14, four opens of four returned immediately |
 | `O_NOCTTY` | otherwise a line BREAK delivers `SIGINT` to the process |
 | `O_NONBLOCK`, `VMIN=0`, `VTIME=0` | `os.read` returns buffered bytes immediately; all waiting is done by `select` |
 | `lflag = 0` | `ISIG` would turn an incoming `0x03` into `SIGINT`; `ICANON` would wait for `0x0A` |
@@ -210,7 +210,7 @@ def open_link(target: str = "auto") -> Link: ...
 
 `WRITE_SELECT_TIMEOUT = 1.0`, `READ_CHUNK = 256`, `BAUDRATE = 57600`.
 
-**Port discovery and confirmation.** `find_xpressnet_port()` globs `/dev/cu.usbmodem*3` (the CDC interface index: 1 = LocoNet, 3 = XpressNet, 5 = YD.Control), raising `PortNotFound` or `AmbiguousPort`. The glob is a guess. Confirmation is mandatory and happens in `Link.open()`: send `21 21 00`, require a reply with header `0x63` and first data byte `0x21` within `HANDSHAKE_TIMEOUT = 2.0` s, else raise `PortNotXpressNet` naming the port and quoting up to 32 received bytes — so an ASCII telemetry line from the YD.Control port is visible in the error instead of a bare 5 s timeout. This applies to auto-detected and explicit targets alike.
+**Port discovery and confirmation.** `find_xpressnet_port()` globs this platform's pattern - `/dev/cu.usbmodem*3` on macOS and `/dev/serial/by-id/usb-YaMoRC_YD700x*-if02` on Linux (macOS names a node after each function's CDC data interface - 1 = LocoNet, 3 = XpressNet, 5 = YD.Control - and Linux's by-id names it after the control interface, so macOS's 3 is Linux's `-if02` and a pattern written `-if03` matches nothing; measured 2026-10-14) - raising `PortNotFound`, `AmbiguousPort`, or `UnsupportedFeatureError` on a platform nobody has measured, because "no port matched" there would record the station as absent when the instrument was never built for that machine. There is no fallback to `/dev/ttyACM*`: a bare interface number does not say which of this composite device's three functions it is. The glob is a guess. Confirmation is mandatory and happens in `Link.open()`: send `21 21 00`, require a reply with header `0x63` and first data byte `0x21` within `HANDSHAKE_TIMEOUT = 2.0` s, else raise `PortNotXpressNet` naming the port and quoting up to 32 received bytes - so an ASCII telemetry line from the YD.Control port is visible in the error instead of a bare 5 s timeout. A reply in `_RETRY_PREFIXES` (`61 80`, `01 0a`) is resent once under `MAX_RETRIES` first, after a `SETTLE_TIME` gap, because those replies say our telegram did not arrive and say nothing about what kind of port this is; the resend gets a `HANDSHAKE_TIMEOUT` of its own, so the worst case to failure is `2 x 2.0 + 0.05 = 4.05` s, and a timeout that follows a retry raises `LinkTimeout` rather than `PortNotXpressNet` - the port answered on XpressNet, so it is not the port that is in question. This applies to auto-detected and explicit targets alike.
 
 `FakeTransport` (shipped, not test-only, so probes reuse it) adds `queue(data)`, `written`, `on_write: Callable[[bytes, FakeTransport], None]` and `max_write: int | None`. `on_write` lets a test script a station: the callback inspects the outgoing frame and queues the reply, reproducing real request/response ordering with no threads and no sleeps. `max_write` forces short writes so the partial-write loop, which never runs on real 10-byte frames, is still covered.
 
@@ -1582,7 +1582,7 @@ Secondary items to settle during M1, each with a one-line consequence: **status 
 
 1. **ZIMO sound-CV descriptions — partly resolved.** The official ZIMO MS manual confirms **CV265 = sound project / loco type selection** (used with sound collections, e.g. 1 = BR50, 2 = BR78, 101 = BR211) and **CV266 = master volume, default 60, typical working range 40–90**. It also confirms **CV147/148/149 are PID settings** that replace CV56 when any of them is non-zero — so CV56's description must say "only effective while CV147 = CV148 = CV149 = 0". Still open: CV273–277, CV287, CV288, CV313, CV314 and CV395–397 are specific to the *sound project* loaded on the decoder, not to the decoder model. Can you supply the CV sheet for the sound project actually installed on your MS450P22? Without it those descriptions ship as best-effort. The numbers are stable regardless, so this affects labels only.
 2. **Speed step modes other than 128.** `drive` always sends the 128-step telegram, which also forces the station into 128-step mode for that locomotive. Does any locomotive on your layout need 14, 27 or 28 steps? If not, this stays out permanently.
-3. **Telemetry port.** `/dev/cu.usbmodem…5` streams `[CS0] M: TC 0mA LC 0mA TV 15.2V TT 25.3'C CT 35.7'C CA 26 CB 08`. Parsing it would put real track current, voltage and temperature into `railctl status` and make short-circuit diagnosis obvious. Worth a second transport in 0.1.0, or leave `monitor` printing the raw lines?
+3. **Telemetry port.** `/dev/cu.usbmodem…5` on macOS (`…-if04` by-id on Linux) streams `[CS0] M: TC 0mA LC 0mA TV 15.2V TT 25.3'C CT 35.7'C CA 26 CB 08`. Parsing it would put real track current, voltage and temperature into `railctl status` and make short-circuit diagnosis obvious. Worth a second transport in 0.1.0, or leave `monitor` printing the raw lines?
 4. **Serial number byte order.** `serial = CV251<<16 | CV252<<8 | CV253` is an assumption. The raw bytes are stored too and identity checks compare the raw bytes, so a wrong composition is cosmetic — but can you confirm it against the sticker on the decoder?
 5. **Additional curated sets.** Only `curated` (the 77-CV set above) is defined; the `--set` mechanism supports more. Which extra sets are worth curating depends on what you actually tune — motor-only and sound-only are the obvious candidates.
 

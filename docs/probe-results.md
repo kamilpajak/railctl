@@ -6,11 +6,18 @@
   to the **programming track** for the R2 / R4 service-mode section below.
 - Run: 2026-08-04; power-state section added 2026-08-05
 
+> **Added 2026-10-14.** The port name above is the macOS bench's. The same station on Linux
+> enumerates the same three CDC functions under different numbers, and one failure was found
+> there that has no macOS counterpart — see "Linux enumerates the same three CDC functions under
+> different numbers" and "The first exchange after a fresh usbipd attach answers 61 80" at the end
+> of this file. Nothing above is withdrawn.
+
 ## Settled
 
 | Question | Answer | Evidence |
 | --- | --- | --- |
 | Port map | `…41` LocoNet (silent), `…43` XpressNet, `…45` YD.Control telemetry | passive listen |
+| Port map on Linux | `-if00` LocoNet, `-if02` XpressNet, `-if04` telemetry — the same three functions | `/dev/serial/by-id` + dmesg + handshake, 2026-10-14 |
 | Identity | XpressNet 4.0, id `0x12` | `63 21 40 12` |
 | R5 — single function `E4 F8` | **works** | `E4 F8 00 03 40` accepted, headlight lit |
 | Function groups 4 and 5 (F13–F28) | **work** | `E4 23` / `E4 28` accepted |
@@ -1423,3 +1430,236 @@ cannot make its encoders agree with ours by accident.
 That a CV which answered `0` is implemented at all. That is the ordinary silence-versus-zero
 ambiguity and it applies at every CV number, not only above 511 - it is not a property of
 the high range and no read can settle it.
+
+## Linux enumerates the same three CDC functions under different numbers — SETTLED 2026-10-14
+
+Bench: WSL2 (Ubuntu 24.04) with the station forwarded from the Windows host by `usbipd` over
+`vhci_hcd`. One composite USB device, `03eb:245a`, "YaMoRC YD700x MultiBus Command Station",
+USB serial `7010A0001194`, three CDC-ACM functions.
+
+| `/dev/serial/by-id/usb-YaMoRC_YD700x_MultiBus_Command_Station_7010A0001194-…` | node | dmesg | bus |
+| --- | --- | --- | --- |
+| `-if00` | `ttyACM0` | `cdc_acm 1-1:1.0` | LocoNet — **inferred from interface order, not measured** |
+| `-if02` | `ttyACM1` | `cdc_acm 1-1:1.2` | **XpressNet — handshaked, see step 3** |
+| `-if04` | `ttyACM2` | `cdc_acm 1-1:1.4` | YD.Control telemetry — **measured, see step 4** |
+
+Only two of those three bus identities were measured. `-if02` answered the version request;
+`-if04` produced the ASCII stream (step 4). `-if00` is positional inference: LocoNet is recorded
+as silent on the macOS bench, so listening to it cannot confirm anything, and nothing was sent
+to it.
+
+**The numbering is the trap, and it is worth stating twice.** macOS names a node after each
+function's CDC *data* interface — 1, 3, 5 — which is where `/dev/cu.usbmodem*3` came from.
+Linux's `by-id` names it after the function's *control* interface — `if00`, `if02`, `if04`. The
+XpressNet function is the middle one on both, so macOS `…43` and Linux `-if02` are the same
+wire, and a glob written `-if03` matches nothing at all. dmesg's `1-1:1.0` / `1-1:1.2` /
+`1-1:1.4` is a third view of the same three numbers.
+
+| step | command | result |
+| --- | --- | --- |
+| 1 | `ls -l /dev/serial/by-id/` | the three symlinks above |
+| 2 | `glob.glob("/dev/serial/by-id/usb-YaMoRC_YD700x*-if02")` | exactly one path |
+| 3 | `railctl --target serial:<that path> version` | XpressNet **4.0**, command station id **0x12** (18), four runs of four |
+| 4 | `Link.open()` against the `-if04` node (M4 acceptance, up to five attempts, stops once bytes are dropped) | `PortNotXpressNet`, `frames_ok=0`, first bytes `59 44 2E 51 3A 56 0D`. Two runs: 5 attempts / `bytes_dropped=7`, and 1 attempt / `bytes_dropped=35` |
+
+Step 3's bytes are the ordinary handshake: `21 21 00` out, `63 21 40 12 10` back — byte for byte
+what this file records for the macOS bench on 2026-08-04, through a different kernel and a
+different driver.
+
+Step 4 is what identifies `-if04` rather than assuming it. `59 44 2E 51 3A 56 0D` is `YD.Q:V\r` —
+ASCII, not XpressNet — the longer run decodes further as `[CS0] V:8.2.8 7010A00011…`, the
+station's own firmware banner — and `frames_ok=0` is the measurement that no amount of that
+stream ever assembles into a frame. Same verdict as the macOS `…45` node, through a different
+kernel.
+
+`bytes_dropped` is not a constant and must not be read as one: the test stops as soon as the
+counter moves, so it reports however much of the stream happened to arrive in the window it
+needed. `frames_ok` is the load-bearing half, which is why the acceptance test asserts that and
+not the byte count.
+
+`os.open` follows the symlink, so the serial transport needed no change: a `by-id` path opens the
+`ttyACM` node behind it and the line settings are applied to that node. One macOS invariant does
+**not** survive the crossing, and it is recorded here rather than left implicit: "`/dev/cu.*`,
+never `/dev/tty.*`" has no Linux equivalent, because a `ttyACM` node has no call-out twin. On
+Linux the open does not block on carrier for a different reason — `O_NONBLOCK` on the open plus
+`CLOCAL` in `cflag` — and four opens of four returned immediately.
+
+With no serial device attached, udev removes `/dev/serial/by-id/` entirely rather than leaving it
+empty, so on a machine that has never seen a YD7010 the Linux pattern matches nothing and the
+answer is `PortNotFound`. That is the same answer the macOS pattern gives there, reached without
+a special case.
+
+### The three-outcome discipline survives the Linux path, with nothing on the track — 2026-10-15
+
+The first `doctor` run on Linux, and the first anywhere with the locomotive lifted off both the
+main and the programming track — so every decoder-dependent probe had nothing to answer it.
+`railctl doctor --address 3 --no-save --format json`, exit 0:
+
+| | |
+| --- | --- |
+| capabilities | 2 `true`, **0 `false`**, 9 `null` |
+| checks (14) | 5 `ok`, 2 `skip`, 7 `unknown`, **0 `fail`** |
+| verdict | "Primary CV path: unknown (re-run the doctor to establish this)" |
+| layout | `energised: false`, `hold_applied: false`; status `0x06` before and after |
+
+The `null` capabilities are exactly the decoder-dependent ones — `pom_read`,
+`pom_read_provenance`, `pom_result_channel`, `pom_echo_zero_based`, `service_direct_cv`,
+`service_ext_cv`, `z21_cv_opcodes`, `loco_address_threshold`, `status_bit_order` — and the
+`unknown` checks are D3–D7, D9 and D10. The two `true` values, `single_function_cmd` and
+`function_groups_4_5`, are station capabilities that need no decoder. So an absent decoder was
+recorded as "not established", never as "cannot", which is the distinction this file exists to
+protect, measured here against an instrument that had nothing to measure.
+
+`--no-save` was honoured (`saved_to: null`, nothing written to the config directory), and the
+run energised nothing: no `--power-on` was passed, and the status byte was `0x06` on both sides.
+
+### Two railctl processes can hold the same port, and the second one looks like a slow station — FOUND 2026-10-15
+
+Measured while trying to watch broadcasts: `railctl monitor` was left running and a second
+`railctl status` was issued against the same `auto` target.
+
+| | |
+| --- | --- |
+| expected | `port_busy` — "another process holds it", exit 7 |
+| measured | `link_timeout`, exit 7, `retryable: true` |
+
+Both opens succeeded. Nothing on this platform makes the second one fail: `os.open` on a
+`ttyACM` node is not exclusive unless the opener asks for it with `ioctl(TIOCEXCL)`, and
+railctl does not. So the second process wrote its telegram, the first consumed the reply, and
+the second waited out its budget and reported silence.
+
+Two consequences, and the second is the interesting one:
+
+- The LI-USB one-command-in-flight rule is enforced **within** a process, by the lock in
+  `link.py`, and not **across** processes. Nothing warns an operator who runs two at once.
+- `PortBusy`'s published summary opens with "another process holds it", and on this bench no
+  process ever does. A second railctl is reported as a timeout instead, which is retryable and
+  true in the sense that the other process will eventually finish — but the diagnosis points at
+  the station rather than at the other invocation.
+
+`TIOCEXCL` after open is the POSIX mechanism that would make the second open fail with `EBUSY`,
+which is what `PortBusy` already claims to mean. It is deliberately **not** changed here: it
+alters the serial layer on both platforms, it cannot be verified on the macOS bench from this
+one, and it would newly break anyone deliberately running a reader alongside another tool.
+
+### What this does NOT establish
+
+- That railctl works on bare-metal Linux. Every Linux byte above went through usbip. The
+  kernel's CDC-ACM driver is the same either way, which is an argument and not a measurement.
+- Anything about the decoder-dependent checks themselves. They were `unknown` because nothing
+  was on the track; this run says the verdict is honest, not that the probes work.
+- That `monitor` decodes a broadcast on Linux. It opens the port and waits, and on this bench
+  nothing ever broadcast while it watched: the state changes that would provoke one come from
+  `railctl` itself, and a second `railctl` on the one XpressNet port corrupts the session, as
+  above. The M6 acceptance test gets around this by asking a human to press the station's own
+  STOP button. `monitor`'s decode path is therefore still unexercised on Linux.
+- That `port_busy` is reachable at all on this platform. Two concurrent opens succeed, and the
+  errnos that remain in its branch are the ones nothing was observed to produce.
+- That `-if00` is LocoNet. Nothing was sent to it; the identity is interface order plus the
+  macOS port map.
+- That one unit generalises to the `usb-YaMoRC_YD700x*` pattern the code now ships. One
+  station, serial `7010A0001194`, one firmware. The `YD700x` wildcard is a guess about a
+  product family, narrowed by the handshake as every pattern here is.
+- That udev's by-id naming is stable across distributions and udev versions. It was read on one
+  Ubuntu 24.04 under WSL2.
+- That `O_NONBLOCK` plus `CLOCAL` substitutes for the macOS `cu` invariant anywhere but this
+  bench. "Four opens of four returned immediately" is four opens on one machine, and spec line
+  202 now states it as an invariant on the strength of that.
+
+## The first exchange after a fresh usbipd attach answers 61 80 — FOUND 2026-10-14, cause NOT established
+
+Reproduced twice, both times on the first command after a fresh `usbipd attach`:
+
+| attempt | command | reply | outcome |
+| --- | --- | --- | --- |
+| first | `railctl --target serial:…-if02 version` | `61 80 E1` | **failed**, `PortNotXpressNet` |
+| every one after | the same command | `63 21 40 12 10` | XpressNet 4.0, id `0x12` |
+
+`61 80` is Transfer Error, and the direction matters: it is the station reporting that **our**
+telegram did not reach it intact. The reply itself is well formed, with a correct `E1` XOR — but
+that constrains the reply only. A clean `E1` is not evidence that nothing was corrupted; the
+content of the reply is evidence that something was.
+
+**Why the tool failed on it instead of resending.** `Link.request()` already treats `61 80` as
+resend-and-continue, and the comment on `_RETRY_PREFIXES` gives the reason: every command this
+tool sends is idempotent. `Link.open()`'s handshake did not go through `request()` — it checked
+the reply header against `0x63` directly and raised `PortNotXpressNet`. So the one exchange in
+the whole tool that could not tolerate a Transfer Error was the first one it ever sends, and the
+error it raised asserted that the port is not an XpressNet port, which is a `false` verdict built
+from a reply this project classifies as no answer either way. Corrected in the same series as
+this measurement: the handshake now retries under the existing `MAX_RETRIES` bound and reserves
+`PortNotXpressNet` for a reply that is not transient.
+
+### A 50 ms gap before the resend is answered where no gap is not — FOUND 2026-10-14, mechanism NOT established
+
+Adding the retry was not enough, and the way it failed is worth keeping: it fired, counted
+itself, and still failed. The wire log of a first `railctl version` after an attach, with the
+retry in but no wait:
+
+```
+TX FF FE 21 21 00          attempt 1
+RX FF FE 61 80 E1          Transfer Error
+TX FF FE 21 21 00          the resend
+                           nothing, for the whole 2.0 s handshake budget
+```
+
+`requests=2 retries=1 timeouts=1` — the retry worked exactly as written and the station simply
+did not answer. Three fresh attaches, one variable changed in each:
+
+| before the resend | reply to the resend |
+| --- | --- |
+| nothing, sent immediately | **none**, 2003 ms, the full budget |
+| `flush_input()` then immediately | **none**, 2011 ms |
+| a 50 ms wait (`SETTLE_TIME`) | `FF FE 63 21 40 12 10` in **2 ms** |
+
+What that supports, and no more: waiting 50 ms changed the outcome; flushing without waiting did
+not; flush-plus-wait was never tried, so "the buffer does not matter" is known only at wait = 0.
+One trial per condition, in a system whose own documented behaviour is attach-to-attach
+non-determinism — the least forgiving place for single-shot cells.
+
+**An earlier version of this section claimed the gap explains why a *second invocation* always
+worked, and that was wrong.** A second invocation sent one telegram and succeeded; it never
+received a `61 80`, so no resend and no gap were involved. And if the rule were "50 ms of quiet
+since our last telegram", the very first exchange after an attach — preceded by no telegram at
+all — would be the one exchange that could never fail, where in fact it is the only one that
+does. The two observations do not reduce to one mechanism, and the inference is withdrawn. What
+the data supports is narrower: the failure is scoped to the first exchange after an attach,
+which is why a later invocation never saw it, and separately a resend with no gap goes
+unanswered.
+
+`SETTLE_TIME` already existed for `send_no_reply` and is now also the handshake's resend gap.
+With it in place, the first `railctl version` after a fresh attach answers XpressNet 4.0 and
+command station id `0x12` with no `--target` and no config file.
+
+### What the gap does NOT establish
+
+- Why the station needs it. 50 ms is the first value tried and it worked; the threshold was not
+  bisected, and nothing says whether the station is busy, the usbip round trip is settling, or
+  `cdc_acm` is. A value that works is not a mechanism.
+- That the live variable is the gap since *our last write* rather than the time since the attach
+  or the enumeration. Each row above is a different fresh attach, and the row that succeeded is
+  also the row whose resend happened latest in absolute time after its attach. Those two
+  explanations are not separated by these trials — which is the same separation the section
+  above says two observations on one transport cannot make.
+- That the input buffer is irrelevant when a gap IS taken. Flush-plus-wait is the untried cell.
+
+**The transport caveat, stated plainly.** The only Linux bench is WSL2 with the device forwarded
+by `usbipd` over `vhci_hcd`. A usbip round trip is not a plain CDC-ACM open: the first URB after
+an attach crosses a network transport that has itself just come up. So "Linux answers `61 80`
+first" is **not** what was measured. What was measured is "this WSL2-plus-usbipd bench answered
+`61 80` on the first exchange after each attach, twice". Whether the trigger is the attach, the
+enumeration, or simply the first open of a session cannot be separated by two observations on one
+transport. Bare-metal Linux has not been tried by anyone, and no macOS open has ever shown this
+reply.
+
+**A neighbour worth comparing it against, and it is a different anomaly.** The M1 probe carries
+`DISCOVERY_ATTEMPTS = 2` for something measured on **macOS** on 2026-08-04, with no usbip
+anywhere: the first exchange after the device enumerates can take over 1.5 s where every later
+one answers in under 300 ms. That is a *latency* anomaly, not a `61 80`. Same position in the
+sequence, different symptom. They are placed side by side here for whoever investigates the
+cause, not as evidence that they are one phenomenon.
+
+### What this does NOT establish
+
+Whether the cause is Linux, usbip, the station, or the first open of any session. Separating them
+needs a second Linux host with the station plugged in directly.

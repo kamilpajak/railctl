@@ -117,6 +117,7 @@ PUBLISHED_ERROR_CODES: dict[str, str] = {
     "PortNotFound": "port_not_found",
     "PortNotOpen": "port_not_open",
     "PortNotXpressNet": "port_not_xpressnet",
+    "PortPermissionDenied": "port_permission_denied",
     "ProgrammingError": "programming",
     "ProgrammingLockedError": "programming_locked",
     "ProtocolError": "protocol",

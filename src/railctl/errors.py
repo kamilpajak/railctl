@@ -120,9 +120,33 @@ class AmbiguousPort(TransportError):
 
 class PortBusy(TransportError):
     """The port exists but could not be opened - another process holds it,
-    or permission was denied. The message carries the OS strerror either way."""
+    or the OS refused for a reason with no class of its own. The message carries
+    the OS strerror either way.
+
+    Permission denial used to land here too, and that was wrong in the one way
+    this class cannot afford: `port_busy` is retryable, and no retry clears a
+    group membership. It has its own class now, below.
+    """
 
     code: ClassVar[str] = "port_busy"
+
+
+class PortPermissionDenied(TransportError):
+    """The port exists and this process may not open it. Retrying will not help -
+    the fix is group membership or a udev rule, not another attempt.
+
+    Split out of `PortBusy` because the two share an errno class and nothing
+    else. On Linux the CDC node is usually owned by the `dialout` group, so this
+    is the ordinary first run of a new account, and reporting it as "another
+    process holds it, retry may work" sent a human looking for a process that
+    was never there and an agent into a retry loop that could never clear.
+
+    Deliberately absent from EXIT_CODES: an unmapped class inherits
+    `RailctlError`, which is the domain-failure code, non-retryable. That is the
+    right answer, so the right wiring here is the absence of wiring.
+    """
+
+    code: ClassVar[str] = "port_permission_denied"
 
 
 class PortConfigError(TransportError):
@@ -200,7 +224,16 @@ class UnsupportedCommandError(RailctlError):
 
 
 class UnsupportedFeatureError(RailctlError):
-    """Outside this tool's declared scope (consists, unprobed F13+)."""
+    """Outside this tool's declared scope (consists, unprobed F13+), or asked of
+    a platform whose port discovery has never been measured.
+
+    The second half was added when `auto` learned two platforms. It is NOT the
+    same as "the station is not there": the refusal says nobody built the
+    instrument for this machine, which is why it is not `port_not_found`. The
+    summary says so explicitly because this is the published one, and "out of
+    scope" alone would have read as a decision where the truth is an absence of
+    measurement.
+    """
 
     code: ClassVar[str] = "unsupported_feature"
 

@@ -1,6 +1,6 @@
 # railctl
 
-A CLI that drives a YaMoRC YD7010 command station over XpressNet on a USB serial port, and reads and writes CVs on ZIMO decoders. macOS only. Python 3.11+, `typer` as the sole runtime dependency, everything else stdlib.
+A CLI that drives a YaMoRC YD7010 command station over XpressNet on a USB serial port, and reads and writes CVs on ZIMO decoders. macOS and Linux - Linux measured on WSL2 with usbipd and nowhere else. Python 3.11+, `typer` as the sole runtime dependency, everything else stdlib.
 
 ## The rule this project exists to enforce
 
@@ -59,7 +59,9 @@ uv run pytest -m hardware -s      # needs the YD7010 attached; deselected by def
 - **`transport.written` holds framed bytes**, prefix included, because that is what `Link.write()` was given. Comparing it against a bare telegram silently never matches.
 - **CV numbering conventions disagree and all four live in `xbus/cv.py`.** POM (`E6 30`) and Z21 (`23 11`) are zero-based; Lenz direct (`22 15`) and extended (`22 18`–`1B`) are one-based. A request can be zero-based and its echo one-based in the same exchange.
 - **`tools/probe/` is frozen M1 output.** Its mutation baseline in `docs/test-hardening.md` was measured against that exact AST; do not reformat it for a lint rule.
-- **The port's baud rate goes through `getattr(termios, f"B{rate}")`, never the literal.** On Darwin the constant equals the literal, so the literal worked locally and failed on every CI run — Linux speed constants are small indices and `tcsetattr` rejects the literal with `EINVAL`.
+- **The port's baud rate goes through `getattr(termios, f"B{rate}")`, never the literal.** On Darwin the constant equals the literal, so the literal worked locally and failed on every CI run — Linux speed constants are small indices and `tcsetattr` rejects the literal with `EINVAL`. Since Linux is a supported platform and not only the CI host, that lookup is production code on a real bench rather than a CI workaround.
+- **`sys.platform` must be read inside the function, never as a default argument value.** `def f(platform: str = sys.platform)` is evaluated once, at import, so it freezes whichever machine imported the module — and no test that patches `sys.platform` afterwards can tell, because it reads the frozen constant back to itself. Both ways of getting this wrong survived a single-platform test; the test is parametrized over both platforms for that reason.
+- **The discovery pattern differs between platforms by more than the prefix.** macOS names a CDC node after each function's data interface (1, 3, 5), Linux's `/dev/serial/by-id` after its control interface (`if00`, `if02`, `if04`). macOS's `3` is Linux's `-if02`, and `-if03` — the number that looks right — matches nothing on any system.
 
 ## Proving a test is alive
 
@@ -85,7 +87,7 @@ The probe and the tools must **never write a decoder CV** unless the change expl
 is emergency off. Measured, not read; `docs/probe-results.md` has the table and the reasoning. Two
 manuals disagree here, and the states this bench normally sits in (`0x04`, `0x07`) fit both.
 
-`railctl` auto-detects the port; the CDC interface index picks the bus (1 LocoNet, 3 XpressNet, 5 telemetry). Do not read `TC` from the telemetry stream to decide whether a locomotive is present: it reports 0 mA for a standing sound decoder that is demonstrably alive.
+`railctl` auto-detects the port, and the pattern is per platform because the two kernels number the station's three CDC functions differently: macOS after each function's data interface (1 LocoNet, 3 XpressNet, 5 telemetry), Linux's `/dev/serial/by-id` after its control interface (`-if00`, `-if02`, `-if04`). macOS's `3` and Linux's `-if02` are the same interface; `-if03` matches nothing. Do not read `TC` from the telemetry stream to decide whether a locomotive is present: it reports 0 mA for a standing sound decoder that is demonstrably alive.
 
 ## Where things are written down
 
