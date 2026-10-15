@@ -1489,10 +1489,36 @@ empty, so on a machine that has never seen a YD7010 the Linux pattern matches no
 answer is `PortNotFound`. That is the same answer the macOS pattern gives there, reached without
 a special case.
 
+### The three-outcome discipline survives the Linux path, with nothing on the track — 2026-10-15
+
+The first `doctor` run on Linux, and the first anywhere with the locomotive lifted off both the
+main and the programming track — so every decoder-dependent probe had nothing to answer it.
+`railctl doctor --address 3 --no-save --format json`, exit 0:
+
+| | |
+| --- | --- |
+| capabilities | 2 `true`, **0 `false`**, 9 `null` |
+| checks (14) | 5 `ok`, 2 `skip`, 7 `unknown`, **0 `fail`** |
+| verdict | "Primary CV path: unknown (re-run the doctor to establish this)" |
+| layout | `energised: false`, `hold_applied: false`; status `0x06` before and after |
+
+The `null` capabilities are exactly the decoder-dependent ones — `pom_read`,
+`pom_read_provenance`, `pom_result_channel`, `pom_echo_zero_based`, `service_direct_cv`,
+`service_ext_cv`, `z21_cv_opcodes`, `loco_address_threshold`, `status_bit_order` — and the
+`unknown` checks are D3–D7, D9 and D10. The two `true` values, `single_function_cmd` and
+`function_groups_4_5`, are station capabilities that need no decoder. So an absent decoder was
+recorded as "not established", never as "cannot", which is the distinction this file exists to
+protect, measured here against an instrument that had nothing to measure.
+
+`--no-save` was honoured (`saved_to: null`, nothing written to the config directory), and the
+run energised nothing: no `--power-on` was passed, and the status byte was `0x06` on both sides.
+
 ### What this does NOT establish
 
 - That railctl works on bare-metal Linux. Every Linux byte above went through usbip. The
   kernel's CDC-ACM driver is the same either way, which is an argument and not a measurement.
+- Anything about the decoder-dependent checks themselves. They were `unknown` because nothing
+  was on the track; this run says the verdict is honest, not that the probes work.
 - That `-if00` is LocoNet. Nothing was sent to it; the identity is interface order plus the
   macOS port map.
 - That one unit generalises to the `usb-YaMoRC_YD700x*` pattern the code now ships. One
