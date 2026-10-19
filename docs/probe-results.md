@@ -1695,14 +1695,18 @@ Two separate facts, and they are worth keeping apart:
   `power.off` with the telegram carried in the payload. This is the half that was unmeasured:
   what differs between macOS and Linux here is the *read* path in `serial_posix.py` —
   `O_NONBLOCK` behaviour, short reads, whether a CDC-ACM node can deliver one frame in more than
-  one chunk — and `monitor` is the only command whose framing is driven by the station's timing
-  instead of railctl's own request/reply turn.
+  one chunk. What is distinctive about `monitor` is narrower than "the only command that meets
+  an unsolicited frame": `src/railctl/station/facade.py`'s `_settle_power` records from
+  2026-08-05 that this station answers `21 80`/`21 81` with a generic ack and sends `61 00`/
+  `61 01` as unsolicited broadcasts of their own, so a `power on` meets `FF FD` frames too.
+  `monitor` is the only command that reads when it has sent nothing at all, so no request in
+  flight anchors the read.
 - **The red STOP button emitted `61 00` in both states tested, and `81 00` was not reached.**
   Two runs, the second with track power on:
 
   | panel and power before the press | status | after | broadcast |
   | --- | --- | --- | --- |
-  | red, track power off, no hold | `0x06` | `0x06`, unchanged | `61 00` x3 |
+  | red (inferred from `0x06`, not observed), power off, no hold | `0x06` | `0x06`, unchanged | `61 00` x3 |
   | flashing green, power on, held | `0x05` | `0x07`, power cut, hold still set | `61 00` x3 |
 
   The operator confirmed the panel independently on the second run: `railctl power on` leaves
@@ -1726,7 +1730,8 @@ Two separate facts, and they are worth keeping apart:
 ### What this does NOT establish
 
 - **That every broadcast shape decodes on Linux.** One telegram shape was exercised, `61 00`.
-  `monitor`'s `81 00` branch was not reached on this platform — and reaching it is a known
+  `monitor`'s `81 00` branch — the published event name `loco.emergency_stop`,
+  `src/railctl/station/types.py` — was not reached on this platform — and reaching it is a known
   procedure rather than an open question: `power resume` to green-steady, then one red press. It
   was not attempted here because releasing the hold is the telegram that starts locomotives
   (issue #14), and that is not a step to take as an afterthought at the end of another run. The
