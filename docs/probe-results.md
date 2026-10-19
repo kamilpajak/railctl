@@ -1663,3 +1663,137 @@ cause, not as evidence that they are one phenomenon.
 
 Whether the cause is Linux, usbip, the station, or the first open of any session. Separating them
 needs a second Linux host with the station plugged in directly.
+
+## `monitor` decodes a station-generated broadcast on Linux — SETTLED 2026-10-19
+
+The gap recorded under the Linux enumeration — that `monitor` had been seen to open the port and
+wait, but never to decode anything there — is closed. Measured on the merged `main` (87ea190),
+station attached over usbipd/WSL2, nothing on either track.
+
+`railctl monitor --limit 4 -vv --format ndjson` was left listening and the operator pressed the
+station's own **STOP** button three times. That is the point of the exercise: the event comes
+from the station, not from `railctl`, so no second process contends for the one XpressNet port.
+
+```
+TX  FF FE 21 21 00
+RX  FF FE 63 21 40 12 10
+RX! FF FD 61 00 61
+RX! FF FD 61 00 61
+RX! FF FD 61 00 61
+{"type":"event","sequence":0,"name":"power.off","detail":"track power turned off","payload":{"telegram":"61 00 61"}}
+{"type":"event","sequence":1,"name":"power.off", ...}
+{"type":"event","sequence":2,"name":"power.off", ...}
+```
+
+Each run was terminated externally: `timeout 75` sent SIGTERM because the `--limit` was never
+reached. Two things follow, and the first was initially written down wrongly here. **No exit
+code was captured.** The harness read `$?` after a pipe into `sed`, so the "exit 0" it
+printed is `sed`'s and says nothing about `railctl`. **And no `summary` line was emitted**,
+which is consistent with a killed process rather than a completed stream — so the ndjson
+stream contract that `test_m6_acceptance.py` stage 3 accepts was NOT exercised by these runs.
+What they measured is the decoding of the frames, and that alone.
+
+Two separate facts, and they are worth keeping apart:
+
+- **The decode path works on this platform.** Three unsolicited frames arrived with the `FF FD`
+  broadcast prefix rather than the `FF FE` reply prefix, were framed correctly, and were named
+  `power.off` with the telegram carried in the payload. This is the half that was unmeasured:
+  what differs between macOS and Linux here is the *read* path in `serial_posix.py` —
+  `O_NONBLOCK` behaviour, short reads, whether a CDC-ACM node can deliver one frame in more than
+  one chunk. What is distinctive about `monitor` is narrower than "the only command that meets
+  an unsolicited frame": `src/railctl/station/facade.py`'s `_settle_power` records from
+  2026-08-05 that this station answers `21 80`/`21 81` with a generic ack and sends `61 00`/
+  `61 01` as unsolicited broadcasts of their own, so a `power on` meets `FF FD` frames too.
+  `monitor` is the only command that reads when it has sent nothing at all, so no request in
+  flight anchors the read.
+- **All three broadcasts this station raises on its own decode here, and which one a button
+  produces is decided by the panel state it is pressed from.** Five runs:
+
+  | button | panel and power before the press | status | after | broadcast |
+  | --- | --- | --- | --- | --- |
+  | red | red (inferred from `0x06`, not observed), power off, no hold | `0x06` | `0x06`, unchanged | `61 00` x3, `power.off` |
+  | red | flashing green, power on, held | `0x05` | `0x07`, power cut, hold still set | `61 00` x3, `power.off` |
+  | red | **steady green, power on, released** | `0x04` | **`0x05`, voltage KEPT, hold set** | **`81 00` x3, `loco.emergency_stop`** |
+  | green GO | red, power off, no hold | `0x06` | `0x04`, powered and released in one step | `61 01`, `power.on` |
+  | **GO, red, GO** | red → steady → flashing → **steady** | `0x06` | **`0x04`** | **`61 01` x3, `81 00` x3, `61 01` x3** |
+
+  The operator read the panel independently on runs 2 and 3, and it agreed with the status byte
+  both times. On run 2 `railctl power on` left the station blinking green, which is `0x05` —
+  voltage present and every locomotive held — and the red button was pressed from there. On
+  run 3 the panel was steady green before the press and began flashing after it, `0x04` to
+  `0x05`, with voltage present throughout.
+
+  **The panel rule is confirmed in both directions, and it was already recorded.**
+  `tests/hardware/test_m6_acceptance.py` records from macOS on 2026-08-10 that the buttons
+  *move* the panel one step rather than setting it, red degrading green-steady →
+  green-flashing → red: a press from flashing cuts power and broadcasts `61 00`, a press from
+  green-steady raises an emergency stop with the voltage still on and broadcasts `81 00`. Runs
+  1 and 2 started below green-steady and produced `61 00`; run 3 started at green-steady and
+  produced `81 00`. The first draft of this section mistook runs 1 and 2 for a fact about the
+  button and is corrected here rather than quietly. The same file records both broadcasts
+  arriving three times each (measured 2026-08-06), which is what all three runs saw, so the
+  repeat count is not a new finding either.
+
+  **Run 4 used the green GO button and confirms the other half of the panel rule**: green
+  jumps straight to green-steady rather than stepping, taking `0x06` to `0x04` in one press —
+  powered and released together — and broadcasting `61 01`, decoded as `power.on`. Only one
+  frame was read, because `--limit 1` ended the run on it. **Run 5 then settled what that could
+  not**: `61 01` arrives three times like the other two, seen twice in one run, so the single
+  frame was an artefact of the limit rather than of the station.
+
+  **Run 4 also exercised the ndjson stream contract, which runs 1 to 3 could not.** It ended
+  on its own `--limit` instead of being killed, so `railctl`'s exit code was a real 0 — read
+  without a pipe this time — and the stream closed itself:
+
+  ```
+  {"type":"event","sequence":0,"name":"power.on","detail":"track power turned on","payload":{"telegram":"61 01 60"}}
+  {"type":"summary","sequence":1,"count":1,"complete":true,"exit_code":0}
+  ```
+
+  One object per line, sequence numbers from 0 with no gaps, `summary` last with
+  `complete: true` — the contract `test_m6_acceptance.py` stage 3 accepts, now seen on Linux.
+
+  **Run 5 closed the half of the panel rule nothing had measured.** Runs 1 to 4 never pressed
+  green from the flashing state, so "green always jumps to green-steady" rested on M6's
+  wording rather than on an observation of that transition. The operator ran GO → red once
+  → GO by hand, with `railctl` sending no power telegram at all, and the stream was
+  `61 01` x3, `81 00` x3, `61 01` x3, ending at `0x04`. So green does jump to steady from
+  flashing, and the claim is measured in both directions on this platform.
+
+  **Two things the panel does not tell you, both worth knowing before trusting the LED.**
+  Red *saturates* rather than stepping: from red it stays red, as run 1 shows, and still
+  broadcasts `61 00` rather than doing nothing. And the LED has three states where the status
+  byte has at least four: `0x04`, `0x05`, `0x06` and `0x07` were all observed, and "red" is
+  `0x06` or `0x07` depending on whether the hold bit was left set underneath. Run 1 ended at
+  `0x06` and run 2 at `0x07`, and the panel rule puts both at red — but **the LED was not
+  read at the end of either run**, so that the two bytes sat behind one indistinguishable
+  panel follows from the rule rather than from an observation. Stated that way deliberately:
+  the conclusion that the LED is a lossy view of the status byte is an inference from three
+  panel states against four measured bytes, not a sighting of one LED over two bytes. Lines
+  67-68 of this file make the same point about `0x04` and `0x07` not distinguishing the bit
+  orders.
+
+  The first run was gated on not knowing the panel rule: had the button toggled power *on* from
+  `0x06`, the automatic start mode would have resumed a locomotive's stored speed instantly
+  (issue #14), which is why both tracks were cleared before anything was pressed.
+
+- **`power off` does not clear the hold, so returning the bench to a released-off state needs
+  the full cycle.** Measured while restoring after run 3: `power off` from `0x05` gives `0x07`
+  — track dead with the hold still set under it, the state already recorded for the M6
+  acceptance run — and only `power on` → `power resume` → `power off` returns `0x06`
+  (`0x07` → `0x05` → `0x04` → `0x06`). The hold can only be cleared while the track has
+  voltage. This bench's resting state is `0x06`, where the macOS bench's is `0x07`, so a
+  restore script written for one leaves the other wrong; the short `power off` was used twice
+  here before this was understood. The complement was then measured on run 4: from `0x04`,
+  where no hold is set, `power off` alone does return `0x06`. So the full cycle is needed only
+  when restoring from a held state, and the rule is about the hold bit rather than about
+  `power off`.
+
+### What this does NOT establish
+
+- **That the locomotive speed broadcasts decode on Linux.** All three broadcasts this station
+  raises on its own — `power.off`, `power.on` and `loco.emergency_stop` — were decoded
+  here, so the gap #70 recorded is closed. The speed broadcasts were not seen and could not
+  be: they need a locomotive on a powered track, and both tracks were deliberately cleared
+  for every run above.
+- **Anything about bare metal.** Every byte here still went through usbip.
