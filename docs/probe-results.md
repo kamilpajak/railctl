@@ -1701,39 +1701,50 @@ Two separate facts, and they are worth keeping apart:
   `61 01` as unsolicited broadcasts of their own, so a `power on` meets `FF FD` frames too.
   `monitor` is the only command that reads when it has sent nothing at all, so no request in
   flight anchors the read.
-- **The red STOP button emitted `61 00` in both states tested, and `81 00` was not reached.**
-  Two runs, the second with track power on:
+- **Both of the station's broadcasts decode here, and which one the red button produces is
+  decided by the panel state it is pressed from.** Three runs:
 
   | panel and power before the press | status | after | broadcast |
   | --- | --- | --- | --- |
   | red (inferred from `0x06`, not observed), power off, no hold | `0x06` | `0x06`, unchanged | `61 00` x3 |
   | flashing green, power on, held | `0x05` | `0x07`, power cut, hold still set | `61 00` x3 |
+  | **steady green, power on, released** | `0x04` | **`0x05`, voltage KEPT, hold set** | **`81 00` x3** |
 
-  The operator confirmed the panel independently on the second run: `railctl power on` leaves
-  the station blinking green, which is `0x05` — voltage present and every locomotive held — and
-  the red button was pressed from there.
+  The operator read the panel independently on runs 2 and 3, and it agreed with the status byte
+  both times. On run 2 `railctl power on` left the station blinking green, which is `0x05` —
+  voltage present and every locomotive held — and the red button was pressed from there. On
+  run 3 the panel was steady green before the press and began flashing after it, `0x04` to
+  `0x05`, with voltage present throughout.
 
-  **This adds nothing to the button behaviour already recorded**, and is written down because
-  the first draft of this section got it wrong. `tests/hardware/test_m6_acceptance.py` records
-  from macOS on 2026-08-10 that the buttons *move* the panel one step rather than setting it,
-  red degrading green-steady → green-flashing → red: a press from flashing cuts power and
-  broadcasts `61 00`, while a press from green-steady raises an emergency stop with the voltage
-  still on and broadcasts `81 00`. Both runs here started below green-steady, so neither could
-  have produced `81 00`. The same file records both broadcasts arriving three times each
-  (measured 2026-08-06), which is what both runs saw, so the repeat count is not a new finding
-  either.
+  **The panel rule is confirmed in both directions, and it was already recorded.**
+  `tests/hardware/test_m6_acceptance.py` records from macOS on 2026-08-10 that the buttons
+  *move* the panel one step rather than setting it, red degrading green-steady →
+  green-flashing → red: a press from flashing cuts power and broadcasts `61 00`, a press from
+  green-steady raises an emergency stop with the voltage still on and broadcasts `81 00`. Runs
+  1 and 2 started below green-steady and produced `61 00`; run 3 started at green-steady and
+  produced `81 00`. The first draft of this section mistook runs 1 and 2 for a fact about the
+  button and is corrected here rather than quietly. The same file records both broadcasts
+  arriving three times each (measured 2026-08-06), which is what all three runs saw, so the
+  repeat count is not a new finding either.
 
   The first run was gated on not knowing the panel rule: had the button toggled power *on* from
   `0x06`, the automatic start mode would have resumed a locomotive's stored speed instantly
   (issue #14), which is why both tracks were cleared before anything was pressed.
 
+- **`power off` does not clear the hold, so returning the bench to a released-off state needs
+  the full cycle.** Measured while restoring after run 3: `power off` from `0x05` gives `0x07`
+  — track dead with the hold still set under it, the state already recorded for the M6
+  acceptance run — and only `power on` → `power resume` → `power off` returns `0x06`
+  (`0x07` → `0x05` → `0x04` → `0x06`). The hold can only be cleared while the track has
+  voltage. This bench's resting state is `0x06`, where the macOS bench's is `0x07`, so a
+  restore script written for one leaves the other wrong; the short `power off` was used twice
+  here before this was understood.
+
 ### What this does NOT establish
 
-- **That every broadcast shape decodes on Linux.** One telegram shape was exercised, `61 00`.
-  `monitor`'s `81 00` branch — the published event name `loco.emergency_stop`,
-  `src/railctl/station/types.py` — was not reached on this platform — and reaching it is a known
-  procedure rather than an open question: `power resume` to green-steady, then one red press. It
-  was not attempted here because releasing the hold is the telegram that starts locomotives
-  (issue #14), and that is not a step to take as an afterthought at the end of another run. The
-  locomotive speed broadcasts were not seen either; those need a locomotive on the track.
+- **That the locomotive speed broadcasts decode on Linux.** Both broadcasts this station
+  emits on its own — `61 00` as `power.off` and `81 00` as `loco.emergency_stop` — were
+  decoded here, so the gap #70 recorded is closed. The speed broadcasts were not seen and
+  cannot be: they need a locomotive on a powered track, and both tracks were deliberately
+  cleared for every run above.
 - **Anything about bare metal.** Every byte here still went through usbip.
