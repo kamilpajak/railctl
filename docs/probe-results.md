@@ -1685,8 +1685,13 @@ RX! FF FD 61 00 61
 {"type":"event","sequence":2,"name":"power.off", ...}
 ```
 
-Exit 0 on the fourth-event limit never being reached — the run ended on its own timeout with
-three events delivered.
+Each run was terminated externally: `timeout 75` sent SIGTERM because the `--limit` was never
+reached. Two things follow, and the first was initially written down wrongly here. **No exit
+code was captured.** The harness read `$?` after a pipe into `sed`, so the "exit 0" it
+printed is `sed`'s and says nothing about `railctl`. **And no `summary` line was emitted**,
+which is consistent with a killed process rather than a completed stream — so the ndjson
+stream contract that `test_m6_acceptance.py` stage 3 accepts was NOT exercised by these runs.
+What they measured is the decoding of the frames, and that alone.
 
 Two separate facts, and they are worth keeping apart:
 
@@ -1747,4 +1752,8 @@ Two separate facts, and they are worth keeping apart:
   decoded here, so the gap #70 recorded is closed. The speed broadcasts were not seen and
   cannot be: they need a locomotive on a powered track, and both tracks were deliberately
   cleared for every run above.
+- **The ndjson stream contract.** Every run above was killed by `timeout` before its
+  `--limit` was reached, so no `summary` line was produced and `railctl`'s own exit code was
+  never read. Accepting that contract needs a run that ends on its own `--limit`, which is
+  what M6 stage 3 does with `--limit 1`.
 - **Anything about bare metal.** Every byte here still went through usbip.
