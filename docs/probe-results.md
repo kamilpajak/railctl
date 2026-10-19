@@ -1697,17 +1697,38 @@ Two separate facts, and they are worth keeping apart:
   `O_NONBLOCK` behaviour, short reads, whether a CDC-ACM node can deliver one frame in more than
   one chunk — and `monitor` is the only command whose framing is driven by the station's timing
   instead of railctl's own request/reply turn.
-- **This station's STOP button, pressed while track power is already off, emits `61 00` and not
-  `81 00`.** It re-asserts "track power off" rather than raising an emergency stop. The status
-  byte was `0x06` before the run and `0x06` after it, so nothing was energised by the press.
-  This was not known beforehand and the run was gated on it: if STOP had toggled power on
-  instead, the station's automatic start mode would have resumed a locomotive's stored speed
-  instantly (issue #14), which is why both tracks were cleared first.
+- **The red STOP button emitted `61 00` in both states tested, and `81 00` was not reached.**
+  Two runs, the second with track power on:
+
+  | panel and power before the press | status | after | broadcast |
+  | --- | --- | --- | --- |
+  | red, track power off, no hold | `0x06` | `0x06`, unchanged | `61 00` x3 |
+  | flashing green, power on, held | `0x05` | `0x07`, power cut, hold still set | `61 00` x3 |
+
+  The operator confirmed the panel independently on the second run: `railctl power on` leaves
+  the station blinking green, which is `0x05` — voltage present and every locomotive held — and
+  the red button was pressed from there.
+
+  **This adds nothing to the button behaviour already recorded**, and is written down because
+  the first draft of this section got it wrong. `tests/hardware/test_m6_acceptance.py` records
+  from macOS on 2026-08-10 that the buttons *move* the panel one step rather than setting it,
+  red degrading green-steady → green-flashing → red: a press from flashing cuts power and
+  broadcasts `61 00`, while a press from green-steady raises an emergency stop with the voltage
+  still on and broadcasts `81 00`. Both runs here started below green-steady, so neither could
+  have produced `81 00`. The same file records both broadcasts arriving three times each
+  (measured 2026-08-06), which is what both runs saw, so the repeat count is not a new finding
+  either.
+
+  The first run was gated on not knowing the panel rule: had the button toggled power *on* from
+  `0x06`, the automatic start mode would have resumed a locomotive's stored speed instantly
+  (issue #14), which is why both tracks were cleared before anything was pressed.
 
 ### What this does NOT establish
 
-- **That every broadcast shape decodes on Linux.** One telegram was exercised, `61 00`. The
-  emergency-stop broadcast `81 00` and the locomotive speed broadcasts were not seen, because the
-  STOP button did not produce them from an unpowered track. Reaching `81 00` means energising the
-  track first.
+- **That every broadcast shape decodes on Linux.** One telegram shape was exercised, `61 00`.
+  `monitor`'s `81 00` branch was not reached on this platform — and reaching it is a known
+  procedure rather than an open question: `power resume` to green-steady, then one red press. It
+  was not attempted here because releasing the hold is the telegram that starts locomotives
+  (issue #14), and that is not a step to take as an afterthought at the end of another run. The
+  locomotive speed broadcasts were not seen either; those need a locomotive on the track.
 - **Anything about bare metal.** Every byte here still went through usbip.
