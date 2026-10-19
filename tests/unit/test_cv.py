@@ -411,7 +411,8 @@ def test_echo_candidates_alone_cannot_separate_two_cvs_in_different_bands():
 
     Pinned so that nobody reads `echo_candidates` as a complete matcher. The
     hardware separates these two exchanges only by the reply ident
-    (docs/probe-results.md lines 148-152): `23 11 00 07` (CV8) is answered
+    (docs/probe-results.md, section "CVs read from the ZIMO MS450P22"):
+    `23 11 00 07` (CV8) is answered
     `63 14 08`, and `23 11 01 08` (CV265) is answered `63 15 09`. A matcher that
     compares the C byte alone accepts a `63 14 09` - which is CV9 - as the answer
     to a CV265 request and reports CV9's value under the name CV265. CV265 and

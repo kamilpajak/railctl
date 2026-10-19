@@ -131,6 +131,142 @@ def test_open_on_the_telemetry_port_quotes_what_it_saw(station):
     assert station.envelope.stats.frames_ok == 0
 
 
+def test_open_after_a_transfer_error_then_silence_does_not_condemn_the_port(station):
+    """The station answered on XpressNet and then went quiet. PortNotXpressNet
+    here would assert `false` - "this is not an XpressNet port" - about a port
+    that had just proved otherwise, which is the verdict the retry exists to stop
+    being issued. A timeout is the honest answer, and it is retryable, which is
+    also true: the next invocation usually succeeds.
+
+    The elapsed time is the other half of this test. It pins that the resend got
+    a HANDSHAKE_TIMEOUT of its OWN: sharing one deadline across attempts makes
+    the retry a no-op in exactly the case it exists for, and the total would be
+    HANDSHAKE_TIMEOUT rather than SETTLE_TIME + HANDSHAKE_TIMEOUT.
+    """
+    station.expect(VERSION_REQUEST, (Kind.SOLICITED, BAD_XOR_REJECT))
+    station.expect(VERSION_REQUEST)  # scripted silence, not silence by omission
+
+    with pytest.raises(LinkTimeout) as caught:
+        station.link.open()
+
+    assert "61 80" in str(caught.value)
+    assert "stopped answering" in str(caught.value)
+    assert "did not answer" not in str(caught.value)
+    assert station.clock.monotonic() == pytest.approx(SETTLE_TIME + HANDSHAKE_TIMEOUT)
+    assert station.transport.is_open is False
+
+
+def test_open_quotes_the_resends_own_bytes_not_the_first_attempts(station):
+    """One `seen` buffer for the whole of open() let the first attempt spend the
+    entire _ERROR_SAMPLE budget, so an ASCII telemetry line arriving on the
+    resend - the diagnosis this error exists to give - sat invisible behind
+    whatever came first. The sample is per attempt.
+    """
+    noise = bytes(range(0x30, 0x50))  # exactly _ERROR_SAMPLE bytes of filler
+    station.transport.expect(
+        station.envelope.frame(Kind.SOLICITED, VERSION_REQUEST),
+        reply=noise + station.envelope.frame(Kind.SOLICITED, BAD_XOR_REJECT),
+    )
+    station.transport.expect(
+        station.envelope.frame(Kind.SOLICITED, VERSION_REQUEST),
+        reply=b"[CS0] M: TC 0mA LC 0mA TV 15.2V\r\n",
+    )
+
+    with pytest.raises(LinkTimeout) as caught:
+        station.link.open()
+
+    assert "5B 43 53 30" in str(caught.value)  # "[CS0" from the RESEND
+    assert "30 31 32 33" not in str(caught.value)  # not the first attempt's noise
+
+
+@pytest.mark.parametrize("transient", [BAD_XOR_REJECT, NOT_UNDERSTOOD], ids=["61-80", "01-0a"])
+def test_open_resends_the_handshake_once_after_any_transient_reply(station, transient):
+    """Both members of _RETRY_PREFIXES, not just the one the bench produced.
+    `01 0a` means the station did not understand the telegram, which says no more
+    about the port than a bad XOR does, and request() has always retried both.
+    """
+    station.expect(VERSION_REQUEST, (Kind.SOLICITED, transient))
+    station.expect(VERSION_REQUEST, (Kind.SOLICITED, VERSION_REPLY))
+
+    station.link.open()
+
+    assert station.link.version_telegram == VERSION_REPLY
+    assert station.link.stats().retries == 1
+
+
+def test_open_resends_the_handshake_once_after_a_transfer_error(station):
+    """61 80 says our telegram did not arrive intact. It says nothing about what
+    kind of port this is.
+
+    request() has always treated it as resend-and-continue - replies.py files it
+    under TRANSIENT_REPLIES for the same reason - but the handshake did not go
+    through request(), so the one exchange that could not tolerate a Transfer
+    Error was the first one this tool ever sends. Measured on the Linux bench
+    2026-10-14: the first exchange after a usbipd attach answered 61 80 and every
+    later one succeeded, so every first command failed, and it failed by
+    asserting the port is not an XpressNet port - a `false` verdict built from
+    evidence this project classifies as no answer either way.
+    """
+    station.expect(VERSION_REQUEST, (Kind.SOLICITED, BAD_XOR_REJECT))
+    station.expect(VERSION_REQUEST, (Kind.SOLICITED, VERSION_REPLY))
+
+    station.link.open()
+
+    assert station.link.version_telegram == VERSION_REPLY
+    assert station.transport.is_open is True
+    assert station.link.stats().retries == 1
+    assert station.link.stats().requests == 2
+    # One flush, before the FIRST write. A retry does not flush, and that is
+    # measured rather than assumed: on the bench a resend after flush_input()
+    # was no more answered than one sent with no gap at all.
+    assert station.transport.flushes == 1
+    # The gap is the thing that makes the resend work. Measured 2026-10-14: the
+    # station answers a resend 50 ms after a 61 80 in 2 ms, and never answers one
+    # sent immediately - so a retry without this wait fires, counts itself and
+    # still fails, which is exactly how the missing wait was found.
+    #
+    # EXACTLY SETTLE_TIME, not at least: both replies here are immediate, so any
+    # other total means the wait moved. Sleeping after every write instead of
+    # only before a resend would show up as 2 x SETTLE_TIME.
+    assert station.clock.monotonic() == pytest.approx(SETTLE_TIME)
+
+
+def test_open_gives_up_on_a_second_transfer_error_without_condemning_the_port(station):
+    """Two 61 80 replies are a station that keeps rejecting us, not a port that
+    is not XpressNet. PortNotXpressNet here would be the same false verdict one
+    attempt later, so the bound is the same MAX_RETRIES request() uses and the
+    error is the same LinkProtocolError.
+    """
+    station.expect(VERSION_REQUEST, (Kind.SOLICITED, BAD_XOR_REJECT))
+    station.expect(VERSION_REQUEST, (Kind.SOLICITED, BAD_XOR_REJECT))
+
+    with pytest.raises(LinkProtocolError) as caught:
+        station.link.open()
+
+    assert "61 80" in str(caught.value)
+    # The count is derived from the attempts actually made, not the word "twice":
+    # raising MAX_RETRIES to tune request() would otherwise make this message lie.
+    assert f"{MAX_RETRIES + 1} times" in str(caught.value)
+    assert caught.value.hint == station.transport.diagnostic_hint
+    assert station.link.stats().retries == MAX_RETRIES
+    assert station.transport.is_open is False
+
+
+def test_open_does_not_retry_a_reply_that_is_simply_wrong(station):
+    """The retry is for transient replies only. A prompt answer that is not a
+    version reply and not in _RETRY_PREFIXES still fails on the first attempt,
+    with the bytes quoted - resending at a telemetry stream would just collect a
+    second ASCII line and delay the diagnosis.
+    """
+    station.expect(VERSION_REQUEST, (Kind.SOLICITED, STATUS_REPLY))
+
+    with pytest.raises(PortNotXpressNet):
+        station.link.open()
+
+    assert station.link.stats().retries == 0
+    assert station.link.stats().requests == 1
+
+
 def test_request_returns_the_bare_telegram(station):
     station.open().expect(STATUS_REQUEST, (Kind.SOLICITED, STATUS_REPLY))
     assert station.link.request(STATUS_REQUEST) == STATUS_REPLY

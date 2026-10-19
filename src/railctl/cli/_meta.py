@@ -345,6 +345,7 @@ PORT_ERRORS: Final[ErrorFamily] = (
     errors.PortNotFound,
     errors.PortNotOpen,
     errors.PortNotXpressNet,
+    errors.PortPermissionDenied,
 )
 
 #: The decode failures a reply can produce, named for the same reason

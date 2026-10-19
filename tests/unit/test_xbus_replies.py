@@ -257,11 +257,12 @@ def test_each_extended_cv_result_band_is_parsed_and_keeps_its_ident(telegram: st
 
 
 def test_the_z21_cv_result_joins_both_address_bytes():
-    """64 14 MSB LSB VAL is DOC ONLY - spec line 573.
+    """64 14 MSB LSB VAL is DOC ONLY - spec line 575.
 
-    It has never been seen on this station. probe-results.md line 34 records that
-    a POM read returned no 64 14 at all, and every CV read the probe measured came
-    back as 63 14 or 63 15 (probe-results.md lines 148-152). It is parsed now so
+    It has never been seen on this station. probe-results.md, section "R1 — POM CV
+    read: NOT established", records that a POM read returned no 64 14 at all, and every CV read the
+    probe measured came back as 63 14 or 63 15 (same file, section "CVs read from
+    the ZIMO MS450P22"). It is parsed now so
     that if the Z21 LAN transport or a firmware update ever emits it, the value is
     not lost the way the missing 21 10 poll lost the Lenz results in M1.
 
@@ -460,7 +461,7 @@ def test_the_f13_to_f28_state_reply_is_parsed_so_the_station_never_blind_clears(
     yes, E3 09 -> E3 52 D1 D2 | closes the blind-clear side effect". Leaving it
     unparsed forces the station to seed zeros before an E4 23 or E4 28 write,
     which switches off every function in the group it did not read - the failure
-    spec line 1551 calls most likely to bite in practice.
+    spec line 1571 calls most likely to bite in practice.
     """
     reply = parse(tg("E3 52 01 80 30"))
     assert isinstance(reply, FunctionState13To28)

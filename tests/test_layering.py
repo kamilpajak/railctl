@@ -35,6 +35,16 @@ RULE_1_FORBIDDEN = (
     "baud",
     "termios",
     "socket",
+    # Linux port vocabulary, added when `auto` learned a second platform. The
+    # guard enumerated only macOS's words, so `/dev/serial/by-id/...` was caught
+    # by rule 4's `/dev/` while a bare `-if02`, `dialout` or `usbipd` in
+    # `station/` or `cli/` would have passed both guards - the layer boundary
+    # this file defends is about connection vocabulary, not about which kernel
+    # happens to spell it.
+    "by-id",
+    "-if0",
+    "dialout",
+    "usbipd",
 )
 
 # `tty` is deliberately NOT in the tuple above: as a bare substring it also matches
@@ -180,15 +190,18 @@ def test_the_scanner_reports_a_planted_violation(tmp_path: Path):
         'PORT = "/dev/ttyUSB0"\n'
         'NAME = "cu.usbmodem7010A00011943"\n'
         "RAW = cv - 1\n"
-        "COLOUR = sys.stdout.isatty()\n",
+        "COLOUR = sys.stdout.isatty()\n"
+        'NODE = "usb-YaMoRC-if02"\n'
+        'GROUP = "dialout"\n',
         encoding="utf-8",
     )
     assert len(_offenders([planted], RULE_4_PATTERNS)) == 2
     assert len(_offenders([planted], RULE_2_PATTERNS)) == 1
     assert len(_offenders([planted], (RULE_3_PATTERN,))) == 0
-    # ttyUSB0 and cu.usbmodem are hits; isatty() is not. The CLI output contract
-    # requires isatty(), so rule 1 must never fire on it.
-    assert len(_offenders([planted], RULE_1_PATTERNS)) == 2
+    # ttyUSB0 and cu.usbmodem are hits, and so are the two Linux port words;
+    # isatty() is not. The CLI output contract requires isatty(), so rule 1 must
+    # never fire on it.
+    assert len(_offenders([planted], RULE_1_PATTERNS)) == 4
 
 
 def test_the_scanner_reports_a_planted_wire_import_for_rule_5(tmp_path: Path):
