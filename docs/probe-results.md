@@ -1663,3 +1663,51 @@ cause, not as evidence that they are one phenomenon.
 
 Whether the cause is Linux, usbip, the station, or the first open of any session. Separating them
 needs a second Linux host with the station plugged in directly.
+
+## `monitor` decodes a station-generated broadcast on Linux — SETTLED 2026-10-19
+
+The gap recorded under the Linux enumeration — that `monitor` had been seen to open the port and
+wait, but never to decode anything there — is closed. Measured on the merged `main` (87ea190),
+station attached over usbipd/WSL2, nothing on either track.
+
+`railctl monitor --limit 4 -vv --format ndjson` was left listening and the operator pressed the
+station's own **STOP** button three times. That is the point of the exercise: the event comes
+from the station, not from `railctl`, so no second process contends for the one XpressNet port.
+
+```
+TX  FF FE 21 21 00
+RX  FF FE 63 21 40 12 10
+RX! FF FD 61 00 61
+RX! FF FD 61 00 61
+RX! FF FD 61 00 61
+{"type":"event","sequence":0,"name":"power.off","detail":"track power turned off","payload":{"telegram":"61 00 61"}}
+{"type":"event","sequence":1,"name":"power.off", ...}
+{"type":"event","sequence":2,"name":"power.off", ...}
+```
+
+Exit 0 on the fourth-event limit never being reached — the run ended on its own timeout with
+three events delivered.
+
+Two separate facts, and they are worth keeping apart:
+
+- **The decode path works on this platform.** Three unsolicited frames arrived with the `FF FD`
+  broadcast prefix rather than the `FF FE` reply prefix, were framed correctly, and were named
+  `power.off` with the telegram carried in the payload. This is the half that was unmeasured:
+  what differs between macOS and Linux here is the *read* path in `serial_posix.py` —
+  `O_NONBLOCK` behaviour, short reads, whether a CDC-ACM node can deliver one frame in more than
+  one chunk — and `monitor` is the only command whose framing is driven by the station's timing
+  instead of railctl's own request/reply turn.
+- **This station's STOP button, pressed while track power is already off, emits `61 00` and not
+  `81 00`.** It re-asserts "track power off" rather than raising an emergency stop. The status
+  byte was `0x06` before the run and `0x06` after it, so nothing was energised by the press.
+  This was not known beforehand and the run was gated on it: if STOP had toggled power on
+  instead, the station's automatic start mode would have resumed a locomotive's stored speed
+  instantly (issue #14), which is why both tracks were cleared first.
+
+### What this does NOT establish
+
+- **That every broadcast shape decodes on Linux.** One telegram was exercised, `61 00`. The
+  emergency-stop broadcast `81 00` and the locomotive speed broadcasts were not seen, because the
+  STOP button did not produce them from an unpowered track. Reaching `81 00` means energising the
+  track first.
+- **Anything about bare metal.** Every byte here still went through usbip.
