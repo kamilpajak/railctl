@@ -1763,10 +1763,15 @@ Two separate facts, and they are worth keeping apart:
   **Two things the panel does not tell you, both worth knowing before trusting the LED.**
   Red *saturates* rather than stepping: from red it stays red, as run 1 shows, and still
   broadcasts `61 00` rather than doing nothing. And the LED has three states where the status
-  byte has at least four — "red" is `0x06` or `0x07` depending on whether the hold bit was
-  left set underneath, and runs 1 and 2 ended in different bytes behind an identical panel.
-  The LED is a lossy view of the status byte, which is the same point lines 67-68 of this
-  file make about `0x04` and `0x07` not distinguishing the bit orders.
+  byte has at least four: `0x04`, `0x05`, `0x06` and `0x07` were all observed, and "red" is
+  `0x06` or `0x07` depending on whether the hold bit was left set underneath. Run 1 ended at
+  `0x06` and run 2 at `0x07`, and the panel rule puts both at red — but **the LED was not
+  read at the end of either run**, so that the two bytes sat behind one indistinguishable
+  panel follows from the rule rather than from an observation. Stated that way deliberately:
+  the conclusion that the LED is a lossy view of the status byte is an inference from three
+  panel states against four measured bytes, not a sighting of one LED over two bytes. Lines
+  67-68 of this file make the same point about `0x04` and `0x07` not distinguishing the bit
+  orders.
 
   The first run was gated on not knowing the panel rule: had the button toggled power *on* from
   `0x06`, the automatic start mode would have resumed a locomotive's stored speed instantly
