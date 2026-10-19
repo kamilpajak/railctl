@@ -1707,14 +1707,15 @@ Two separate facts, and they are worth keeping apart:
   `monitor` is the only command that reads when it has sent nothing at all, so no request in
   flight anchors the read.
 - **All three broadcasts this station raises on its own decode here, and which one a button
-  produces is decided by the panel state it is pressed from.** Four runs:
+  produces is decided by the panel state it is pressed from.** Five runs:
 
   | button | panel and power before the press | status | after | broadcast |
   | --- | --- | --- | --- | --- |
   | red | red (inferred from `0x06`, not observed), power off, no hold | `0x06` | `0x06`, unchanged | `61 00` x3, `power.off` |
   | red | flashing green, power on, held | `0x05` | `0x07`, power cut, hold still set | `61 00` x3, `power.off` |
   | red | **steady green, power on, released** | `0x04` | **`0x05`, voltage KEPT, hold set** | **`81 00` x3, `loco.emergency_stop`** |
-  | **green GO** | red, power off, no hold | `0x06` | **`0x04`, powered and released in one step** | **`61 01`, `power.on`** |
+  | green GO | red, power off, no hold | `0x06` | `0x04`, powered and released in one step | `61 01`, `power.on` |
+  | **GO, red, GO** | red → steady → flashing → **steady** | `0x06` | **`0x04`** | **`61 01` x3, `81 00` x3, `61 01` x3** |
 
   The operator read the panel independently on runs 2 and 3, and it agreed with the status byte
   both times. On run 2 `railctl power on` left the station blinking green, which is `0x05` —
@@ -1736,8 +1737,9 @@ Two separate facts, and they are worth keeping apart:
   **Run 4 used the green GO button and confirms the other half of the panel rule**: green
   jumps straight to green-steady rather than stepping, taking `0x06` to `0x04` in one press —
   powered and released together — and broadcasting `61 01`, decoded as `power.on`. Only one
-  frame was read, because `--limit 1` ended the run on it; that says nothing about whether
-  `61 01` repeats three times as the other two do.
+  frame was read, because `--limit 1` ended the run on it. **Run 5 then settled what that could
+  not**: `61 01` arrives three times like the other two, seen twice in one run, so the single
+  frame was an artefact of the limit rather than of the station.
 
   **Run 4 also exercised the ndjson stream contract, which runs 1 to 3 could not.** It ended
   on its own `--limit` instead of being killed, so `railctl`'s exit code was a real 0 — read
@@ -1750,6 +1752,21 @@ Two separate facts, and they are worth keeping apart:
 
   One object per line, sequence numbers from 0 with no gaps, `summary` last with
   `complete: true` — the contract `test_m6_acceptance.py` stage 3 accepts, now seen on Linux.
+
+  **Run 5 closed the half of the panel rule nothing had measured.** Runs 1 to 4 never pressed
+  green from the flashing state, so "green always jumps to green-steady" rested on M6's
+  wording rather than on an observation of that transition. The operator ran GO → red once
+  → GO by hand, with `railctl` sending no power telegram at all, and the stream was
+  `61 01` x3, `81 00` x3, `61 01` x3, ending at `0x04`. So green does jump to steady from
+  flashing, and the claim is measured in both directions on this platform.
+
+  **Two things the panel does not tell you, both worth knowing before trusting the LED.**
+  Red *saturates* rather than stepping: from red it stays red, as run 1 shows, and still
+  broadcasts `61 00` rather than doing nothing. And the LED has three states where the status
+  byte has at least four — "red" is `0x06` or `0x07` depending on whether the hold bit was
+  left set underneath, and runs 1 and 2 ended in different bytes behind an identical panel.
+  The LED is a lossy view of the status byte, which is the same point lines 67-68 of this
+  file make about `0x04` and `0x07` not distinguishing the bit orders.
 
   The first run was gated on not knowing the panel rule: had the button toggled power *on* from
   `0x06`, the automatic start mode would have resumed a locomotive's stored speed instantly
