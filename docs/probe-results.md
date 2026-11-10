@@ -18,6 +18,8 @@
 | --- | --- | --- |
 | Port map | `…41` LocoNet (silent), `…43` XpressNet, `…45` YD.Control telemetry | passive listen |
 | Port map on Linux | `-if00` LocoNet, `-if02` XpressNet, `-if04` telemetry — the same three functions | `/dev/serial/by-id` + dmesg + handshake, 2026-10-14 |
+| macOS acceptance port shape | `/dev/cu.usbmodem…1` / `…3` / `…5`, confirmed by a live handshake rather than inferred from this file | M4 acceptance, 3 passed, 2026-11-10 |
+| Telemetry stream cadence | one 7-byte `YD.Q:V\r` every **15.3084 s**, no firmware banner | 300 s raw listen, 2026-11-10 |
 | Identity | XpressNet 4.0, id `0x12` | `63 21 40 12` |
 | R5 — single function `E4 F8` | **works** | `E4 F8 00 03 40` accepted, headlight lit |
 | Function groups 4 and 5 (F13–F28) | **work** | `E4 23` / `E4 28` accepted |
@@ -1472,6 +1474,13 @@ station's own firmware banner — and `frames_ok=0` is the measurement that no a
 stream ever assembles into a frame. Same verdict as the macOS `…45` node, through a different
 kernel.
 
+The 35-byte run is **one query plus one banner line**, not five queries: `YD.Q:V\r` is 7 bytes
+and the banner elided above is 27, which is what a single 2.0 s window can hold. Reading 35 as
+five 7-byte arrivals makes it look like 76 s of stream compressed into 2 s, and from there like
+evidence that usbip distorts timing. It is not. Nothing in this file casts doubt on the Linux
+timing, and the banner itself has not been seen since — see "The telemetry stream is a repeated
+query at a measured 15.3 s period" below.
+
 `bytes_dropped` is not a constant and must not be read as one: the test stops as soon as the
 counter moves, so it reports however much of the stream happened to arrive in the window it
 needed. `frames_ok` is the load-bearing half, which is why the acceptance test asserts that and
@@ -1797,3 +1806,141 @@ Two separate facts, and they are worth keeping apart:
   be: they need a locomotive on a powered track, and both tracks were deliberately cleared
   for every run above.
 - **Anything about bare metal.** Every byte here still went through usbip.
+
+## The macOS acceptance port shape is confirmed by live measurement — SETTLED 2026-11-10
+
+The `darwin` row of `tests/hardware/ports.py` was asserted from this file rather than from a
+live handshake. PR #67 shipped that knowingly and recorded it in the PR body — which is the one
+place this project has argued nobody greps, and a grep of `docs/`, `tests/`, `README.md` and
+`CLAUDE.md` for the gap duly returned nothing. Closed now, on the Mac with the station
+physically attached to it:
+
+| step | result |
+| --- | --- |
+| `ls -l /dev/cu.usbmodem*` | `…7010A00011941`, `…7010A00011943`, `…7010A00011945` |
+| `railctl version` | `XpressNet 4.0 (Z21)`, command station id 18 |
+| `auto` picked | `/dev/cu.usbmodem7010A00011943` |
+| version telegram | `63 21 40 12 10` |
+| M4 acceptance, that file alone | **3 passed** |
+
+The telegram is byte for byte what this file records for the macOS bench on 2026-08-04 and for
+Linux on 2026-10-14: three benches, two kernels, one answer. The **shape** assertion is what
+mattered, because a glob that matches exactly one node cannot certify itself — prefix
+`/dev/cu.usbmodem` and suffix `3` were both checked against the table, so `auto` picking *a*
+node is no longer the same claim as `auto` picking the *right* node.
+
+### What this does NOT establish
+
+- **That the third M4 test was reliable here.** It passed, and on the same bench on the same day
+  it also failed with byte-identical code. It passed on a phase, not on a margin; see the next
+  section.
+- **Bare metal on either platform.** Unchanged.
+
+## The telemetry stream is a repeated query at a measured 15.3 s period — SETTLED 2026-11-10, the change from August NOT established
+
+Measured on the macOS bench, station on its own supply, **track dead (`0x06`) with no locomotive
+on either track**, by a raw `os.open()` plus `termios` raw-mode listen driven by `select()` — no
+`railctl`, no `Link.open()`, no handshake, so nothing of ours perturbed the stream, and the
+chunk boundaries are arrivals rather than line-discipline buffering. 300 s continuous, not
+windowed.
+
+| | |
+| --- | --- |
+| arrivals | 20 |
+| bytes | 140 — every arrival exactly 7 |
+| content | `59 44 2E 51 3A 56 0D`, i.e. `YD.Q:V\r`, all 20 times |
+| first arrival | 4.95 s into the listen |
+| period | **15.3084 s** (19 gaps; last minus first = 290.86 s) |
+| firmware banner | **not once** |
+
+The period is a crystal rather than a software timer: the 19 gaps hold to within 0.05 s across
+290 s, about 170 ppm, where a `sleep` loop would jitter and drift. One caveat on how that was
+reported: printing the per-gap differences from timestamps rounded to 0.01 s makes them
+alternate between 15.30 and 15.31, so the gaps are **not** identical to the hundredth and `min`
+does not equal `max`. The period behind them is 15.3084 s and the stability claim rests on the
+290.86 s span, not on the printed differences.
+
+**The interval does not depend on track power.** Two 30 s windows taken before the long listen,
+one per state, each giving 14 bytes in 2 arrivals of `YD.Q:V\r`:
+
+| track | status byte | arrivals at |
+| --- | --- | --- |
+| dead | `0x06` | 9.36 s, 24.67 s |
+| live | `0x04` | 8.81 s, 24.12 s |
+
+The within-window gap is 15.31 s in both, which is the long listen's period reproduced in each
+state, so the power independence is not merely a byte count coming out equal twice. The
+acceptance test therefore needs neither track power nor a locomotive — which it was already
+written to assume, and which is now measured rather than assumed.
+
+### What changed between August and now
+
+`YD.Q:V` reads as a YaMoRC **query** for a version — `YD` the vendor prefix, `Q` query, `V`
+version, `\r` terminating — and interface 5 is the port the vendor's own YD.Control application
+speaks to, so it is an application port rather than a stream meant for passive listening.
+
+What the two benches recorded, four weeks apart:
+
+| | 2026-10-14, Linux | 2026-11-10, macOS |
+| --- | --- | --- |
+| `YD.Q:V\r` | yes | yes, 20 times in 300 s |
+| `[CS0] V:8.2.8 …` banner | **emitted** | **not once in 300 s** |
+
+Against the figures the M4 docstring carried for 2026-08-05: 18.47 bytes per second then against
+0.467 now, 23.1 bytes per arrival then against 7.0 now, mean gap 1.27 s then against 15.31 s now.
+Both the cadence and the content changed, so this is not one phenomenon called "less often".
+
+**Cause NOT established.** Two readings survive and neither has been tested. The first, labelled
+a hypothesis: the station is querying a partner that is not there and repeating on a fixed
+interval because nothing answers, which would make August's richer stream the *answered* state.
+The second: a firmware change. The first explains more — 14 October's station had just come off
+the Windows host where the vendor application could have been answering it, and a firmware change
+that deletes an entire banner line while leaving a perfectly regular 7-byte query behind is
+harder to motivate. That is an argument, not a measurement.
+
+### What this does NOT establish
+
+- **The cause of the change.** Settling it needs either a write to interface 5, whose effect on
+  the station nobody here knows, or a run of the vendor's YD.Control against it. Neither was
+  done, and the write was deliberately declined.
+- **The August figures themselves.** 24 arrivals, 554 bytes over 30 s, mean gap 1.27 s and max
+  gap 4.83 s were carried only in `tests/hardware/test_m4_acceptance.py`'s docstring, attributed
+  to 2026-08-05, and this file has no entry for them. They are repeated above as a citation of
+  that docstring, not as a measurement of this file's own — nobody can audit them now, and the
+  ratios computed against them inherit exactly that weakness.
+- **An observer effect, in either direction.** Not detected: the alternating pass/fail pattern
+  below is itself evidence against one, since a clock reset by each port open would put every run
+  at the same offset and make the verdict constant, and the first arrival landed 4.95 s in rather
+  than at zero. Recorded as an observation, not as a resolution.
+
+### The old acceptance window was shorter than the period, and the test was phase-locked
+
+Ten consecutive runs of the telemetry test alone, same bench, same day, byte-identical code:
+
+| run | attempts | `bytes_dropped` | verdict | duration |
+| --- | --- | --- | --- | --- |
+| 1 | 1 | 7 | passed | 2.02 s |
+| 2 | 5 | 0 | **failed** | 10.07 s |
+| 3 | 3 | 7 | passed | 6.03 s |
+| 4 | 5 | 0 | **failed** | 10.07 s |
+| 5 | 2 | 7 | passed | 4.03 s |
+| 6 | 5 | 0 | **failed** | 10.07 s |
+| 7 | 3 | 7 | passed | 6.03 s |
+| 8 | 5 | 0 | **failed** | 10.07 s |
+| 9 | 2 | 7 | passed | 4.02 s |
+| 10 | 5 | 0 | **failed** | 10.07 s |
+
+Five of ten, alternating without a single exception. That is not a probability, it is a
+two-stroke cycle: a 10.07 s failure and a 2-6 s pass beat against the 15.3084 s period, and each
+run sets the phase of the next. The consequence is worse than flakiness — the verdict is a
+function of how long the *previous* test took, so on a faster machine or in a different
+collection order it flips wholesale rather than statistically, and it can stay green many times
+running until something unrelated shifts the phase.
+
+The window was five attempts of `HANDSHAKE_TIMEOUT` = 10 s against a 15.3084 s period, so it
+could not be reliable by arithmetic rather than by a thin margin. Eight attempts is the minimum
+that exceeds one period. The count had already been raised once, from three to five, to clear a
+margin that had been grazed; raising it again would buy the same thing a third time, so the loop
+is now bounded by a deadline of 2.6 periods, about 40 s, derived from the measured period
+rather than written beside it, which stops at the first byte and therefore
+costs nothing except when the station is genuinely silent.
