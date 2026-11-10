@@ -1890,19 +1890,40 @@ Against the figures the M4 docstring carried for 2026-08-05: 18.47 bytes per sec
 0.467 now, 23.1 bytes per arrival then against 7.0 now, mean gap 1.27 s then against 15.31 s now.
 Both the cadence and the content changed, so this is not one phenomenon called "less often".
 
-**Cause NOT established.** Two readings survive and neither has been tested. The first, labelled
-a hypothesis: the station is querying a partner that is not there and repeating on a fixed
-interval because nothing answers, which would make August's richer stream the *answered* state.
-The second: a firmware change. The first explains more — 14 October's station had just come off
-the Windows host where the vendor application could have been answering it, and a firmware change
-that deletes an entire banner line while leaving a perfectly regular 7-byte query behind is
-harder to motivate. That is an argument, not a measurement.
+Two readings were open. **The firmware one is now closed by measurement**, read from the
+vendor's own configuration tool on 2026-11-10 (`USB 2.0` → `USB Properties`, the screen the
+manual documents on page 26):
+
+| field | value |
+| --- | --- |
+| serial of the connected YD7010 | `7010A0001194` |
+| YD7010 version | **8.2.8** |
+| latest version bundled with the tool | 8.2.8 |
+
+The 2026-10-14 banner read `[CS0] V:8.2.8 7010A0001194` — the same serial and the same version,
+so this is one quantity read twice, four weeks apart, across the window in which the behaviour
+changed. **The firmware did not change.** The tool also bundles the identical version, so no
+update was pending and none was offered or declined.
+
+That leaves the protocol-state reading: the station is querying a partner that is not there and
+repeating on a fixed interval because nothing answers, which would make August's richer stream
+the *answered* state. The vendor's manual supports what the port is **for** — page 26 lists the
+three virtual COM ports and calls YD.Control the "interface for the internal protocol for
+communication with the YD7010 software" — and 14 October's station had just come off the Windows
+host where that software could have been answering it.
+
+**Cause still NOT established**, and "the only surviving hypothesis" is not a measurement. A
+configuration change has not been excluded, and nobody has yet observed the station answering
+the application with a banner; the purpose of the port is documented, the mechanism is not.
 
 ### What this does NOT establish
 
-- **The cause of the change.** Settling it needs either a write to interface 5, whose effect on
-  the station nobody here knows, or a run of the vendor's YD.Control against it. Neither was
-  done, and the write was deliberately declined.
+- **The cause of the change.** Firmware is ruled out, above. What remains unobserved is the
+  station actually emitting the banner in response to the vendor application, and whether any
+  configuration setting governs this stream. Settling the first needs the application connected
+  while something listens, which is awkward because the application holds the port; settling it
+  by writing `YD.Q:V` back to interface 5 was deliberately declined, since nobody here knows what
+  that write does.
 - **The August figures themselves.** 24 arrivals, 554 bytes over 30 s, mean gap 1.27 s and max
   gap 4.83 s were carried only in `tests/hardware/test_m4_acceptance.py`'s docstring, attributed
   to 2026-08-05, and this file has no entry for them. They are repeated above as a citation of
@@ -1974,6 +1995,19 @@ so a machine with stable startup overhead would pin the start phase too — but 
 so a pinned phase is no longer a pinned verdict. The necessary condition for the old beat is
 also gone on its own terms: a failing run used to take a constant 10.07 s, and a run that ends
 on the signal takes a step function of the phase instead.
+
+### A COM number carries no interface index — the numbering trap, third instance
+
+The vendor tool's `USB Properties` lists the three functions with the Windows COM numbers
+assigned on that host: `YD.Control COM3`, `XPressNet COM5`, `LocoNet COM4`. The manual's own
+example on page 26 lists the same three as `COM5`, `COM7`, `COM6`, and flags that the assigned
+ports differ from the example. So the COM number is a host-side artefact and says nothing about
+which CDC function it names: inferring `-if00` from `COM3` would contradict the dmesg and
+handshake measurement recorded above.
+
+That is the third dress this trap has worn in this file, after macOS's data-interface numbering
+(1, 3, 5) against Linux's control-interface numbering (if00, if02, if04). Three numbering schemes
+for one composite device, none of them derivable from another, all of them measured separately.
 
 One bound worth stating exactly, because the deadline is a floor on waiting and not a cap on
 elapsed time: an attempt already in flight is not interrupted, so the longest a genuinely silent
