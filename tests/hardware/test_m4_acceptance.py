@@ -10,6 +10,7 @@ here to read.
 from __future__ import annotations
 
 import os
+import time
 
 import pytest
 
@@ -24,12 +25,28 @@ pytestmark = pytest.mark.hardware
 
 VERSION_HEADER = 0x63
 VERSION_MARKER = 0x21
-# 5 x HANDSHAKE_TIMEOUT = 10 s. The measured maximum gap is 4.83 s, but the
-# first run of this loop needed three attempts - two consecutive empty windows -
-# so 6 s was already grazing the edge. Ten seconds costs a few seconds on a
-# suite that only runs by hand, and buys a test that is evidence rather than a
-# coin toss.
-TELEMETRY_ATTEMPTS = 5
+# The stream is periodic and the period is MEASURED: 15.3084 s, from 19
+# consecutive gaps over a 300 s raw listen on 2026-11-10 (docs/probe-results.md,
+# "The telemetry stream is a repeated query at a measured 15.3 s period").
+#
+# This loop is bounded by a DEADLINE rather than by a count of attempts, and
+# that correction has now been needed twice. The count was three, then five -
+# and five 2-second attempts is a 10 s window against a 15.3 s period, which
+# cannot pass reliably. That is arithmetic, not a thin margin. It did not fail
+# randomly either: ten consecutive runs alternated pass and fail without a
+# single exception, because a 10 s failure and a 2-6 s pass beat against the
+# period and each run set the phase of the next. A verdict that depends on how
+# long the PREVIOUS test took is not measuring the station.
+#
+# The deadline is DERIVED from the period rather than restated beside it, so
+# that re-measuring the period moves the window with it: a second literal is a
+# second thing to forget, and forgetting it is the whole history above. 2.6
+# periods is about 40 s. It costs nothing while the stream is alive, because the
+# loop stops at the first byte; the full window is only ever paid when the
+# station is genuinely silent, which is exactly when waiting longer is right.
+TELEMETRY_PERIOD_SECONDS = 15.3084
+TELEMETRY_DEADLINE_PERIODS = 2.6
+TELEMETRY_DEADLINE_SECONDS = TELEMETRY_DEADLINE_PERIODS * TELEMETRY_PERIOD_SECONDS
 
 
 def test_auto_detection_finds_the_xpressnet_port():
@@ -75,21 +92,30 @@ def test_the_telemetry_port_shows_bytes_dropped_climbing_with_no_frames():
     reason the counters exist.
 
     Why this opens the port more than once. The stream is periodic, not
-    continuous: measured on 2026-08-05 over 30 s, 24 arrivals totalling 554
-    bytes, mean gap 1.27 s and MAX GAP 4.83 s. `open()` gives up after
-    HANDSHAKE_TIMEOUT (2.0 s) here - its resend path needs a reply in
-    `_RETRY_PREFIXES`, and no amount of this ASCII stream ever assembles into a
-    frame, which is the assertion below - so a single attempt can see zero
-    bytes on a perfectly healthy station - which is exactly what happened on
-    that date, after this test had been passing on luck since M4. The envelope's
-    counters are per session and survive `reset()` (only the buffer is per
-    connection), so consecutive attempts accumulate. The first run of this loop
-    needed three of them, so the count is five: two empty windows in a row have
-    been observed, and a margin that has already been grazed is not a margin.
+    continuous, and the period is what this loop must be sized against. The
+    figures this docstring used to carry - 24 arrivals, 554 bytes over 30 s,
+    mean gap 1.27 s, MAX GAP 4.83 s, attributed to 2026-08-05 - have no entry
+    in docs/probe-results.md to audit them against, and they no longer describe
+    this station: a 300 s raw listen on 2026-11-10 saw 20 arrivals of exactly 7
+    bytes, one every 15.3084 s, and no firmware banner at all.
+
+    `open()` gives up after HANDSHAKE_TIMEOUT (2.0 s) here - its resend path
+    needs a reply in `_RETRY_PREFIXES`, and no amount of this ASCII stream ever
+    assembles into a frame, which is the assertion below - so a single attempt
+    can see zero bytes on a perfectly healthy station. The envelope's counters
+    are per session and survive `reset()` (only the buffer is per connection),
+    so consecutive attempts accumulate.
+
+    The deadline replaced a count of attempts because the count was measuring
+    the wrong thing. See TELEMETRY_DEADLINE_SECONDS: at five attempts this test
+    was not flaky in the statistical sense but phase-locked, alternating pass
+    and fail ten times out of ten, so repeating it sampled one phase rather
+    than a probability. In CI the verdict would have turned on the duration of
+    whatever happened to run before it.
 
     The irony is worth keeping in the file: this test exists to prove the
-    counters can tell silence from noise, and it was itself reading a gap in
-    the noise as silence.
+    counters can tell silence from noise, and it has now twice read a gap in
+    the noise as silence - once by luck, and once by resonance.
     """
     # A FAILURE, not a skip. The XpressNet port was just found, and this station
     # exposes three CDC functions - so a missing third one is a finding about the
@@ -107,18 +133,30 @@ def test_the_telemetry_port_shows_bytes_dropped_climbing_with_no_frames():
     envelope = LiUsbEnvelope()
     link = Link(SerialTransport(SerialConfig(telemetry)), envelope)
     attempts = 0
-    while attempts < TELEMETRY_ATTEMPTS and envelope.stats.bytes_dropped == 0:
+    started = time.monotonic()
+    deadline = started + TELEMETRY_DEADLINE_SECONDS
+    while True:
         attempts += 1
         with pytest.raises(PortNotXpressNet) as caught:
             link.open()
+        if envelope.stats.bytes_dropped > 0 or time.monotonic() >= deadline:
+            break
+    waited = time.monotonic() - started
     print(f"\n{caught.value}")
     stats = envelope.stats
-    print(f"attempts={attempts} frames_ok={stats.frames_ok} bytes_dropped={stats.bytes_dropped}")
+    print(
+        f"waited={waited:.1f}s attempts={attempts} "
+        f"frames_ok={stats.frames_ok} bytes_dropped={stats.bytes_dropped}"
+    )
     # frames_ok is the load-bearing half and holds however long we listen: no
     # amount of ASCII telemetry ever assembles into a valid XpressNet frame.
     assert stats.frames_ok == 0
     assert stats.bytes_dropped > 0, (
-        f"the telemetry interface said nothing across {attempts} attempts "
-        f"({attempts * HANDSHAKE_TIMEOUT:.0f} s); the measured maximum gap is 4.83 s, so "
-        "either the station is genuinely silent or the stream's timing has changed"
+        f"the telemetry interface said nothing in {waited:.1f} s across {attempts} attempts "
+        f"of {HANDSHAKE_TIMEOUT:.1f} s; the measured period is "
+        f"{TELEMETRY_PERIOD_SECONDS:.4f} s (300 s raw listen, 2026-11-10), so a window this "
+        f"long should have held about {waited / TELEMETRY_PERIOD_SECONDS:.1f} arrivals. Either "
+        "the station is genuinely silent or its telemetry cadence has changed again - measure "
+        "it and record it before raising this deadline, because raising the old attempt count "
+        "is what hid this problem twice"
     )
