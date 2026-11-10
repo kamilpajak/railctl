@@ -44,6 +44,16 @@ VERSION_MARKER = 0x21
 # periods is about 40 s. It costs nothing while the stream is alive, because the
 # loop stops at the first byte; the full window is only ever paid when the
 # station is genuinely silent, which is exactly when waiting longer is right.
+#
+# Why 2.6 rather than a round number: the worst case is derivable. If the loop
+# starts t seconds after an arrival the next one lands at PERIOD - t, so it
+# needs ceil((PERIOD - t) / HANDSHAKE_TIMEOUT) attempts, maximal as t -> 0 at
+# ceil(15.3084 / 2.0) = 8 attempts, i.e. 16.0 s. The deadline is 2.49x that,
+# and a sweep of every start phase at 1 ms resolution finds NO phase that
+# exceeds it. That is the property the attempt count never had: the bound holds
+# whatever the phase, so a stable machine that pins the phase cannot pin it to a
+# losing one. Measured against the derivation on 2026-11-10 - three runs waited
+# 6.0 s, 14.1 s and 16.1 s, the last at exactly the derived ceiling.
 TELEMETRY_PERIOD_SECONDS = 15.3084
 TELEMETRY_DEADLINE_PERIODS = 2.6
 TELEMETRY_DEADLINE_SECONDS = TELEMETRY_DEADLINE_PERIODS * TELEMETRY_PERIOD_SECONDS

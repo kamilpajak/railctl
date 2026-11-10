@@ -1944,3 +1944,37 @@ margin that had been grazed; raising it again would buy the same thing a third t
 is now bounded by a deadline of 2.6 periods, about 40 s, derived from the measured period
 rather than written beside it, which stops at the first byte and therefore
 costs nothing except when the station is genuinely silent.
+
+### The deadline was then run against the station, and the worst case is derivable — 2026-11-10
+
+Three consecutive runs of the whole M4 file on the fixed branch, same bench, track dead at
+`0x06` with nothing on it:
+
+| run | attempts | `bytes_dropped` | waited | verdict |
+| --- | --- | --- | --- | --- |
+| 1 | 3 | 7 | 6.0 s | passed |
+| 2 | 7 | 7 | 14.1 s | passed |
+| 3 | 8 | 7 | 16.1 s | passed |
+
+`frames_ok=0` in all three, and `bytes_dropped=7` in all three — exactly one arrival, so the
+loop does stop at the first byte rather than paying the window out while the station is talking.
+**Two of these three would have been red under the old 10 s window**, which is the same defect
+measured from the other side.
+
+The ceiling is arithmetic rather than a sample. A loop starting `t` seconds after an arrival
+waits `PERIOD - t` for the next one, so it needs `ceil((PERIOD - t) / HANDSHAKE_TIMEOUT)`
+attempts, which is maximal as `t` approaches 0 at `ceil(15.3084 / 2.0)` = **8 attempts, 16.0 s**.
+Run 3 landed on exactly that, so the worst case is demonstrated and not merely bounded. The
+deadline is 2.49x it, and sweeping every start phase at 1 ms resolution finds **no phase that
+exceeds the deadline**.
+
+That last point is what retires the resonance question rather than merely observing its absence.
+Three runs are too few to prove no beat, and the end of each run is still pinned to an arrival,
+so a machine with stable startup overhead would pin the start phase too — but no phase can fail,
+so a pinned phase is no longer a pinned verdict. The necessary condition for the old beat is
+also gone on its own terms: a failing run used to take a constant 10.07 s, and a run that ends
+on the signal takes a step function of the phase instead.
+
+One bound worth stating exactly, because the deadline is a floor on waiting and not a cap on
+elapsed time: an attempt already in flight is not interrupted, so the longest a genuinely silent
+station can hold this test is `deadline + HANDSHAKE_TIMEOUT` = 41.8 s, not 39.8 s.
