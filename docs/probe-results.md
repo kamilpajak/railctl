@@ -19,7 +19,7 @@
 | Port map | `…41` LocoNet (silent), `…43` XpressNet, `…45` YD.Control telemetry | passive listen |
 | Port map on Linux | `-if00` LocoNet, `-if02` XpressNet, `-if04` telemetry — the same three functions | `/dev/serial/by-id` + dmesg + handshake, 2026-10-14 |
 | macOS acceptance port shape | `/dev/cu.usbmodem…1` / `…3` / `…5`, confirmed by a live handshake rather than inferred from this file | M4 acceptance, 3 passed, 2026-11-10 |
-| Telemetry stream cadence | one 7-byte `YD.Q:V\r` every **15.3084 s**, no firmware banner | 300 s raw listen, 2026-11-10 |
+| Telemetry stream cadence | one 7-byte `YD.Q:V\r` every **15.3084 s**, reproduced on a second kernel; the banner is no part of the stream but is still emitted | 300 s raw listen macOS + nine runs Linux, 2026-11-10 |
 | Identity | XpressNet 4.0, id `0x12` | `63 21 40 12` |
 | R5 — single function `E4 F8` | **works** | `E4 F8 00 03 40` accepted, headlight lit |
 | Function groups 4 and 5 (F13–F28) | **work** | `E4 23` / `E4 28` accepted |
@@ -1462,7 +1462,7 @@ wire, and a glob written `-if03` matches nothing at all. dmesg's `1-1:1.0` / `1-
 | 1 | `ls -l /dev/serial/by-id/` | the three symlinks above |
 | 2 | `glob.glob("/dev/serial/by-id/usb-YaMoRC_YD700x*-if02")` | exactly one path |
 | 3 | `railctl --target serial:<that path> version` | XpressNet **4.0**, command station id **0x12** (18), four runs of four |
-| 4 | `Link.open()` against the `-if04` node (M4 acceptance, up to five attempts, stops once bytes are dropped) | `PortNotXpressNet`, `frames_ok=0`, first bytes `59 44 2E 51 3A 56 0D`. Two runs: 5 attempts / `bytes_dropped=7`, and 1 attempt / `bytes_dropped=35` |
+| 4 | `Link.open()` against the `-if04` node (M4 acceptance, up to five attempts, stops once bytes are dropped) | `PortNotXpressNet`, `frames_ok=0`, first bytes `59 44 2E 51 3A 56 0D`. Two runs: 5 attempts / `bytes_dropped=7`, and 1 attempt / `bytes_dropped=35`, which 2026-11-10 measured directly as one query plus one banner, 7 + 28 bytes, rather than five queries |
 
 Step 3's bytes are the ordinary handshake: `21 21 00` out, `63 21 40 12 10` back — byte for byte
 what this file records for the macOS bench on 2026-08-04, through a different kernel and a
@@ -1879,12 +1879,19 @@ written to assume, and which is now measured rather than assumed.
 version, `\r` terminating — and interface 5 is the port the vendor's own YD.Control application
 speaks to, so it is an application port rather than a stream meant for passive listening.
 
-What the two benches recorded, four weeks apart:
+What the three benches recorded:
 
-| | 2026-10-14, Linux | 2026-11-10, macOS |
-| --- | --- | --- |
-| `YD.Q:V\r` | yes | yes, 20 times in 300 s |
-| `[CS0] V:8.2.8 …` banner | **emitted** | **not once in 300 s** |
+| | 2026-10-14, Linux | 2026-11-10, macOS | 2026-11-10, Linux |
+| --- | --- | --- | --- |
+| `YD.Q:V\r` | yes | yes, 20 times in 300 s | yes, 15.3079 s period |
+| `[CS0] V:8.2.8 …` banner | **emitted** | **not once in 300 s** | **emitted, at 3 of 9 opens** |
+
+The third column was added later the same day, and it **withdraws a claim this section used to
+make**. The banner's absence from the macOS listen was read here as the station's behaviour
+having changed inside four weeks. It had not: the banner is still emitted, measured on the Linux
+bench that same day. What varies is whether a given port open finds one waiting — and absence is
+the common case even on a bench where it demonstrably appears minutes later, so one 300 s listen
+seeing none was never evidence that the station had stopped.
 
 Against the figures the M4 docstring carried for 2026-08-05: 18.47 bytes per second then against
 0.467 now, 23.1 bytes per arrival then against 7.0 now, mean gap 1.27 s then against 15.31 s now.
@@ -1901,9 +1908,11 @@ manual documents on page 26):
 | latest version bundled with the tool | 8.2.8 |
 
 The 2026-10-14 banner read `[CS0] V:8.2.8 7010A0001194` — the same serial and the same version,
-so this is one quantity read twice, four weeks apart, across the window in which the behaviour
-changed. **The firmware did not change.** The tool also bundles the identical version, so no
-update was pending and none was offered or declined.
+so this is one quantity read twice, four weeks apart. **The firmware did not change.** The tool
+also bundles the identical version, so no update was pending and none was offered or declined.
+This reading was opened in order to explain a change which, as the third column above now
+records, did not happen. The measurement is kept because it stands on its own and because the
+banner's version string is thereby confirmed current rather than a stale artefact.
 
 That leaves the protocol-state reading: the station is querying a partner that is not there and
 repeating on a fixed interval because nothing answers, which would make August's richer stream
@@ -1915,6 +1924,62 @@ host where that software could have been answering it.
 **Cause still NOT established**, and "the only surviving hypothesis" is not a measurement. A
 configuration change has not been excluded, and nobody has yet observed the station answering
 the application with a banner; the purpose of the port is documented, the mechanism is not.
+
+### Nine read-only runs, and five candidate triggers for the banner eliminated — 2026-11-10
+
+Taken on the Linux bench minutes after the vendor's configuration tool had been run on the
+Windows host, by the same raw `os.open()` plus `termios` listen as above — no `railctl`, no
+handshake, and not one byte written to the station. The cable was never unplugged, deliberately:
+a physical unplug cuts VBUS and is the single event most likely to clear whatever state is being
+tested for, whereas a `usbipd attach` is the path by which 14 October's banner was itself
+observed. The station was returned to `Shared` afterwards, the state it was found in.
+
+| run | condition | banner |
+| --- | --- | --- |
+| A | first open of a cycle, ~2-5 s after attach, 120 s listen | **yes**, pending |
+| B | opens 2, 3 and 4 of that same cycle, 25 s each | no (3 runs) |
+| C | fresh attach, first open ~5 s later | **yes**, pending |
+| D | fresh attach, first open ~5 s later, procedure identical to C | no |
+| E | fresh attach, 120 s with no reader, then open | **yes**, pending |
+| F | same cycle as E, opens after waits of 5, 20, 45 and 90 s | no (4 waits) |
+| G | fresh attach, open 12.6 ms after the node appeared, 60 s listen | no |
+| H | fresh attach, open held until 2.0 s after the node appeared, 45 s | no |
+| I | repeat of H in a further cycle | no |
+
+**The banner is still emitted in November**, on three independent occasions. That is what
+withdraws the "behaviour changed" claim corrected above.
+
+**`bytes_dropped=35` is one query plus one banner, now measured rather than inferred.** The
+pending arrival is `59 44 2E 51 3A 56 0D` followed by `[CS0] V:8.2.8 7010A0001194\r\n`, which is
+7 bytes plus 28 and so 35 on the nose. The competing reading of step 4 above — five 7-byte
+queries, since 5 x 7 is also 35 — is dead by observation, and with it the inference that usbip
+compresses 76 s of stream into a 2 s window.
+
+**The 15.3 s period reproduces on a second kernel through usbip.** Seven consecutive gaps of
+15.3034, 15.3086, 15.3093, 15.3092, 15.3074, 15.3095 and 15.3070 s, mean 15.3079 s against the
+15.3084 s measured on macOS: 33 ppm apart across different hardware, a different kernel and a
+transport the macOS reading never used. The crystal is confirmed independently, and the
+suggestion that usbip distorts this timing is retired — it does not, to 33 ppm.
+
+**Exactly one query is ever pending, never a stack.** After 120 s with no reader attached the
+first arrival carried one query, not the eight the period would have produced. Unread queries
+are discarded rather than buffered, which is precisely what makes a banner surviving the same
+interval the strange part.
+
+What these runs eliminate is worth more than what they support. The banner does **not** arrive on
+every port open (B), nor on every attach (D, G, H, I), nor on a timer out to 90 s (F), nor as the
+station's answer to the first open of a connection cycle (H and I were exactly that), nor a few
+seconds after enumeration where a reader present from 12.6 ms would have caught it (G). And in
+all nine runs the banner was **never observed arriving**: where present it was already pending
+within 2 ms of the open and off-cadence, the following query landing 1.3 s to 14.5 s later rather
+than 15.3 s. Something emits it before any reader of ours is looking, and five obvious candidates
+for what are now gone.
+
+One prediction, written down before run A so that it could fail, did fail: that the banner would
+appear **in the stream**, as arrivals of about 35 bytes, for some period after the vendor
+application disconnected. It appears in the stream not at all. What survives of the
+protocol-state reading is weaker and more specific — something about a host having recently
+talked to the station, rather than a mode the station remains in.
 
 ### What this does NOT establish
 
