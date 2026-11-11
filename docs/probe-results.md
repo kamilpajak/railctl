@@ -18,6 +18,8 @@
 | --- | --- | --- |
 | Port map | `…41` LocoNet (silent), `…43` XpressNet, `…45` YD.Control telemetry | passive listen |
 | Port map on Linux | `-if00` LocoNet, `-if02` XpressNet, `-if04` telemetry — the same three functions | `/dev/serial/by-id` + dmesg + handshake, 2026-10-14 |
+| macOS acceptance port shape | `/dev/cu.usbmodem…1` / `…3` / `…5`, confirmed by a live handshake rather than inferred from this file | M4 acceptance, 3 passed, 2026-11-10 |
+| Telemetry stream cadence | one 7-byte `YD.Q:V\r` every **15.3084 s**, reproduced on a second kernel; the banner is no part of the stream but is still emitted | 300 s raw listen macOS + nine runs Linux, 2026-11-10 |
 | Identity | XpressNet 4.0, id `0x12` | `63 21 40 12` |
 | R5 — single function `E4 F8` | **works** | `E4 F8 00 03 40` accepted, headlight lit |
 | Function groups 4 and 5 (F13–F28) | **work** | `E4 23` / `E4 28` accepted |
@@ -1460,7 +1462,7 @@ wire, and a glob written `-if03` matches nothing at all. dmesg's `1-1:1.0` / `1-
 | 1 | `ls -l /dev/serial/by-id/` | the three symlinks above |
 | 2 | `glob.glob("/dev/serial/by-id/usb-YaMoRC_YD700x*-if02")` | exactly one path |
 | 3 | `railctl --target serial:<that path> version` | XpressNet **4.0**, command station id **0x12** (18), four runs of four |
-| 4 | `Link.open()` against the `-if04` node (M4 acceptance, up to five attempts, stops once bytes are dropped) | `PortNotXpressNet`, `frames_ok=0`, first bytes `59 44 2E 51 3A 56 0D`. Two runs: 5 attempts / `bytes_dropped=7`, and 1 attempt / `bytes_dropped=35` |
+| 4 | `Link.open()` against the `-if04` node (M4 acceptance, up to five attempts, stops once bytes are dropped) | `PortNotXpressNet`, `frames_ok=0`, first bytes `59 44 2E 51 3A 56 0D`. Two runs: 5 attempts / `bytes_dropped=7`, and 1 attempt / `bytes_dropped=35`, which 2026-11-10 measured directly as one query plus one banner, 7 + 28 bytes, rather than five queries |
 
 Step 3's bytes are the ordinary handshake: `21 21 00` out, `63 21 40 12 10` back — byte for byte
 what this file records for the macOS bench on 2026-08-04, through a different kernel and a
@@ -1471,6 +1473,13 @@ ASCII, not XpressNet — the longer run decodes further as `[CS0] V:8.2.8 7010A0
 station's own firmware banner — and `frames_ok=0` is the measurement that no amount of that
 stream ever assembles into a frame. Same verdict as the macOS `…45` node, through a different
 kernel.
+
+The 35-byte run is **one query plus one banner line**, not five queries: `YD.Q:V\r` is 7 bytes
+and the banner elided above is 27, which is what a single 2.0 s window can hold. Reading 35 as
+five 7-byte arrivals makes it look like 76 s of stream compressed into 2 s, and from there like
+evidence that usbip distorts timing. It is not. Nothing in this file casts doubt on the Linux
+timing, and the banner itself has not been seen since — see "The telemetry stream is a repeated
+query at a measured 15.3 s period" below.
 
 `bytes_dropped` is not a constant and must not be read as one: the test stops as soon as the
 counter moves, so it reports however much of the stream happened to arrive in the window it
@@ -1797,3 +1806,737 @@ Two separate facts, and they are worth keeping apart:
   be: they need a locomotive on a powered track, and both tracks were deliberately cleared
   for every run above.
 - **Anything about bare metal.** Every byte here still went through usbip.
+
+## The macOS acceptance port shape is confirmed by live measurement — SETTLED 2026-11-10
+
+The `darwin` row of `tests/hardware/ports.py` was asserted from this file rather than from a
+live handshake. PR #67 shipped that knowingly and recorded it in the PR body — which is the one
+place this project has argued nobody greps, and a grep of `docs/`, `tests/`, `README.md` and
+`CLAUDE.md` for the gap duly returned nothing. Closed now, on the Mac with the station
+physically attached to it:
+
+| step | result |
+| --- | --- |
+| `ls -l /dev/cu.usbmodem*` | `…7010A00011941`, `…7010A00011943`, `…7010A00011945` |
+| `railctl version` | `XpressNet 4.0 (Z21)`, command station id 18 |
+| `auto` picked | `/dev/cu.usbmodem7010A00011943` |
+| version telegram | `63 21 40 12 10` |
+| M4 acceptance, that file alone | **3 passed** |
+
+The telegram is byte for byte what this file records for the macOS bench on 2026-08-04 and for
+Linux on 2026-10-14: three benches, two kernels, one answer. The **shape** assertion is what
+mattered, because a glob that matches exactly one node cannot certify itself — prefix
+`/dev/cu.usbmodem` and suffix `3` were both checked against the table, so `auto` picking *a*
+node is no longer the same claim as `auto` picking the *right* node.
+
+### What this does NOT establish
+
+- **That the third M4 test was reliable here.** It passed, and on the same bench on the same day
+  it also failed with byte-identical code. It passed on a phase, not on a margin; see the next
+  section.
+- **Bare metal on either platform.** Unchanged.
+
+## The telemetry stream is a repeated query at a measured 15.3 s period — SETTLED 2026-11-10, the change from August NOT established
+
+Measured on the macOS bench, station on its own supply, **track dead (`0x06`) with no locomotive
+on either track**, by a raw `os.open()` plus `termios` raw-mode listen driven by `select()` — no
+`railctl`, no `Link.open()`, no handshake, so nothing of ours perturbed the stream, and the
+chunk boundaries are arrivals rather than line-discipline buffering. 300 s continuous, not
+windowed.
+
+| | |
+| --- | --- |
+| arrivals | 20 |
+| bytes | 140 — every arrival exactly 7 |
+| content | `59 44 2E 51 3A 56 0D`, i.e. `YD.Q:V\r`, all 20 times |
+| first arrival | 4.95 s into the listen |
+| period | **15.3084 s** (19 gaps; last minus first = 290.86 s) |
+| firmware banner | **not once** |
+
+The period is a crystal rather than a software timer: the 19 gaps hold to within 0.05 s across
+290 s, about 170 ppm, where a `sleep` loop would jitter and drift. One caveat on how that was
+reported, now rested on measurement instead of a guess about the reporting script. The gaps are
+**not** identical: the seven later measured on Linux span 6.1 ms, 15.3034 to 15.3095, which is
+the scatter real USB arrivals carry. An earlier version of this paragraph explained an apparent
+gap-to-gap equality by inferring that the differences had been printed from timestamps rounded
+to 0.01 s. The session that produced them reports that its script computed from full-precision
+timestamps, so **that inference is withdrawn** — it was a claim about another session's tooling,
+not a measurement. What stands either way: per-gap equality is not the basis of the stability
+claim, the 290.86 s span is.
+
+**The interval does not depend on track power.** Two 30 s windows taken before the long listen,
+one per state, each giving 14 bytes in 2 arrivals of `YD.Q:V\r`:
+
+| track | status byte | arrivals at |
+| --- | --- | --- |
+| dead | `0x06` | 9.36 s, 24.67 s |
+| live | `0x04` | 8.81 s, 24.12 s |
+
+The within-window gap is 15.31 s in both, which is the long listen's period reproduced in each
+state, so the power independence is not merely a byte count coming out equal twice. The
+acceptance test therefore needs neither track power nor a locomotive — which it was already
+written to assume, and which is now measured rather than assumed.
+
+### What changed between August and now
+
+`YD.Q:V` reads as a YaMoRC **query** for a version — `YD` the vendor prefix, `Q` query, `V`
+version, `\r` terminating — and interface 5 is the port the vendor's own YD.Control application
+speaks to, so it is an application port rather than a stream meant for passive listening.
+
+What the three benches recorded:
+
+| | 2026-10-14, Linux | 2026-11-10, macOS | 2026-11-10, Linux | 2026-11-11, macOS |
+| --- | --- | --- | --- | --- |
+| `YD.Q:V\r` | yes | yes, 20 times in 300 s | yes, 15.30777 s mean | yes, 15.30839 s over 46 gaps |
+| `[CS0] V:8.2.8 …` banner | **emitted** | **not once in 300 s** | **emitted, in 3 of 7 attach cycles** | **not once in 7 attach cycles** |
+
+The fourth column arrived a day later and is the subject of its own section below. The third
+column's figure was also wrong here until then — it read 15.3079 s, the mis-rounded mean that is
+corrected further down this section.
+
+The third column was added later the same day, and it **withdraws a claim this section used to
+make**. The banner's absence from the macOS listen was read here as the station's behaviour
+having changed inside four weeks. It had not: the banner is still emitted, measured on the Linux
+bench that same day. What varies is whether a given port open finds one waiting — and absence is
+the common case even on a bench where it demonstrably appears minutes later, so one 300 s listen
+seeing none was never evidence that the station had stopped.
+
+Against the figures the M4 docstring carried for 2026-08-05: 18.47 bytes per second then against
+0.467 now, 23.1 bytes per arrival then against 7.0 now, mean gap 1.27 s then against 15.31 s now.
+Both the cadence and the content changed, so this is not one phenomenon called "less often".
+
+Two readings were open. **The firmware one is now closed by measurement**, read from the
+vendor's own configuration tool on 2026-11-10 (`USB 2.0` → `USB Properties`, the screen the
+manual documents on page 26):
+
+| field | value |
+| --- | --- |
+| serial of the connected YD7010 | `7010A0001194` |
+| YD7010 version | **8.2.8** |
+| latest version bundled with the tool | 8.2.8 |
+
+The 2026-10-14 banner read `[CS0] V:8.2.8 7010A0001194` — the same serial and the same version,
+so this is one quantity read twice, four weeks apart. **The firmware did not change.** The tool
+also bundles the identical version, so no update was pending and none was offered or declined.
+This reading was opened in order to explain a change which, as the third column above now
+records, did not happen. The measurement is kept because it stands on its own and because the
+banner's version string is thereby confirmed current rather than a stale artefact.
+
+That leaves the protocol-state reading: the station is querying a partner that is not there and
+repeating on a fixed interval because nothing answers, which would make August's richer stream
+the *answered* state. The vendor's manual supports what the port is **for** — page 26 lists the
+three virtual COM ports and calls YD.Control the "interface for the internal protocol for
+communication with the YD7010 software" — and 14 October's station had just come off the Windows
+host where that software could have been answering it.
+
+**Cause still NOT established**, and "the only surviving hypothesis" is not a measurement. A
+configuration change has not been excluded, and nobody has yet observed the station answering
+the application with a banner; the purpose of the port is documented, the mechanism is not.
+
+### Nine read-only runs, and five candidate triggers for the banner eliminated — 2026-11-10
+
+Taken on the Linux bench minutes after the vendor's configuration tool had been run on the
+Windows host, by the same raw `os.open()` plus `termios` listen as above — no `railctl`, no
+handshake, and not one byte written to the station. The cable was never unplugged, deliberately:
+a physical unplug cuts VBUS and is the single event most likely to clear whatever state is being
+tested for, whereas a `usbipd attach` is the path by which 14 October's banner was itself
+observed. The station was returned to `Shared` afterwards, the state it was found in.
+
+| run | condition | banner |
+| --- | --- | --- |
+| A | first open of a cycle, ~2-5 s after attach, 120 s listen | **yes**, pending |
+| B | opens 2, 3 and 4 of that same cycle, 25 s each | no (3 runs) |
+| C | fresh attach, first open ~5 s later | **yes**, pending |
+| D | fresh attach, first open ~5 s later, procedure identical to C | no |
+| E | fresh attach, 120 s with no reader, then open | **yes**, pending |
+| F | same cycle as E, opens after waits of 5, 20, 45 and 90 s | no (4 waits) |
+| G | fresh attach, open 12.6 ms after the node appeared, 60 s listen | no |
+| H | fresh attach, open held until 2.0 s after the node appeared, 45 s | no |
+| I | repeat of H in a further cycle | no |
+
+**The banner is still emitted in November**, on three independent occasions. That is what
+withdraws the "behaviour changed" claim corrected above.
+
+Counted properly, the nine conditions are **14 port opens across 7 attach cycles**, and by cycle
+they fall into a far sharper pattern than the row count shows: a banner appeared **at most once
+per attach cycle, always at that cycle's first open, in 3 of the 7 cycles**. No second or later
+open in any cycle ever carried one — B and F are eleven such opens between them, all empty. So
+within a cycle the behaviour is perfectly consistent, and the whole of the unexplained residue is
+why 3 cycles and not 7: C and D were both first opens about 5 s after their attach, by an
+identical procedure, and only C carried a banner.
+
+**`bytes_dropped=35` is one query plus one banner, now measured rather than inferred.** The
+pending arrival is `59 44 2E 51 3A 56 0D` followed by `[CS0] V:8.2.8 7010A0001194\r\n`, which is
+7 bytes plus 28 and so 35 on the nose. The competing reading of step 4 above — five 7-byte
+queries, since 5 x 7 is also 35 — is dead by observation, and with it the inference that usbip
+compresses 76 s of stream into a 2 s window.
+
+**The 15.3 s period reproduces on a second kernel through usbip.** Seven consecutive gaps of
+15.3034, 15.3086, 15.3093, 15.3092, 15.3074, 15.3095 and 15.3070 s, mean **15.307771 s** against
+the 15.3084 s measured on macOS.
+
+A ppm headline is the wrong way to report that, and this file carried a wrong one twice over: it
+said mean 15.3079 s and "33 ppm apart". The mean was mis-rounded by 0.13 ms and the ppm followed
+it — the figure for the true mean is 41 ppm. But the comparison does not support a figure at all.
+The seven gaps have a standard deviation of 2.16 ms, so their mean carries a standard error of
+0.82 ms, which is **53 ppm on its own**. The 41 ppm between the benches is **0.77 of one standard
+error**, before the macOS reading's own uncertainty is added. **The two benches are
+indistinguishable.**
+
+That is the stronger claim and the one the data actually supports: the crystal is confirmed on a
+second kernel and a different host, and no distortion of this timing by usbip is detectable at
+the roughly 50 ppm level these data can resolve. Quoting an agreement to 33 ppm implied a
+precision the measurement never had.
+
+**Exactly one query is ever pending, never a stack.** After 120 s with no reader attached the
+first arrival carried one query, not the eight the period would have produced. Unread queries
+are discarded rather than buffered, which is precisely what makes a banner surviving the same
+interval the strange part.
+
+What these runs eliminate is worth more than what they support. The banner does **not** arrive on
+every port open (B), nor on every attach (D, G, H, I), nor on a timer out to 90 s (F), nor as the
+station's answer to the first open of a connection cycle (H and I were exactly that), nor a few
+seconds after enumeration where a reader present from 12.6 ms would have caught it (G). And in
+all nine runs the banner was **never observed arriving**: where present it was already pending
+within 2 ms of the open and off-cadence, the following query landing 1.3 s to 14.5 s later rather
+than 15.3 s. Something emits it before any reader of ours is looking, and five obvious candidates
+for what are now gone.
+
+One prediction, written down before run A so that it could fail, did fail: that the banner would
+appear **in the stream**, as arrivals of about 35 bytes, for some period after the vendor
+application disconnected. It appears in the stream not at all. What survives of the
+protocol-state reading is weaker and more specific. Saying it "survives" also overstated the
+case, and that is corrected here: the vendor application ran on the **Windows** host, the Linux
+bench is fed from that same host over usbipd, and the macOS bench never ran the application at
+all. "Recent contact with the vendor application" and "this host, or this transport" are
+therefore the **same measurement** so far — perfectly confounded — and neither is eliminated.
+
+### The M4 telemetry runs write to the port, so they are not listens — 2026-11-11
+
+`Link.open()` writes before it reads: `link.py` sends `_HANDSHAKE_TELEGRAM`, `21 21 00`, wrapped
+in its LI-USB envelope, and the retry path can send it twice. So **every M4 acceptance run, and
+step 4 of the 2026-10-14 Linux table above, is a write-then-read on the YD.Control node**, not a
+passive listen. The 300 s macOS listen and the fourteen opens of 2026-11-10 wrote nothing at all.
+This file had been mixing the two, which is how a write came to be filed among measurements of
+what the station does unprompted.
+
+The distinction bears on the banner directly. The 2026-10-14 reading that first showed one came
+through `Link.open()`, so after a write; the three November sightings came with no write at all.
+A write is therefore **not necessary** for the banner, and that much is measured. Whether a write
+can **draw** one is untested, and the `YD.Q:V` write that would test it stays declined for the
+separate reason that nobody here knows what it does to the station.
+
+### What this does NOT establish
+
+- **The cause of the change.** Firmware is ruled out, above. What remains unobserved is the
+  station actually emitting the banner in response to the vendor application, and whether any
+  configuration setting governs this stream. Settling the first needs the application connected
+  while something listens, which is awkward because the application holds the port; settling it
+  by writing `YD.Q:V` back to interface 5 was deliberately declined, since nobody here knows what
+  that write does.
+- **The August figures themselves.** 24 arrivals, 554 bytes over 30 s, mean gap 1.27 s and max
+  gap 4.83 s were carried only in `tests/hardware/test_m4_acceptance.py`'s docstring, attributed
+  to 2026-08-05, and this file has no entry for them. They are repeated above as a citation of
+  that docstring, not as a measurement of this file's own — nobody can audit them now, and the
+  ratios computed against them inherit exactly that weakness.
+- **An observer effect, in either direction.** Not detected: the alternating pass/fail pattern
+  below is itself evidence against one, since a clock reset by each port open would put every run
+  at the same offset and make the verdict constant, and the first arrival landed 4.95 s in rather
+  than at zero. Recorded as an observation, not as a resolution.
+
+### The old acceptance window was shorter than the period, and the test was phase-locked
+
+Ten consecutive runs of the telemetry test alone, same bench, same day, byte-identical code:
+
+| run | attempts | `bytes_dropped` | verdict | duration |
+| --- | --- | --- | --- | --- |
+| 1 | 1 | 7 | passed | 2.02 s |
+| 2 | 5 | 0 | **failed** | 10.07 s |
+| 3 | 3 | 7 | passed | 6.03 s |
+| 4 | 5 | 0 | **failed** | 10.07 s |
+| 5 | 2 | 7 | passed | 4.03 s |
+| 6 | 5 | 0 | **failed** | 10.07 s |
+| 7 | 3 | 7 | passed | 6.03 s |
+| 8 | 5 | 0 | **failed** | 10.07 s |
+| 9 | 2 | 7 | passed | 4.02 s |
+| 10 | 5 | 0 | **failed** | 10.07 s |
+
+Five of ten, alternating without a single exception. That is not a probability, it is a
+two-stroke cycle: a 10.07 s failure and a 2-6 s pass beat against the 15.3084 s period, and each
+run sets the phase of the next. The consequence is worse than flakiness — the verdict is a
+function of how long the *previous* test took, so on a faster machine or in a different
+collection order it flips wholesale rather than statistically, and it can stay green many times
+running until something unrelated shifts the phase.
+
+The window was five attempts of `HANDSHAKE_TIMEOUT` = 10 s against a 15.3084 s period, so it
+could not be reliable by arithmetic rather than by a thin margin. Eight attempts is the minimum
+that exceeds one period. The count had already been raised once, from three to five, to clear a
+margin that had been grazed; raising it again would buy the same thing a third time, so the loop
+is now bounded by a deadline of 2.6 periods, about 40 s, derived from the measured period
+rather than written beside it, which stops at the first byte and therefore
+costs nothing except when the station is genuinely silent.
+
+### The deadline was then run against the station, and the worst case is derivable — 2026-11-10
+
+Three consecutive runs of the whole M4 file on the fixed branch, same bench, track dead at
+`0x06` with nothing on it:
+
+| run | attempts | `bytes_dropped` | waited | verdict |
+| --- | --- | --- | --- | --- |
+| 1 | 3 | 7 | 6.0 s | passed |
+| 2 | 7 | 7 | 14.1 s | passed |
+| 3 | 8 | 7 | 16.1 s | passed |
+
+`frames_ok=0` in all three, and `bytes_dropped=7` in all three — exactly one arrival, so the
+loop does stop at the first byte rather than paying the window out while the station is talking.
+**Two of these three would have been red under the old 10 s window**, which is the same defect
+measured from the other side.
+
+The ceiling is arithmetic rather than a sample. A loop starting `t` seconds after an arrival
+waits `PERIOD - t` for the next one, so it needs `ceil((PERIOD - t) / HANDSHAKE_TIMEOUT)`
+attempts, which is maximal as `t` approaches 0 at `ceil(15.3084 / 2.0)` = **8 attempts, 16.0 s**.
+Run 3 landed on exactly that, so the worst case is demonstrated and not merely bounded. The
+deadline is 2.49x it, and sweeping every start phase at 1 ms resolution finds **no phase that
+exceeds the deadline**.
+
+That last point is what retires the resonance question rather than merely observing its absence.
+Three runs are too few to prove no beat, and the end of each run is still pinned to an arrival,
+so a machine with stable startup overhead would pin the start phase too — but no phase can fail,
+so a pinned phase is no longer a pinned verdict. The necessary condition for the old beat is
+also gone on its own terms: a failing run used to take a constant 10.07 s, and a run that ends
+on the signal takes a step function of the phase instead.
+
+### A COM number carries no interface index — the numbering trap, third instance
+
+The vendor tool's `USB Properties` lists the three functions with the Windows COM numbers
+assigned on that host: `YD.Control COM3`, `XPressNet COM5`, `LocoNet COM4`. The manual's own
+example on page 26 lists the same three as `COM5`, `COM7`, `COM6`, and flags that the assigned
+ports differ from the example. So the COM number is a host-side artefact and says nothing about
+which CDC function it names: inferring `-if00` from `COM3` would contradict the dmesg and
+handshake measurement recorded above.
+
+That is the third dress this trap has worn in this file, after macOS's data-interface numbering
+(1, 3, 5) against Linux's control-interface numbering (if00, if02, if04). Three numbering schemes
+for one composite device, none of them derivable from another, all of them measured separately.
+
+One bound worth stating exactly, because the deadline is a floor on waiting and not a cap on
+elapsed time: an attempt already in flight is not interrupted, so the longest a genuinely silent
+station can hold this test is `deadline + HANDSHAKE_TIMEOUT` = 41.8 s, not 39.8 s.
+
+## The banner did not appear in seven macOS cycles, and DTR is eliminated — 2026-11-11, platform difference NOT established
+
+A third bench, chosen for one property the other two cannot have: **the vendor application has
+never run on it.** MacBook Pro Mac16,1 (M4), macOS 27.0.1, station attached directly by USB with
+no usbip anywhere in the path, track dead with nothing on it. Read-only throughout —
+`os.open(O_RDONLY|O_NONBLOCK|O_NOCTTY)`, `TIOCMGET`, `read`, `close` — not one byte written to
+any node, no `railctl`, no hardware tests.
+
+Eight opens across seven physical replug cycles, every open the first of its cycle. **56
+arrivals, 392 bytes, every single arrival exactly the seven bytes `59 44 2E 51 3A 56 0D`. Not one
+`[CS0]`.**
+
+| cycle | open delay, measured | `TIOCMGET` | arrivals | banner |
+| --- | --- | --- | --- | --- |
+| 1 | 3003.5 ms | DTR, RTS | 8 | no |
+| 2 | 3002.5 ms | DTR, RTS | 8 | no |
+| 3 | 120003.6 ms | DTR, RTS | 9 | no |
+| 4 | 502.6 ms | DTR, RTS | 8 | no |
+| 5 | 503.1 ms, held 5 s, reopened at 10003.1 ms | DTR, RTS twice | 0, then 7 | no, on either open |
+| 6 | 3003.5 ms | DTR, RTS | 8 | no |
+| 7 | 3004.2 ms | DTR, RTS | 8 | no |
+
+### `cu.` raises DTR, which removes DTR as the explanation
+
+`TIOCMGET` on both node families returned `6` = `0x0006` = DTR plus RTS, immediately after the
+open and again 200 ms later. **The BSD `cu.`/`tty.` split governs blocking on carrier detect, not
+the control lines**, so the belief that `cu.` leaves DTR low — load-bearing for a whole arm of
+this experiment — was false. It was caught by measuring it in a cycle that cost no replug, rather
+than by assuming it through seven.
+
+That matters beyond the protocol design. Linux `cdc_acm` asserts DTR and RTS in
+`acm_port_activate`, so all fourteen Linux opens of 2026-11-10 raised DTR too. **Both benches
+raise DTR on every open and only one of them produced banners, so DTR does not distinguish
+them.** Any account of the difference has to be something else.
+
+### The comparison is five cycles against seven, not seven against seven
+
+Two of the macOS cycles opened at 0.5 s, a delay chosen **because** the model under test predicts
+no banner there. Counting them among the zeros tests a model with cycles selected to fail it. The
+comparable set is cycles 1, 2, 3, 6 and 7 — the delays at which Linux produced its three hits —
+so the contrast is **Linux 3/7 against macOS 0/5**.
+
+A one-sided Fisher exact test on that table gives `C(7,3)/C(12,3)` = 35/220 = **p = 0.159**. The
+difference between the benches is **not significant**; it is suggestive. A Wilson interval for
+Linux's own 3/7 runs from **0.16 to 0.75**, so the underlying rate is barely constrained at all,
+and any power calculation treating 3/7 as the true rate quotes a precision nobody has. Reaching
+p < 0.05 would need **0/11** on macOS: `C(7,3)/C(18,3)` = 35/816 = 0.043.
+
+### A model, and the evidence against it
+
+The Linux cycles suggested one: **enumeration arms a one-shot banner, a DTR assertion fires it,
+and arming takes longer than 2 s.** It accounted for six of those seven cycles — the hits at
+2-5 s and at 120 s, the eleven later opens that found nothing already spent, the 12.6 ms open
+that raised DTR before arming and then held the port open so no second edge ever came, and the
+two opens at 2.0 s as below threshold. Its one residue was a cycle at about 5 s that should have
+fired and did not, and whose actual delay was never measured.
+
+The macOS cycles do not support it. DTR was raised on all eight opens, five of them above the
+proposed threshold including one a full 120 s after enumeration, and nothing fired. Cycle 5 was
+built specifically to test the one-shot: open early at 0.5 s, below threshold, so the shot should
+still be loaded; close; reopen at 10 s for a second DTR edge, this time after arming. **No banner
+on either open.** A separate 54-minute cycle with DTR raised produced none either, which extends
+the timer elimination from 90 s to **54 minutes** on that bench.
+
+So the model is **not established**, and on the macOS bench it is contradicted. What survives is
+narrower: a DTR edge is not sufficient, and nothing proposed so far predicts both benches.
+
+### Two Linux findings replicated on a transport that cannot be blamed
+
+**The period, now the best measurement in this project.** 46 gaps, after discarding three
+first-arrival-after-open artefacts: mean **15.30839 s**, SD 0.61 ms, standard error **0.090 ms,
+which is 5.9 ppm**, spread 3.0 ms. That sits 0.57 ppm from the same bench's 300 s listen the day
+before, and 40.4 ppm from the Linux mean of 15.307771 s against a combined standard error of
+53.3 ppm. **0.76 of one error bar: the benches remain indistinguishable**, now from the precise
+side rather than the imprecise one. `TELEMETRY_PERIOD_SECONDS = 15.3084` falls inside one standard
+error of 15.30839 ± 0.00009 and is, for the first time, justified rather than inherited.
+
+**Exactly one query is ever pending.** Cycle 3 opened 120 s after enumeration and saw arrivals at
+t = 0.204 s and t = 6.024 s, then the ordinary cadence. Only the first is a held query: 5.82 s is
+a plausible position for the station's own next scheduled tick, and eight buffered queries would
+have arrived together. At most one was held — matching Linux, and measured here with **no usbip
+in the path at all**. That retires the suspicion that a usbipd buffer explained `bytes_dropped=35`
+more firmly than the 7-plus-28 decomposition did, because it is a different transport rather than
+a better reading of the same one.
+
+### What this does NOT establish
+
+- **Not that the banner is a Linux or usbip artefact.** p = 0.159, five cycles against seven.
+- **Not that the station was in the same state on both benches** — and an earlier revision of
+  this file claimed it was. That revision said the operator had reported mains power "never
+  interrupted" between the vendor-application session and the macOS attachment, and concluded
+  that a post-application state had therefore reached that bench and produced nothing. **The
+  conclusion is withdrawn, and so is the premise.** It conflated the plug staying in its socket
+  with the grid staying up, which does not follow: a house-wide outage interrupts power with the
+  plug untouched. Separated properly, three different statements had been run together:
+
+  | statement | status |
+  | --- | --- |
+  | the operator did not deliberately switch the station off for months | operator recall, credible |
+  | the power supply stayed in its socket throughout the 10→11 November move | operator recall, credible |
+  | power was not interrupted between 2026-10-14 and 2026-11-11 | **not supportable — household outages did occur, dates unknown** |
+
+  The third is the statement the inference needed, and it is the one nobody has. The outages
+  themselves were first relayed through the macOS session and then **confirmed directly by the
+  operator**, which is why the row states them rather than calling them unverified. For the narrow
+  move window the operator reports no outage, but did not check it, and an outage overnight passes
+  unnoticed. **So a reset is not excluded; it is undocumented.** The station exposes no uptime
+  counter anybody here knows how to read, so this cannot be recovered after the fact.
+
+  The cheaper test of the decay account that this file hoped for **does not exist**, and that is
+  settled rather than pending. Whether the configuration tool had been run on or before
+  2026-10-14 is `unknown`: the operator does not remember nearly a month later, and the only
+  machine in the house carrying a power log is the macOS laptop, whose `pmset` history reaches
+  back only to 2026-11-04 and could not settle it even if it reached further, since a grid outage
+  and an unplugged laptop charger are the same entry in it. Recorded as `unknown` and **not** as
+  "the application had not run" — the same distinction this project enforces for `pom_read`,
+  where silence is not an authoritative no.
+- **Not that DTR reached the wire.** `TIOCMGET` reports what the host believes it is driving, not
+  that `SET_CONTROL_LINE_STATE` was accepted. `TIOCMBIC` would settle it, and is cheap for the
+  separate reason that every port close lowers DTR anyway, so deasserting it mid-open is not a
+  state the station has never been in.
+- **Not a controlled replug interval.** The macOS gaps were operator-timed, 13.6 to 20.3 s. All
+  above any threshold under discussion, but not constant.
+- **Not that `tty.` and `cu.` differ only in DTR.** They do not: the open semantics differ in
+  other ways too, so this is a comparison of two node families, not an isolated DTR manipulation.
+
+### The next measurement, and a prediction recorded before it runs — 2026-11-11
+
+The macOS bench cannot settle this by replugging harder. Six further cycles there would reach
+0/11 and p = 0.043, but they would still be observation of one arm, and they cannot manipulate
+the one variable left worth manipulating. The station therefore goes back to the Windows host,
+where three things become possible that macOS cannot offer: a **within-bench** re-test against
+this file's own 3/7 baseline by an identical procedure, seven cycles at the cost of `usbipd`
+detach and attach rather than seven physical replugs, and — uniquely — the ability to **run the
+vendor application again** and re-test, which is an intervention rather than another observation.
+
+Continuous power was offered here as what would make that comparison clean. It does not, for the
+reason withdrawn above: the station's power history across the window is unknown. What the
+re-test rests on instead is that it is **within one bench**, against this file's own 3/7 baseline
+by an identical procedure — which needs no assumption about the station's power history at all,
+and is why it was the right next step even on a premise that turned out to be wrong.
+
+Planned: seven attach cycles, five opening at 3 s and two at 120 s, mirroring the delays that
+produced all three Linux hits, with the vendor application **not** run beforehand.
+
+**Predicted, before the run: the banners resume, at roughly 3 of 7.** The account this file has
+left standing is the host or the transport, and that account predicts recovery. The 2026-10-14
+sighting supports it, having occurred on this same host and transport. The prediction is written
+here so that it can fail: if the Linux bench now produces **0 of 7**, then the mechanism is
+time-dependent rather than host-dependent, the macOS zeros were never evidence about platform at
+all, and both benches' zeros share a cause this file has not named.
+
+**Outcome: the prediction held.** Seven cycles ran that evening and the banner appeared in **3 of
+7**, the predicted rate, which is recorded in its own section below. The host-or-transport account
+survived its first falsifiable test — and the same run then undercut the comparison that test was
+supposed to settle, for a reason neither bench had considered.
+
+### A fourth variable nobody measured: time since the station last booted
+
+Raised by the macOS session and adopted here, because it sits in none of the three accounts above.
+With the outage history unknown, the station may have reset at some point between 2026-10-14 and
+now and not seen the vendor application since. That is neither the host, nor the transport, nor
+the time since the application — it is **time since boot**, and it is a free variable in every
+reading this file has offered.
+
+It is also the one variable that is cheap to remove permanently: a **deliberate reset at a noted
+moment** makes it known once and for all, which no amount of replugging can. Hence an order, and
+the order matters because each step destroys what the earlier ones measure:
+
+1. **Seven cycles exactly as they are**, nothing changed — the prediction above, within one bench
+   against its own baseline. Only valid if run first.
+2. **A deliberate reset at a noted time**, then cycles — fixes time since boot.
+3. **The vendor application, then cycles** — fixes time since the application, with boot known.
+
+One correction to that design, which belongs here rather than in the reply that proposed it: only
+the **first** attach cycle after a reset carries a fresh boot. Cycles two onward are warm
+re-enumerations again, so step 2 is one fresh-boot cycle plus six post-boot ones, not seven
+fresh-boot cycles, and reaching n = 7 on the boot variable would need a reset per cycle. Step 2 is
+therefore worth running as n = 1 on the boot itself and n = 7 on the post-boot era. Its first
+cycle is also the best chance so far to watch a banner **arrive**, which nobody has yet managed:
+a cold boot is a stronger candidate for emitting one than the warm re-enumerations, where a reader
+armed from 12.6 ms caught nothing at all.
+
+## The banner returned, 3 of 7 as predicted — and the gap between opens orders every cycle — 2026-11-11
+
+Step 1 of the protocol: the station back on the Windows host, seven `usbipd` detach-and-attach
+cycles with no physical replugging, the vendor application deliberately not run, five cycles
+opening 3 s after the node appears and two at 120 s. Read-only throughout and procedurally
+identical to 2026-11-10, because the point is a within-bench comparison against that run's 3/7.
+
+| cycle | open delay | `TIOCMGET` | arrivals | bytes | banner |
+| --- | --- | --- | --- | --- | --- |
+| 1 | 3000.5 ms | 38 = DTR, RTS, DSR | 4 | 49 | **yes** |
+| 2 | 3000.7 ms | 38 | 2 | 14 | no |
+| 3 | 3000.8 ms | 38 | 2 | 14 | no |
+| 4 | 3000.2 ms | 38 | 1 | 7 | no |
+| 5 | 3000.0 ms | 38 | 1 | 7 | no |
+| 6 | 120000.5 ms | 38 | 5 | 56 | **yes** |
+| 7 | 120000.5 ms | 38 | 4 | 49 | **yes** |
+
+**3 of 7, which is the rate predicted before the run.** The banner is byte-identical to October's:
+`5b4353305d20563a382e322e38203730313041303030313139340d0a`, 28 bytes,
+`[CS0] V:8.2.8 7010A0001194\r\n`.
+
+### The banner arrives about 4 ms AFTER the open, and a stray byte proves it
+
+Every banner cycle delivered its first chunk ending `0a` and all later chunks ending `0d`, while
+the station's query ends `0d`. That is this procedure's own `ICRNL`: the first chunk was already
+in the tty buffer and was processed by the default line discipline before `tcsetattr` set raw
+mode; everything after it arrived with the translation off. **The terminator byte is therefore a
+marker of which side of the `tcsetattr` a byte landed on**, and it was sitting in the data
+unnoticed.
+
+Read through that marker, the order in a banner cycle is unambiguous: a translated query at
+t = 0.000 s (buffered before the open), then an **untranslated** query at t = 0.003 s, then the
+**untranslated** banner at t = 0.004 s. The banner is on the post-raw side, so it entered the
+buffer after the open rather than waiting in it.
+
+This file has said the banner was "already pending within 2 ms of the open" and that it was
+"never once observed arriving". **Both are withdrawn.** The first was never established by any
+marker — the earlier runs had this same marker available in their bytes and nobody read it — and
+the second is now simply false: the banner arrives, roughly 4 ms after the port is opened, and
+that is measured three times here.
+
+### Two candidate variables, confounded — and an earlier revision of this section picked the wrong one
+
+An earlier revision of this section was headed "Open delay is not the variable. Time since the
+previous close is", and asserted that the gap ordered all seven cycles with no residue. **That is
+withdrawn.** The two quantities were confounded in this run and the claim could not have been
+made from it. What follows is the data, then the confound, then what actually separates it.
+
+The open delays were 3 s and 120 s, and the hits do not sort by them cleanly — 1 of 5 at 3 s,
+2 of 2 at 120 s. They do sort by something the protocol never set out to vary:
+
+| cycle | time from the previous port close to this open | banner |
+| --- | --- | --- |
+| 1 | hours — the station had just arrived from the other bench | **yes** |
+| 2, 3, 4, 5 | ≈ 21 s each | no, four times |
+| 6, 7 | ≈ 138 s each | **yes**, twice |
+
+That ordering is perfect, and it would also account for the one residue of 2026-11-10, where
+conditions C and D were first opens about 5 s after their attach by an identical procedure and
+only C carried a banner, D having followed C closely.
+
+**But the gap and the open delay move together here**, 3 s with 21 s and 120 s with 138 s, so this
+run cannot tell them apart. The gap arithmetic is forced by the orchestration rather than chosen:
+each cycle closed its port 8 s before the detach, stayed detached 10 s, then opened 3 s or 120 s
+after the node reappeared — which is exactly why the two track each other.
+
+### A gap sweep, which reproduced the threshold and then refuted the gap reading — 2026-11-11
+
+Seven further cycles at a fixed 3 s nominal open delay, with the gap from the previous close
+enforced exactly by the listener:
+
+| target gap | measured gap | open delay | arrivals | banner |
+| --- | --- | --- | --- | --- |
+| priming | — (minutes, idle since the previous run) | 3000.4 ms | 1 | **no** |
+| 20 s | 24.86 s | 3001.0 ms | 1 | no |
+| 40 s | 40.00 s | 9818.6 ms | 4 | **yes** |
+| 60 s | 60.00 s | 16197.5 ms | 4 | **yes** |
+| 90 s | 90.00 s | 34257.1 ms | 4 | **yes** |
+| 130 s | 130.00 s | 62560.2 ms | 4 | **yes** |
+| 180 s | 180.00 s | 100664.0 ms | 4 | **yes** |
+
+Five for five above 40 s and zero for two below 25 s, which looks like a sharp threshold. It is
+not usable as one, for two reasons found in this run's own data.
+
+**The open delay was not held fixed, despite the design saying 3 s.** The listener enforced the
+gap by waiting, and the node appeared immediately after each attach, so the wait landed *after*
+the node was already present and inflated the open delay with it: 3.0, 3.0, 9.8, 16.2, 34.3,
+62.6, 100.7 s. The sweep therefore reproduces the confound rather than resolving it. This was an
+error in the orchestration, not a property of the station.
+
+**And the priming cycle separates the two, in favour of the open delay.** It followed the previous
+run by several idle minutes — a gap far above any threshold under discussion — opened at 3.0 s,
+and produced **no banner**. That is the only observation so far in which a long gap meets a short
+open delay, and the banner did not appear.
+
+Across all thirteen `usbipd` cycles measured on this bench, one rule separates them without
+exception: **a banner appears when the port is opened more than about 9.8 s after the node
+appears, and not at 3 s.** Six opens at 3 s produced nothing; seven opens between 9.8 s and 120 s
+all produced one. The gap reading has no such rule available to it, because of the priming cycle.
+
+The thirteenth observation is the exception that is not one. Step 1's cycle 1 opened at 3 s and
+*did* carry a banner — and it is the only cycle in either run preceded by a **physical replug**,
+a real re-enumeration on the Windows host rather than a `usbipd` detach. Whether that is a second
+trigger or the same one reached differently is untested.
+
+So the open delay is the better-supported reading, the gap is not eliminated, and neither is
+established. The run that separates them orthogonally is recorded next, and it settles it.
+
+### The open delay is the variable, and the threshold is between 3 and 5 s — SETTLED 2026-11-11
+
+Six cycles with the gap from the previous close held at **61.8 ± 0.1 s** — above every gap that
+has ever produced a banner — while the open delay alone was swept. The gap no longer varies, so
+anything that changes is the delay's doing:
+
+| open delay, measured | measured gap | arrivals | banner |
+| --- | --- | --- | --- |
+| 1000.3 ms | 61.96 s | 1 | no |
+| 3001.1 ms | 61.83 s | 2 | no |
+| **5000.2 ms** | 61.75 s | 4 | **yes** |
+| 8000.5 ms | 61.95 s | 4 | **yes** |
+| 12000.4 ms | 61.84 s | 5 | **yes** |
+| 20000.4 ms | 61.76 s | 4 | **yes** |
+
+**The gap was constant and the banner flipped.** Four for four at and above 5.000 s, zero for two
+at and below 3.001 s, with the gap fixed throughout. **The open delay is the controlling variable
+and the gap is not**, which is the opposite of what this section claimed two revisions ago, and
+the threshold sits between **3.001 s and 5.000 s**.
+
+Every `usbipd` observation on this bench now falls into three rows:
+
+| condition | banner |
+| --- | --- |
+| open delay ≥ 5 s | **11 of 11**, across gaps of 40, 60, 61.8, 90, 130, 138 and 180 s |
+| open delay ≤ 3 s, gap ≤ 62 s | 0 of 7 |
+| open delay ≤ 3 s, gap of minutes to hours | 2 of 3 — **unexplained** |
+
+The first row is the result: eleven for eleven, with the gap deliberately varied under it four
+times over and never mattering. The third row is the whole remaining residue, and it is not a
+small-print caveat — one of its three is step 1's cycle 1, the only cycle in any run preceded by a
+**physical replug** rather than a `usbipd` detach, and of the two reached by detach one fired and
+one did not. At short delays after a long idle the behaviour is genuinely unresolved at n = 3.
+
+### The open elicits a query alongside the banner
+
+With the terminator marker read in every banner cycle, the arrival pattern is identical in all
+eleven: one query already buffered before `tcsetattr` (ending `0a`), then an **untranslated** query
+at about 4 ms, then the **untranslated** banner at about 5 ms. So the banner never arrives alone —
+a query accompanies it, and both land after the open rather than waiting in the buffer.
+
+That is 7 + 7 + 28 = 42 bytes at the open, where the original M4 run's `bytes_dropped=35`
+decomposed as 7 + 28. The two do not match, and nothing here explains the missing query; it is
+recorded as a discrepancy rather than smoothed over.
+
+### This accounts for the macOS zeros without any appeal to the platform
+
+The macOS protocol opened at **0.5 s, 3 s and 120 s**. Against the threshold just measured:
+
+| macOS cycles | open delay | expected under the delay rule | observed |
+| --- | --- | --- | --- |
+| 1, 2, 6, 7 | ≈ 3 s | **below threshold — no banner** | no banner |
+| 4, 5 | ≈ 0.5 s | **below threshold — no banner** | no banner |
+| 5, the reopen | 10.0 s | excluded: a second open in its cycle, and eleven such opens on this bench have never carried one | no banner |
+| 3 | 120.0 s | **above threshold — banner** | **no banner** |
+
+Six of the seven macOS cycles were **predicted to be silent** by a rule measured entirely on this
+bench, and the seventh is excluded by a different rule also measured here. Their zeros were never
+mysterious; the protocol simply spent almost all of its cycles below the threshold, because the
+threshold was unknown when it was designed — by me, in the prompt that proposed those delays.
+
+That leaves **exactly one informative macOS cycle**: cycle 3, at an open delay of 120 s, where this
+bench fired twice out of two. The cross-bench contrast is therefore **Linux 11/11 against macOS
+0/1**, one-sided Fisher `C(11,11)/C(12,11)` = **p = 0.083**.
+
+So the platform difference is still not significant, but it is now a sharp single anomaly against
+a deterministic rule rather than a vague deficit — and the test that would settle it has become
+cheap. **Five macOS cycles at an open delay of 10 s** would give `C(11,11)/C(16,11)` = 1/4368 =
+**p = 0.0002** if they all came up empty, and a single banner would close the question the other
+way immediately. No long listens and no 120 s waits are needed, which is what made the earlier
+protocol expensive.
+
+### This collapses the cross-bench comparison, and the error was in both benches' framing
+
+The macOS protocol listened for **120 s per cycle**. Its gap from one close to the next open is
+therefore the operator's unplug interval plus the open delay — **16.6 to 23.3 s** for every cycle
+that opened at 3 s. That is the band in which this bench produces **0 of 4**.
+
+**This conclusion does not depend on which of the two candidate variables is the real one**, which
+is why it is left standing while the mechanism above is withdrawn. Those macOS cycles are short on
+**both**: a gap of 16.6 to 23.3 s against this bench's silent 21 s and 24.9 s, and an open delay of
+3 s against this bench's six silent opens at 3 s. Either way they are matched to cycles where
+Linux is also silent. Its cycle 3 is long on both, at a gap of about 137 s and an open delay of
+120 s, so it remains the counterexample under either reading.
+
+So four of the five macOS cycles previously treated as comparable sit in a band where Linux is
+also silent, and they carry no information about the platform at all. The only macOS cycle in the
+band where a banner is expected is its cycle 3, which opened 120 s after enumeration for a gap of
+roughly 134 to 140 s.
+
+The informative contrast is therefore **Linux 2/2 against macOS 0/1**, whose one-sided Fisher
+exact is `C(2,2)/C(3,2)` = **p = 0.333**.
+
+| comparison | Linux | macOS | one-sided p |
+| --- | --- | --- | --- |
+| as framed on 2026-11-11, matched on open delay | 3/7 | 0/5 | 0.159 |
+| matched on the inter-open gap, long band | 2/2 | 0/1 | **0.333** |
+| matched on the inter-open gap, short band | 0/4 | 0/4 | identical, uninformative |
+
+**Both sessions made the same mistake**, this one included: cycles were matched on open delay,
+which is the variable the protocol controlled, while the gap between opens — which the two
+protocols set very differently, through their listen durations — went unrecorded and unmatched.
+The apparent platform difference is largely a difference in cycle timing.
+
+### What this does NOT establish
+
+- **Not the behaviour below the threshold.** Above 5 s the rule is 11 of 11. Below 3 s it is 0 of
+  7 at gaps up to 62 s but 2 of 3 after a long idle, and that residue is unexplained at n = 3. A
+  second trigger reached by physical re-enumeration is one reading of it and is untested.
+- **Not the threshold's exact value or its sharpness.** It is bracketed between 3.001 s and
+  5.000 s by two observations and four, and nothing locates it inside that bracket or shows the
+  transition is abrupt rather than graded.
+- **Not that the platform is identical.** The macOS cycle 3 remains a single counterexample to a
+  rule this bench satisfies 11 times out of 11, at p = 0.083. The platform account is reduced to
+  n = 1 rather than eliminated, and a deterministic rule makes that one observation more
+  informative than a probabilistic one would, not less.
+- **Not why the banner exists.** Nothing here says what the station is doing between 3 s and 5 s
+  after enumeration that makes a banner available afterwards, nor why an open elicits one at all.
+- **Not that `DSR` means anything yet.** `TIOCMGET` read 38 here against the macOS bench's 6: both
+  assert DTR and RTS, and Linux additionally reports DSR. On `cdc_acm` that bit comes from the
+  device's own `SERIAL_STATE` notification, so this is most likely a difference in what the two
+  hosts surface rather than a difference on the wire, and it is recorded as unexplained.
+- **Not that the vendor application is irrelevant.** It was not run before this measurement, so
+  what is tested here is a bench roughly a day past its last application contact. That is the same
+  position the macOS bench was in, which is what makes the comparison fair, and it says nothing
+  about what a fresh application session would do.
