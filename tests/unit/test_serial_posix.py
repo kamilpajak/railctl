@@ -160,6 +160,15 @@ def test_the_port_is_released_by_close_so_the_next_process_gets_it():
     kernel drops it when the fd closes - which is also why a crashed railctl
     cannot leave the port locked against the next one. Nothing calls LOCK_UN,
     and this is the test that would notice if that stopped being enough.
+
+    Stated plainly, because this repo does not keep guards that measure
+    nothing: no mutation of the current implementation makes this test red -
+    all four tried, including removing the lock and swapping flock for lockf,
+    were killed by the other tests and not by this one. It asserts a published
+    contract (`port_busy` is in RETRYABLE_CODES, so "retry may work" has to be
+    true end to end) rather than a mechanism, and it would catch a future
+    design that keyed the lock on the port path instead of the fd. That is its
+    whole value; it is not evidence that the lock works.
     """
     master_fd, slave_fd = os.openpty()
     slave_path = os.ttyname(slave_fd)
