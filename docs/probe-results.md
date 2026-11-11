@@ -2211,12 +2211,25 @@ a better reading of the same one.
 ### What this does NOT establish
 
 - **Not that the banner is a Linux or usbip artefact.** p = 0.159, five cycles against seven.
-- **Not that the station was in the same state on both benches.** Whether its mains power was
-  interrupted between the vendor-application session on the Windows host and the macOS attachment
-  is **unrecorded**, and it decides how these zeros read. Unbroken power would mean a
-  post-application state reached that bench and produced nothing, which weakens the state account
-  sharply. A break would mean the state was cleared, and the zeros are then merely consistent with
-  it and settle nothing. Nobody wrote it down at the time.
+- **Not that the banner needs recent contact with the vendor application** — and one specific
+  version of that account is now dead. This was the open question above, and the operator reports
+  that **the station's mains power was never interrupted** between the vendor-application session
+  on the Windows host and the macOS attachment: its own power supply stayed in the socket
+  throughout the move, so the station never restarted. That is **operator recall, not an
+  instrument reading**, and it is recorded as such — the station exposes no uptime counter anybody
+  here knows how to read, so it cannot be checked after the fact.
+
+  What it kills: "a power cycle cleared the state". The state, whatever it was, survived into the
+  macOS bench and produced nothing in five comparable cycles. What it leaves standing: a state
+  that **decays**, on a timescale shorter than the roughly one day between the application
+  session of 2026-11-10 and the macOS attachment of 2026-11-11. Continuous power rules out the
+  reset, not the decay.
+
+  There is a cheaper test of the decay account already in this file, and it cuts against it: the
+  2026-10-14 banner. Whether the configuration tool had been run on or before that date is **not
+  recorded here** — its only dated run is 2026-11-10 — and nobody has yet been asked. If it had
+  not, then a banner was emitted with no recent application contact at all, and the decay account
+  is finished without a single further replug.
 - **Not that DTR reached the wire.** `TIOCMGET` reports what the host believes it is driving, not
   that `SET_CONTROL_LINE_STATE` was accepted. `TIOCMBIC` would settle it, and is cheap for the
   separate reason that every port close lowers DTR anyway, so deasserting it mid-open is not a
@@ -2225,3 +2238,27 @@ a better reading of the same one.
   above any threshold under discussion, but not constant.
 - **Not that `tty.` and `cu.` differ only in DTR.** They do not: the open semantics differ in
   other ways too, so this is a comparison of two node families, not an isolated DTR manipulation.
+
+### The next measurement, and a prediction recorded before it runs — 2026-11-11
+
+The macOS bench cannot settle this by replugging harder. Six further cycles there would reach
+0/11 and p = 0.043, but they would still be observation of one arm, and they cannot manipulate
+the one variable left worth manipulating. The station therefore goes back to the Windows host,
+where three things become possible that macOS cannot offer: a **within-bench** re-test against
+this file's own 3/7 baseline by an identical procedure, seven cycles at the cost of `usbipd`
+detach and attach rather than seven physical replugs, and — uniquely — the ability to **run the
+vendor application again** and re-test, which is an intervention rather than another observation.
+
+Continuous power is what makes that re-test clean. Both benches now sit roughly one day from the
+application session and neither has restarted, so "time since the vendor application" is matched
+between them for the first time, and a difference in outcome can no longer be attributed to it.
+
+Planned: seven attach cycles, five opening at 3 s and two at 120 s, mirroring the delays that
+produced all three Linux hits, with the vendor application **not** run beforehand.
+
+**Predicted, before the run: the banners resume, at roughly 3 of 7.** The account this file has
+left standing is the host or the transport, and that account predicts recovery. The 2026-10-14
+sighting supports it, having occurred on this same host and transport. The prediction is written
+here so that it can fail: if the Linux bench now produces **0 of 7**, then the mechanism is
+time-dependent rather than host-dependent, the macOS zeros were never evidence about platform at
+all, and both benches' zeros share a cause this file has not named.
