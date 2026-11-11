@@ -6,7 +6,7 @@ import os
 
 import pytest
 
-from railctl.errors import PortConfigError, PortPermissionDenied, TransportError
+from railctl.errors import PortBusy, PortConfigError, PortPermissionDenied, TransportError
 from railctl.transport import serial_posix
 from railctl.transport.serial_posix import SerialConfig, SerialTransport
 
@@ -117,3 +117,88 @@ def test_read_after_the_peer_hangs_up_raises_instead_of_looking_idle():
             transport.read(64, 1.0)
     finally:
         transport.close()
+
+
+def test_a_second_open_of_the_same_port_is_refused_instead_of_sharing_it():
+    """Two opens of one port must not both succeed.
+
+    Measured 2026-10-15 on the bench: they did. `os.open` on a CDC-ACM node is
+    not exclusive, so a second railctl opened the port the first one was using,
+    wrote its telegram, and had its reply consumed by the other process. It
+    then reported `link_timeout` - "the station did not answer" - about a
+    station that had answered, and `retryable: true` made the real cause
+    (a monitor left running in another terminal) never surface.
+
+    Both transports here live in ONE process, and that is deliberate rather
+    than a convenience: a BSD flock belongs to the open file description, so
+    two fds in one process exclude each other, while an fcntl record lock
+    belongs to the process and would not. This test is therefore red if the
+    implementation reaches for `fcntl.lockf` instead of `fcntl.flock` - which
+    is the choice that would silently lose mutual exclusion with JMRI, since
+    jSerialComm takes a BSD flock and the two lock spaces do not interoperate.
+    """
+    master_fd, slave_fd = os.openpty()
+    slave_path = os.ttyname(slave_fd)
+    os.close(slave_fd)
+
+    held = SerialTransport(SerialConfig(slave_path))
+    held.open()
+    try:
+        intruder = SerialTransport(SerialConfig(slave_path))
+        with pytest.raises(PortBusy, match="another process holds it"):
+            intruder.open()
+    finally:
+        held.close()
+        os.close(master_fd)
+
+
+def test_the_port_is_released_by_close_so_the_next_process_gets_it():
+    """The refusal must be transient, which is what `port_busy` publishes.
+
+    `port_busy` is in RETRYABLE_CODES, so the claim "retry may work" has to be
+    true. It is, because the lock belongs to the open file description and the
+    kernel drops it when the fd closes - which is also why a crashed railctl
+    cannot leave the port locked against the next one. Nothing calls LOCK_UN,
+    and this is the test that would notice if that stopped being enough.
+    """
+    master_fd, slave_fd = os.openpty()
+    slave_path = os.ttyname(slave_fd)
+    os.close(slave_fd)
+
+    first = SerialTransport(SerialConfig(slave_path))
+    first.open()
+    first.close()
+
+    second = SerialTransport(SerialConfig(slave_path))
+    second.open()
+    try:
+        assert second.is_open
+    finally:
+        second.close()
+        os.close(master_fd)
+
+
+def test_a_port_that_refuses_locking_is_still_opened():
+    """A device that rejects flock must not become unusable.
+
+    Some filesystems and some character devices refuse flock outright. The lock
+    is a diagnostic guarantee, not a prerequisite for talking to the station, so
+    refusing to open would turn a working setup into a dead one over it. ENOLCK
+    stands in for that class of device here.
+    """
+    master_fd, slave_fd = os.openpty()
+    slave_path = os.ttyname(slave_fd)
+    os.close(slave_fd)
+
+    def refuse_to_lock(fd, operation):
+        raise OSError(errno.ENOLCK, "no locks available")
+
+    transport = SerialTransport(SerialConfig(slave_path))
+    try:
+        with pytest.MonkeyPatch.context() as patch:
+            patch.setattr(serial_posix.fcntl, "flock", refuse_to_lock)
+            transport.open()
+        assert transport.is_open
+    finally:
+        transport.close()
+        os.close(master_fd)

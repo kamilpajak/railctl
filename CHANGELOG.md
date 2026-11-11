@@ -44,6 +44,19 @@ All notable changes to this project are documented in this file. The format foll
 
 ### Fixed
 
+- **A second `railctl` on a port another one holds now says so, instead of blaming the station.**
+  `os.open` on a CDC-ACM node is not exclusive, so two processes both opened the port, both wrote
+  their telegrams, and either could consume the reply meant for the other; the second then
+  reported `link_timeout` — "the station did not answer" — about a station that had answered, with
+  `retryable: true` making the real cause, usually a `monitor` left running in another terminal,
+  never surface. The open now takes `flock(LOCK_EX | LOCK_NB)` and reports `port_busy` when it is
+  refused, which is what that code has always claimed to mean. `flock` rather than `lockf` and
+  rather than `ioctl(TIOCEXCL)`: JMRI drives these same nodes through jSerialComm, which takes the
+  same `flock` and which JMRI never disables, so this also gives mutual exclusion with JMRI, while
+  a kernel-wide `TIOCEXCL` would additionally refuse passive readers that ask for no lock. A
+  device that rejects locking outright is still opened. See `docs/probe-results.md`, "JMRI holds
+  `flock` on the same CDC node, so railctl must too". (#68)
+
 - **A `61 80` Transfer Error on the handshake no longer condemns the port.** `Link.open()`
   checked the reply header and raised `port_not_xpressnet` on anything else, so a Transfer
   Error — the station saying our telegram did not arrive intact, which says nothing about what

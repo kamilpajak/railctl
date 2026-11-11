@@ -30,6 +30,7 @@ CRTSCTS, no HUPCL so closing does not reset the adapter).
 from __future__ import annotations
 
 import errno
+import fcntl
 import os
 import select
 import termios
@@ -49,6 +50,11 @@ from railctl.errors import (
 # They say "this is not a serial device" exactly as a rejected tcgetattr does,
 # and routing them to PortBusy published them as retryable.
 _NOT_A_DEVICE_ERRNOS = frozenset({errno.EISDIR, errno.ENOTDIR, errno.ELOOP})
+
+# What flock() reports when somebody else already holds the port. EWOULDBLOCK
+# and EAGAIN are the same number on Linux and macOS; both are named because
+# POSIX permits them to differ and a frozenset costs nothing.
+_LOCK_HELD_ERRNOS = frozenset({errno.EWOULDBLOCK, errno.EAGAIN})
 
 BAUDRATE = 57600
 # Suggested read size for callers; Link uses its own private _READ_CHUNK, a
@@ -146,6 +152,48 @@ class SerialTransport:
                     f"{self._config.port} is not a serial device: {exc.strerror}"
                 ) from exc
             raise PortBusy(f"cannot open {self._config.port}: {exc.strerror}") from exc
+        try:
+            # os.open on a CDC-ACM node is NOT exclusive, so without this two
+            # railctl processes both succeed, both write their telegrams, and
+            # either one can consume the reply addressed to the other. Measured
+            # 2026-10-15: the second process reported link_timeout, exit 7,
+            # retryable: true - "the station did not answer" - when the station
+            # had answered and the other railctl had read it (#68).
+            #
+            # flock(), NOT lockf(). This is the one choice here that cannot be
+            # made by taste. JMRI drives the same CDC nodes through jSerialComm,
+            # whose POSIX backend takes flock(LOCK_EX | LOCK_NB) on open and
+            # releases it on close, and which JMRI never disables. BSD flock
+            # locks and fcntl record locks are separate, non-interoperating
+            # spaces on Linux - measured: lockf() succeeds while a flock is
+            # held - so lockf() here would still fix railctl against railctl
+            # while silently losing mutual exclusion with JMRI. TIOCEXCL was
+            # considered and rejected: it is kernel-wide, so it also refuses
+            # passive readers that ask for no lock, and it buys nothing against
+            # JMRI that flock does not already give.
+            fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        except OSError as exc:
+            if exc.errno in _LOCK_HELD_ERRNOS:
+                os.close(fd)
+                raise PortBusy(
+                    f"cannot open {self._config.port}: another process holds it",
+                    hint=(
+                        "this is the port being held, not a silent station: look "
+                        "for another railctl still running, such as a monitor in "
+                        "a second terminal, or for JMRI, which holds the same "
+                        "lock while its connection is open. It clears when that "
+                        "process exits, so retrying is the right response"
+                    ),
+                ) from exc
+            # flock is refused outright on some filesystems and some exotic
+            # character devices. Carry on unlocked rather than refuse to open:
+            # the lock makes a misdiagnosis impossible, it is not a prerequisite
+            # for talking to the station, and failing here would turn a working
+            # setup into a dead one over a diagnostic.
+            pass
+        # No LOCK_UN anywhere: the lock belongs to the open file description and
+        # the kernel drops it when the fd closes, including on a crash. Releasing
+        # it by hand would only create a window in which close() has not yet run.
         try:
             cc = list(termios.tcgetattr(fd)[6])
             cc[termios.VMIN] = 0

@@ -2540,3 +2540,74 @@ The apparent platform difference is largely a difference in cycle timing.
   what is tested here is a bench roughly a day past its last application contact. That is the same
   position the macOS bench was in, which is what makes the comparison fair, and it says nothing
   about what a fresh application session would do.
+
+## JMRI holds `flock` on the same CDC node, so railctl must too — SETTLED 2026-11-11
+
+The port-exclusivity defect of 2026-10-15 (#68) left a design question its own write-up refused
+to answer from the bench: whether railctl should take a lock that only excludes other railctl
+processes, or one that excludes every program on the machine. The second would break a
+deliberate passive reader alongside `monitor`, which is a legitimate thing to want.
+
+**JMRI answers it, and it is prior art on exactly this hardware class.** Read from the upstream
+repository rather than from memory:
+
+| | |
+| --- | --- |
+| serial library | jSerialComm 2.11.4 (`pom.xml`, `lib/README.md`) |
+| mechanism | `flock(fd, LOCK_EX \| LOCK_NB)` on open, `LOCK_UN` on close, in `src/main/c/Posix/SerialPort_Posix.c` |
+| guarded by | `if (!disableExclusiveLock && flock(...))` |
+| `TIOCEXCL` | **not present**, in jSerialComm or in JMRI |
+| `disableExclusiveLock()` | exists in jSerialComm's Java API; **JMRI never calls it** |
+| UUCP `LCK..` lock files | absent — the RXTX-era convention is gone |
+
+So JMRI holds a BSD `flock` on the device for as long as its connection is open, by default. That
+turns an advisory lock from a railctl-only courtesy into **mutual exclusion with the one other
+program that realistically sits on this cable**, for free, and it decides the design question in
+favour of the advisory lock — not because that is the cautious option but because it is what the
+dominant tool in this domain already does.
+
+### `flock`, not `lockf` — and the difference is measurable, not stylistic
+
+BSD `flock` locks and POSIX `fcntl` record locks are **separate, non-interoperating lock spaces**
+on Linux. Python exposes both and the names invite the wrong one: `fcntl.flock()` is `flock(2)`,
+`fcntl.lockf()` is `fcntl(F_SETLK)`. Choosing `lockf()` would fix railctl against railctl and
+**silently lose** exclusion against JMRI.
+
+Four facts measured on a pty in WSL2, which is also why this is testable in CI with no hardware:
+
+| | |
+| --- | --- |
+| `flock` on a pty slave | **acquired** — so the test needs no station |
+| second `flock`, same device, different fd | **refused, `EAGAIN` (11)** — exclusion works, and that is the errno to match |
+| `lockf` while a `flock` is held | **acquired** — the two genuinely do not see each other |
+| after closing the holding fd | **acquired** — `close()` releases it, so no `LOCK_UN` is needed and a crash cannot leave the port locked |
+
+The third row is the load-bearing one: it turns the `flock`-versus-`lockf` choice from a reading
+of someone else's header into a measurement on this bench.
+
+### Both of railctl's platforms use the real `flock(2)`
+
+jSerialComm ships a fallback `flock` implemented over `fcntl` record locks, which would have
+inverted the conclusion above if it applied here. `src/main/c/Posix/PosixHelperFunctions.h` shows
+it does not: the declaration and the `LOCK_*` defines sit in the `#elif defined(__sun__)` branch
+alone. The `#if defined(__linux__)` and `#elif defined(__APPLE__)` branches declare neither, so
+both take `flock(2)` from libc.
+
+That also settles the macOS half, which this bench cannot test: Darwin is a real-`flock(2)`
+platform for jSerialComm, JMRI ships Darwin natives for x86, x86_64 and aarch64, and JMRI runs on
+macOS in the field — so `flock` on a CDC node works there in practice. Evidence rather than an
+assertion, which matters because this repo has already been bitten once by assuming that two
+kernels treat a CDC-ACM node the same way.
+
+### What this does NOT establish
+
+- **Not that JMRI and railctl have been observed excluding each other.** The lock each takes is
+  read from source on both sides and `flock`'s semantics are measured here, but the two programs
+  have never been run against one port at the same time. That is a single cheap test and it has
+  not been done.
+- **Not anything about Windows.** `railctl` cannot run there at all, `serial_posix.py` importing
+  `termios`, and Windows COM ports are exclusive at the OS level anyway, so the question does not
+  arise.
+- **Not that `flock` is honoured by every tool.** It is advisory. `cat /dev/ttyACM1`, the vendor's
+  YD.Control application and anything else that does not ask for a lock will still open the port,
+  and railctl will not notice. That is the deliberate price of not using `TIOCEXCL`.
