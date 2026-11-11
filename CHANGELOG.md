@@ -54,8 +54,14 @@ All notable changes to this project are documented in this file. The format foll
   rather than `ioctl(TIOCEXCL)`: JMRI drives these same nodes through jSerialComm, which takes the
   same `flock` and which JMRI never disables, so this also gives mutual exclusion with JMRI, while
   a kernel-wide `TIOCEXCL` would additionally refuse passive readers that ask for no lock. A
-  device that rejects locking outright is still opened. See `docs/probe-results.md`, "JMRI holds
-  `flock` on the same CDC node, so railctl must too". (#68)
+  device that rejects locking outright is still opened, and **now says so** — a warning at the
+  default log level and a `lock_held` field on the transport, because a guarantee that
+  evaporates in silence is indistinguishable from one that held, and the old misdiagnosis could
+  have come back with nothing recording that the guard was never armed. Re-opening a transport
+  that is already open now raises rather than reporting `port_busy` about itself, which it did,
+  because a BSD lock belongs to the open file description and the second open conflicts with the
+  first. See `docs/probe-results.md`, "JMRI holds `flock` on the same CDC node, so railctl must
+  too". (#68)
 
 - **A `61 80` Transfer Error on the handshake no longer condemns the port.** `Link.open()`
   checked the reply header and raised `port_not_xpressnet` on anything else, so a Transfer

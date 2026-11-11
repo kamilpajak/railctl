@@ -31,6 +31,7 @@ from __future__ import annotations
 
 import errno
 import fcntl
+import logging
 import os
 import select
 import termios
@@ -85,6 +86,9 @@ CDC_INDEX_HINT = (
 )
 
 
+_log = logging.getLogger("railctl.transport")
+
+
 @dataclass(frozen=True, slots=True)
 class SerialConfig:
     port: str
@@ -95,10 +99,24 @@ class SerialTransport:
     def __init__(self, config: SerialConfig) -> None:
         self._config = config
         self._fd: int | None = None
+        self._lock_held = False
 
     @property
     def is_open(self) -> bool:
         return self._fd is not None
+
+    @property
+    def lock_held(self) -> bool:
+        """Whether this open port is actually protected against a second opener.
+
+        False means the device refused advisory locking and the port was
+        opened anyway - a deliberate choice, see open() - so a second process
+        CAN still take it and the #68 misdiagnosis is back in play. It is a
+        field rather than only a log line because a guarantee that silently
+        evaporates is exactly what this project forbids: whoever must not act
+        on a guess reads this, not the fact that open() returned.
+        """
+        return self._lock_held
 
     @property
     def description(self) -> str:
@@ -113,6 +131,23 @@ class SerialTransport:
         return CDC_INDEX_HINT
 
     def open(self) -> None:
+        if self._fd is not None:
+            # NOT PortBusy, which is what this used to raise. A BSD flock
+            # belongs to the open file description, so a second os.open makes
+            # a new one that conflicts with the fd this object already holds:
+            # re-opening reported "another process holds it" about ITSELF and
+            # sent the reader hunting for a second railctl or a JMRI session
+            # that was never running. Measured 2026-11-11 - the same
+            # misdiagnosis #68 exists to remove, inverted.
+            #
+            # Raising rather than returning quietly: a caller that re-opens
+            # usually wants a fresh connection, and silently keeping the old
+            # fd would hand it a stale one after a replug. TransportError is
+            # not in RETRYABLE_CODES, which is right - no retry fixes this.
+            raise TransportError(
+                f"{self._config.port} is already open in this process - "
+                f"close() it before opening it again"
+            )
         try:
             fd = os.open(self._config.port, os.O_RDWR | os.O_NOCTTY | os.O_NONBLOCK)
         except FileNotFoundError as exc:
@@ -152,6 +187,7 @@ class SerialTransport:
                     f"{self._config.port} is not a serial device: {exc.strerror}"
                 ) from exc
             raise PortBusy(f"cannot open {self._config.port}: {exc.strerror}") from exc
+        locked = True
         try:
             # os.open on a CDC-ACM node is NOT exclusive, so without this two
             # railctl processes both succeed, both write their telegrams, and
@@ -190,7 +226,21 @@ class SerialTransport:
             # the lock makes a misdiagnosis impossible, it is not a prerequisite
             # for talking to the station, and failing here would turn a working
             # setup into a dead one over a diagnostic.
-            pass
+            #
+            # But SAY SO, and record it. Without this the guarantee vanished
+            # in silence: an unlocked open was indistinguishable from a
+            # locked one, so the #68 misdiagnosis could come back with
+            # nothing anywhere saying the instrument had never been armed.
+            # railctl's root logger sits at WARNING by default (cli/deps.py),
+            # so this reaches the operator without -v.
+            locked = False
+            _log.warning(
+                "%s refused advisory locking (%s); opening it unlocked, so a second "
+                "process taking this port will not be detected and may look like a silent "
+                "station",
+                self._config.port,
+                exc.strerror or exc,
+            )
         # No LOCK_UN anywhere: the lock belongs to the open file description and
         # the kernel drops it when the fd closes, including on a crash. Releasing
         # it by hand would only create a window in which close() has not yet run.
@@ -211,11 +261,13 @@ class SerialTransport:
             os.close(fd)
             raise
         self._fd = fd
+        self._lock_held = locked
 
     def close(self) -> None:
         if self._fd is not None:
             os.close(self._fd)
             self._fd = None
+            self._lock_held = False
 
     def __enter__(self) -> SerialTransport:
         self.open()
