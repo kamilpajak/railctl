@@ -105,9 +105,12 @@ def test_the_telemetry_port_shows_bytes_dropped_climbing_with_no_frames():
     continuous, and the period is what this loop must be sized against. The
     figures this docstring used to carry - 24 arrivals, 554 bytes over 30 s,
     mean gap 1.27 s, MAX GAP 4.83 s, attributed to 2026-08-05 - have no entry
-    in docs/probe-results.md to audit them against, and they no longer describe
-    this station: a 300 s raw listen on 2026-11-10 saw 20 arrivals of exactly 7
-    bytes, one every 15.3084 s, and no firmware banner at all.
+    in docs/probe-results.md to audit them against, which is why they are not
+    relied on here. What is recorded instead: a 300 s raw listen on the macOS
+    bench on 2026-11-10 saw 20 arrivals of exactly 7 bytes, one every 15.3084 s.
+    That listen saw no firmware banner - but the banner is NOT gone, it was
+    measured on the Linux bench the same day, so do not read its absence from
+    any single listen as the station having changed.
 
     `open()` gives up after HANDSHAKE_TIMEOUT (2.0 s) here - its resend path
     needs a reply in `_RETRY_PREFIXES`, and no amount of this ASCII stream ever

@@ -1855,10 +1855,14 @@ windowed.
 
 The period is a crystal rather than a software timer: the 19 gaps hold to within 0.05 s across
 290 s, about 170 ppm, where a `sleep` loop would jitter and drift. One caveat on how that was
-reported: printing the per-gap differences from timestamps rounded to 0.01 s makes them
-alternate between 15.30 and 15.31, so the gaps are **not** identical to the hundredth and `min`
-does not equal `max`. The period behind them is 15.3084 s and the stability claim rests on the
-290.86 s span, not on the printed differences.
+reported, now rested on measurement instead of a guess about the reporting script. The gaps are
+**not** identical: the seven later measured on Linux span 6.1 ms, 15.3034 to 15.3095, which is
+the scatter real USB arrivals carry. An earlier version of this paragraph explained an apparent
+gap-to-gap equality by inferring that the differences had been printed from timestamps rounded
+to 0.01 s. The session that produced them reports that its script computed from full-precision
+timestamps, so **that inference is withdrawn** — it was a claim about another session's tooling,
+not a measurement. What stands either way: per-gap equality is not the basis of the stability
+claim, the 290.86 s span is.
 
 **The interval does not depend on track power.** Two 30 s windows taken before the long listen,
 one per state, each giving 14 bytes in 2 arrivals of `YD.Q:V\r`:
@@ -1964,10 +1968,21 @@ queries, since 5 x 7 is also 35 — is dead by observation, and with it the infe
 compresses 76 s of stream into a 2 s window.
 
 **The 15.3 s period reproduces on a second kernel through usbip.** Seven consecutive gaps of
-15.3034, 15.3086, 15.3093, 15.3092, 15.3074, 15.3095 and 15.3070 s, mean 15.3079 s against the
-15.3084 s measured on macOS: 33 ppm apart across different hardware, a different kernel and a
-transport the macOS reading never used. The crystal is confirmed independently, and the
-suggestion that usbip distorts this timing is retired — it does not, to 33 ppm.
+15.3034, 15.3086, 15.3093, 15.3092, 15.3074, 15.3095 and 15.3070 s, mean **15.307771 s** against
+the 15.3084 s measured on macOS.
+
+A ppm headline is the wrong way to report that, and this file carried a wrong one twice over: it
+said mean 15.3079 s and "33 ppm apart". The mean was mis-rounded by 0.13 ms and the ppm followed
+it — the figure for the true mean is 41 ppm. But the comparison does not support a figure at all.
+The seven gaps have a standard deviation of 2.16 ms, so their mean carries a standard error of
+0.82 ms, which is **53 ppm on its own**. The 41 ppm between the benches is **0.77 of one standard
+error**, before the macOS reading's own uncertainty is added. **The two benches are
+indistinguishable.**
+
+That is the stronger claim and the one the data actually supports: the crystal is confirmed on a
+second kernel and a different host, and no distortion of this timing by usbip is detectable at
+the roughly 50 ppm level these data can resolve. Quoting an agreement to 33 ppm implied a
+precision the measurement never had.
 
 **Exactly one query is ever pending, never a stack.** After 120 s with no reader attached the
 first arrival carried one query, not the eight the period would have produced. Unread queries
@@ -1986,8 +2001,26 @@ for what are now gone.
 One prediction, written down before run A so that it could fail, did fail: that the banner would
 appear **in the stream**, as arrivals of about 35 bytes, for some period after the vendor
 application disconnected. It appears in the stream not at all. What survives of the
-protocol-state reading is weaker and more specific — something about a host having recently
-talked to the station, rather than a mode the station remains in.
+protocol-state reading is weaker and more specific. Saying it "survives" also overstated the
+case, and that is corrected here: the vendor application ran on the **Windows** host, the Linux
+bench is fed from that same host over usbipd, and the macOS bench never ran the application at
+all. "Recent contact with the vendor application" and "this host, or this transport" are
+therefore the **same measurement** so far — perfectly confounded — and neither is eliminated.
+
+### The M4 telemetry runs write to the port, so they are not listens — 2026-11-11
+
+`Link.open()` writes before it reads: `link.py` sends `_HANDSHAKE_TELEGRAM`, `21 21 00`, wrapped
+in its LI-USB envelope, and the retry path can send it twice. So **every M4 acceptance run, and
+step 4 of the 2026-10-14 Linux table above, is a write-then-read on the YD.Control node**, not a
+passive listen. The 300 s macOS listen and the fourteen opens of 2026-11-10 wrote nothing at all.
+This file had been mixing the two, which is how a write came to be filed among measurements of
+what the station does unprompted.
+
+The distinction bears on the banner directly. The 2026-10-14 reading that first showed one came
+through `Link.open()`, so after a write; the three November sightings came with no write at all.
+A write is therefore **not necessary** for the banner, and that much is measured. Whether a write
+can **draw** one is untested, and the `YD.Q:V` write that would test it stays declined for the
+separate reason that nobody here knows what it does to the station.
 
 ### What this does NOT establish
 
