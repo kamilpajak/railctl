@@ -1884,7 +1884,7 @@ What the three benches recorded:
 | | 2026-10-14, Linux | 2026-11-10, macOS | 2026-11-10, Linux |
 | --- | --- | --- | --- |
 | `YD.Q:V\r` | yes | yes, 20 times in 300 s | yes, 15.3079 s period |
-| `[CS0] V:8.2.8 …` banner | **emitted** | **not once in 300 s** | **emitted, at 3 of 9 opens** |
+| `[CS0] V:8.2.8 …` banner | **emitted** | **not once in 300 s** | **emitted, in 3 of 7 attach cycles** |
 
 The third column was added later the same day, and it **withdraws a claim this section used to
 make**. The banner's absence from the macOS listen was read here as the station's behaviour
@@ -1948,6 +1948,14 @@ observed. The station was returned to `Shared` afterwards, the state it was foun
 
 **The banner is still emitted in November**, on three independent occasions. That is what
 withdraws the "behaviour changed" claim corrected above.
+
+Counted properly, the nine conditions are **14 port opens across 7 attach cycles**, and by cycle
+they fall into a far sharper pattern than the row count shows: a banner appeared **at most once
+per attach cycle, always at that cycle's first open, in 3 of the 7 cycles**. No second or later
+open in any cycle ever carried one — B and F are eleven such opens between them, all empty. So
+within a cycle the behaviour is perfectly consistent, and the whole of the unexplained residue is
+why 3 cycles and not 7: C and D were both first opens about 5 s after their attach, by an
+identical procedure, and only C carried a banner.
 
 **`bytes_dropped=35` is one query plus one banner, now measured rather than inferred.** The
 pending arrival is `59 44 2E 51 3A 56 0D` followed by `[CS0] V:8.2.8 7010A0001194\r\n`, which is
