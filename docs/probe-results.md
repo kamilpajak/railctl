@@ -100,6 +100,20 @@ and nothing suggests anyone has run it against a YD7010. It is worth recording f
 reason: a reader who checks our claim against the best-known open implementation will find it
 disagrees, and should know that was checked rather than missed.
 
+**An absent override is not an absent mechanism — checked 2026-11-11.** JMRI's Lenz family
+carries four station- and interface-specific subclasses: `hornbyelite` (eight files, overriding
+the programmer, throttle, throttle manager and connection memo), `ztc640` (its own packetizer),
+`lzv200`, and `liusb`/`liusbserver` (adapters). There is an established place to encode a
+station's departures from the Lenz specification, and JMRI uses it when a station departs.
+Neither the YD7010 nor its predecessor the Digikeijs DR5000 has one: `grep -ri yamorc` over
+`java/src/jmri/jmrix/` returns nothing, and the DR5000 appears exactly once in that whole tree,
+as a javadoc example of a station without turnout feedback
+(`lenz/xnetsimulator/XNetSimulatorAdapter.java:543`). Neither station needs a connection type of
+its own, because both emulate LocoNet, XpressNet and Z21 — JMRI would drive this one through the
+generic Lenz package — so this establishes that nobody encoded a deviation for this hardware
+family, NOT that JMRI cannot talk to it. Our bit order is a deviation that would require exactly
+such a subclass to express.
+
 ### The order is now a measured capability, not a constant
 
 Issue #13. The reading above is still the reading, and it is still the DEFAULT the tool applies
@@ -491,6 +505,15 @@ alter that.
 
 This remains an inference: YaMoRC does not publish a hardware block diagram, and nothing
 found so far states outright that the YD7010 lacks a global detector.
+
+**Independent corroboration of the DR5088RC link — 2026-11-11, documentary, not measured.**
+JMRI's LocoNet code supports the DR5088RC directly, and carries a workaround for a reply format
+it does not follow: `LncvMessageContents.java:269` handles `LNCV_READ_REPLY2` "for Digikeijs
+DK5088RC not following specs", and `LncvDevicesManager.java:101` records the same undocumented
+format. That is a second source, reached from code rather than from the YaMoRC manual this
+inference otherwise rests on alone, for the DR5088RC being the RailCom detector in this
+ecosystem. It does not establish that the YD7010 lacks a global detector — it raises the DR5000
+half of the chain from one source to two.
 
 ### POM WRITE works, even though POM read does not
 
