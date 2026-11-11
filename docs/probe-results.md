@@ -2347,10 +2347,15 @@ marker — the earlier runs had this same marker available in their bytes and no
 the second is now simply false: the banner arrives, roughly 4 ms after the port is opened, and
 that is measured three times here.
 
-### Open delay is not the variable. Time since the previous close is
+### Two candidate variables, confounded — and an earlier revision of this section picked the wrong one
 
-The delays were 3 s and 120 s, and the hits do not sort by them cleanly — 1 of 5 at 3 s, 2 of 2
-at 120 s. They sort perfectly by something the protocol never set out to vary:
+An earlier revision of this section was headed "Open delay is not the variable. Time since the
+previous close is", and asserted that the gap ordered all seven cycles with no residue. **That is
+withdrawn.** The two quantities were confounded in this run and the claim could not have been
+made from it. What follows is the data, then the confound, then what actually separates it.
+
+The open delays were 3 s and 120 s, and the hits do not sort by them cleanly — 1 of 5 at 3 s,
+2 of 2 at 120 s. They do sort by something the protocol never set out to vary:
 
 | cycle | time from the previous port close to this open | banner |
 | --- | --- | --- |
@@ -2358,20 +2363,70 @@ at 120 s. They sort perfectly by something the protocol never set out to vary:
 | 2, 3, 4, 5 | ≈ 21 s each | no, four times |
 | 6, 7 | ≈ 138 s each | **yes**, twice |
 
-All seven cycles, **no residue** — and it also accounts for the one residue of 2026-11-10, where
+That ordering is perfect, and it would also account for the one residue of 2026-11-10, where
 conditions C and D were first opens about 5 s after their attach by an identical procedure and
-only C carried a banner. D followed C closely. Nothing else proposed in this file has explained
-that pair.
+only C carried a banner, D having followed C closely.
 
-The gap arithmetic is forced by the orchestration rather than chosen: each cycle closed its port
-8 s before the detach, stayed detached 10 s, and then opened 3 s or 120 s after the node
-reappeared.
+**But the gap and the open delay move together here**, 3 s with 21 s and 120 s with 138 s, so this
+run cannot tell them apart. The gap arithmetic is forced by the orchestration rather than chosen:
+each cycle closed its port 8 s before the detach, stayed detached 10 s, then opened 3 s or 120 s
+after the node reappeared — which is exactly why the two track each other.
+
+### A gap sweep, which reproduced the threshold and then refuted the gap reading — 2026-11-11
+
+Seven further cycles at a fixed 3 s nominal open delay, with the gap from the previous close
+enforced exactly by the listener:
+
+| target gap | measured gap | open delay | arrivals | banner |
+| --- | --- | --- | --- | --- |
+| priming | — (minutes, idle since the previous run) | 3000.4 ms | 1 | **no** |
+| 20 s | 24.86 s | 3001.0 ms | 1 | no |
+| 40 s | 40.00 s | 9818.6 ms | 4 | **yes** |
+| 60 s | 60.00 s | 16197.5 ms | 4 | **yes** |
+| 90 s | 90.00 s | 34257.1 ms | 4 | **yes** |
+| 130 s | 130.00 s | 62560.2 ms | 4 | **yes** |
+| 180 s | 180.00 s | 100664.0 ms | 4 | **yes** |
+
+Five for five above 40 s and zero for two below 25 s, which looks like a sharp threshold. It is
+not usable as one, for two reasons found in this run's own data.
+
+**The open delay was not held fixed, despite the design saying 3 s.** The listener enforced the
+gap by waiting, and the node appeared immediately after each attach, so the wait landed *after*
+the node was already present and inflated the open delay with it: 3.0, 3.0, 9.8, 16.2, 34.3,
+62.6, 100.7 s. The sweep therefore reproduces the confound rather than resolving it. This was an
+error in the orchestration, not a property of the station.
+
+**And the priming cycle separates the two, in favour of the open delay.** It followed the previous
+run by several idle minutes — a gap far above any threshold under discussion — opened at 3.0 s,
+and produced **no banner**. That is the only observation so far in which a long gap meets a short
+open delay, and the banner did not appear.
+
+Across all thirteen `usbipd` cycles measured on this bench, one rule separates them without
+exception: **a banner appears when the port is opened more than about 9.8 s after the node
+appears, and not at 3 s.** Six opens at 3 s produced nothing; seven opens between 9.8 s and 120 s
+all produced one. The gap reading has no such rule available to it, because of the priming cycle.
+
+The thirteenth observation is the exception that is not one. Step 1's cycle 1 opened at 3 s and
+*did* carry a banner — and it is the only cycle in either run preceded by a **physical replug**,
+a real re-enumeration on the Windows host rather than a `usbipd` detach. Whether that is a second
+trigger or the same one reached differently is untested.
+
+So the open delay is the better-supported reading, the gap is not eliminated, and neither is
+established. The run that separates them orthogonally — the gap held at 60 s while the open delay
+sweeps 1, 3, 5, 8, 12 and 20 s — is recorded in the next section.
 
 ### This collapses the cross-bench comparison, and the error was in both benches' framing
 
 The macOS protocol listened for **120 s per cycle**. Its gap from one close to the next open is
 therefore the operator's unplug interval plus the open delay — **16.6 to 23.3 s** for every cycle
 that opened at 3 s. That is the band in which this bench produces **0 of 4**.
+
+**This conclusion does not depend on which of the two candidate variables is the real one**, which
+is why it is left standing while the mechanism above is withdrawn. Those macOS cycles are short on
+**both**: a gap of 16.6 to 23.3 s against this bench's silent 21 s and 24.9 s, and an open delay of
+3 s against this bench's six silent opens at 3 s. Either way they are matched to cycles where
+Linux is also silent. Its cycle 3 is long on both, at a gap of about 137 s and an open delay of
+120 s, so it remains the counterexample under either reading.
 
 So four of the five macOS cycles previously treated as comparable sit in a band where Linux is
 also silent, and they carry no information about the platform at all. The only macOS cycle in the
@@ -2394,12 +2449,17 @@ The apparent platform difference is largely a difference in cycle timing.
 
 ### What this does NOT establish
 
-- **Not that the gap explains everything.** The macOS cycle 3 is a live counterexample: a gap of
-  about 137 s, inside this bench's banner band, and no banner. So either the threshold differs
-  between the benches, or the variable is not quite "time since the previous close", or the
-  platform matters too. The platform account is **not eliminated** — it is reduced to n = 1.
-- **Not a threshold.** The gap is bracketed between 21 s and 138 s by four and three observations
-  respectively, and nothing here locates it inside that range.
+- **Not which variable it is.** The open delay separates all thirteen `usbipd` cycles without
+  exception and the gap does not, so the open delay is better supported — but the two were
+  confounded in both runs that have been analysed, and a long gap at a short open delay has been
+  observed exactly once.
+- **Not that either variable explains everything.** The macOS cycle 3 is a live counterexample
+  under both readings: long on the gap at about 137 s and long on the open delay at 120 s, and no
+  banner. So either a threshold differs between the benches, or neither variable is quite right,
+  or the platform matters too. The platform account is **not eliminated** — it is reduced to
+  n = 1, which a deterministic mechanism would make more informative than it sounds, not less.
+- **Not a threshold value.** On the open-delay reading it is bracketed between 3 s and 9.8 s; on
+  the gap reading, between 24.9 s and 40 s. Nothing yet locates either inside its bracket.
 - **Not that `DSR` means anything yet.** `TIOCMGET` read 38 here against the macOS bench's 6: both
   assert DTR and RTS, and Linux additionally reports DSR. On `cdc_acm` that bit comes from the
   device's own `SERIAL_STATE` notification, so this is most likely a difference in what the two
