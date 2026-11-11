@@ -2412,8 +2412,79 @@ a real re-enumeration on the Windows host rather than a `usbipd` detach. Whether
 trigger or the same one reached differently is untested.
 
 So the open delay is the better-supported reading, the gap is not eliminated, and neither is
-established. The run that separates them orthogonally — the gap held at 60 s while the open delay
-sweeps 1, 3, 5, 8, 12 and 20 s — is recorded in the next section.
+established. The run that separates them orthogonally is recorded next, and it settles it.
+
+### The open delay is the variable, and the threshold is between 3 and 5 s — SETTLED 2026-11-11
+
+Six cycles with the gap from the previous close held at **61.8 ± 0.1 s** — above every gap that
+has ever produced a banner — while the open delay alone was swept. The gap no longer varies, so
+anything that changes is the delay's doing:
+
+| open delay, measured | measured gap | arrivals | banner |
+| --- | --- | --- | --- |
+| 1000.3 ms | 61.96 s | 1 | no |
+| 3001.1 ms | 61.83 s | 2 | no |
+| **5000.2 ms** | 61.75 s | 4 | **yes** |
+| 8000.5 ms | 61.95 s | 4 | **yes** |
+| 12000.4 ms | 61.84 s | 5 | **yes** |
+| 20000.4 ms | 61.76 s | 4 | **yes** |
+
+**The gap was constant and the banner flipped.** Four for four at and above 5.000 s, zero for two
+at and below 3.001 s, with the gap fixed throughout. **The open delay is the controlling variable
+and the gap is not**, which is the opposite of what this section claimed two revisions ago, and
+the threshold sits between **3.001 s and 5.000 s**.
+
+Every `usbipd` observation on this bench now falls into three rows:
+
+| condition | banner |
+| --- | --- |
+| open delay ≥ 5 s | **11 of 11**, across gaps of 40, 60, 61.8, 90, 130, 138 and 180 s |
+| open delay ≤ 3 s, gap ≤ 62 s | 0 of 7 |
+| open delay ≤ 3 s, gap of minutes to hours | 2 of 3 — **unexplained** |
+
+The first row is the result: eleven for eleven, with the gap deliberately varied under it four
+times over and never mattering. The third row is the whole remaining residue, and it is not a
+small-print caveat — one of its three is step 1's cycle 1, the only cycle in any run preceded by a
+**physical replug** rather than a `usbipd` detach, and of the two reached by detach one fired and
+one did not. At short delays after a long idle the behaviour is genuinely unresolved at n = 3.
+
+### The open elicits a query alongside the banner
+
+With the terminator marker read in every banner cycle, the arrival pattern is identical in all
+eleven: one query already buffered before `tcsetattr` (ending `0a`), then an **untranslated** query
+at about 4 ms, then the **untranslated** banner at about 5 ms. So the banner never arrives alone —
+a query accompanies it, and both land after the open rather than waiting in the buffer.
+
+That is 7 + 7 + 28 = 42 bytes at the open, where the original M4 run's `bytes_dropped=35`
+decomposed as 7 + 28. The two do not match, and nothing here explains the missing query; it is
+recorded as a discrepancy rather than smoothed over.
+
+### This accounts for the macOS zeros without any appeal to the platform
+
+The macOS protocol opened at **0.5 s, 3 s and 120 s**. Against the threshold just measured:
+
+| macOS cycles | open delay | expected under the delay rule | observed |
+| --- | --- | --- | --- |
+| 1, 2, 6, 7 | ≈ 3 s | **below threshold — no banner** | no banner |
+| 4, 5 | ≈ 0.5 s | **below threshold — no banner** | no banner |
+| 5, the reopen | 10.0 s | excluded: a second open in its cycle, and eleven such opens on this bench have never carried one | no banner |
+| 3 | 120.0 s | **above threshold — banner** | **no banner** |
+
+Six of the seven macOS cycles were **predicted to be silent** by a rule measured entirely on this
+bench, and the seventh is excluded by a different rule also measured here. Their zeros were never
+mysterious; the protocol simply spent almost all of its cycles below the threshold, because the
+threshold was unknown when it was designed — by me, in the prompt that proposed those delays.
+
+That leaves **exactly one informative macOS cycle**: cycle 3, at an open delay of 120 s, where this
+bench fired twice out of two. The cross-bench contrast is therefore **Linux 11/11 against macOS
+0/1**, one-sided Fisher `C(11,11)/C(12,11)` = **p = 0.083**.
+
+So the platform difference is still not significant, but it is now a sharp single anomaly against
+a deterministic rule rather than a vague deficit — and the test that would settle it has become
+cheap. **Five macOS cycles at an open delay of 10 s** would give `C(11,11)/C(16,11)` = 1/4368 =
+**p = 0.0002** if they all came up empty, and a single banner would close the question the other
+way immediately. No long listens and no 120 s waits are needed, which is what made the earlier
+protocol expensive.
 
 ### This collapses the cross-bench comparison, and the error was in both benches' framing
 
@@ -2449,17 +2520,18 @@ The apparent platform difference is largely a difference in cycle timing.
 
 ### What this does NOT establish
 
-- **Not which variable it is.** The open delay separates all thirteen `usbipd` cycles without
-  exception and the gap does not, so the open delay is better supported — but the two were
-  confounded in both runs that have been analysed, and a long gap at a short open delay has been
-  observed exactly once.
-- **Not that either variable explains everything.** The macOS cycle 3 is a live counterexample
-  under both readings: long on the gap at about 137 s and long on the open delay at 120 s, and no
-  banner. So either a threshold differs between the benches, or neither variable is quite right,
-  or the platform matters too. The platform account is **not eliminated** — it is reduced to
-  n = 1, which a deterministic mechanism would make more informative than it sounds, not less.
-- **Not a threshold value.** On the open-delay reading it is bracketed between 3 s and 9.8 s; on
-  the gap reading, between 24.9 s and 40 s. Nothing yet locates either inside its bracket.
+- **Not the behaviour below the threshold.** Above 5 s the rule is 11 of 11. Below 3 s it is 0 of
+  7 at gaps up to 62 s but 2 of 3 after a long idle, and that residue is unexplained at n = 3. A
+  second trigger reached by physical re-enumeration is one reading of it and is untested.
+- **Not the threshold's exact value or its sharpness.** It is bracketed between 3.001 s and
+  5.000 s by two observations and four, and nothing locates it inside that bracket or shows the
+  transition is abrupt rather than graded.
+- **Not that the platform is identical.** The macOS cycle 3 remains a single counterexample to a
+  rule this bench satisfies 11 times out of 11, at p = 0.083. The platform account is reduced to
+  n = 1 rather than eliminated, and a deterministic rule makes that one observation more
+  informative than a probabilistic one would, not less.
+- **Not why the banner exists.** Nothing here says what the station is doing between 3 s and 5 s
+  after enumeration that makes a banner available afterwards, nor why an open elicits one at all.
 - **Not that `DSR` means anything yet.** `TIOCMGET` read 38 here against the macOS bench's 6: both
   assert DTR and RTS, and Linux additionally reports DSR. On `cdc_acm` that bit comes from the
   device's own `SERIAL_STATE` notification, so this is most likely a difference in what the two
