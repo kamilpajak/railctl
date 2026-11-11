@@ -1885,10 +1885,14 @@ speaks to, so it is an application port rather than a stream meant for passive l
 
 What the three benches recorded:
 
-| | 2026-10-14, Linux | 2026-11-10, macOS | 2026-11-10, Linux |
-| --- | --- | --- | --- |
-| `YD.Q:V\r` | yes | yes, 20 times in 300 s | yes, 15.3079 s period |
-| `[CS0] V:8.2.8 …` banner | **emitted** | **not once in 300 s** | **emitted, in 3 of 7 attach cycles** |
+| | 2026-10-14, Linux | 2026-11-10, macOS | 2026-11-10, Linux | 2026-11-11, macOS |
+| --- | --- | --- | --- | --- |
+| `YD.Q:V\r` | yes | yes, 20 times in 300 s | yes, 15.30777 s mean | yes, 15.30839 s over 46 gaps |
+| `[CS0] V:8.2.8 …` banner | **emitted** | **not once in 300 s** | **emitted, in 3 of 7 attach cycles** | **not once in 7 attach cycles** |
+
+The fourth column arrived a day later and is the subject of its own section below. The third
+column's figure was also wrong here until then — it read 15.3079 s, the mis-rounded mean that is
+corrected further down this section.
 
 The third column was added later the same day, and it **withdraws a claim this section used to
 make**. The banner's absence from the macOS listen was read here as the station's behaviour
@@ -2118,3 +2122,106 @@ for one composite device, none of them derivable from another, all of them measu
 One bound worth stating exactly, because the deadline is a floor on waiting and not a cap on
 elapsed time: an attempt already in flight is not interrupted, so the longest a genuinely silent
 station can hold this test is `deadline + HANDSHAKE_TIMEOUT` = 41.8 s, not 39.8 s.
+
+## The banner did not appear in seven macOS cycles, and DTR is eliminated — 2026-11-11, platform difference NOT established
+
+A third bench, chosen for one property the other two cannot have: **the vendor application has
+never run on it.** MacBook Pro Mac16,1 (M4), macOS 27.0.1, station attached directly by USB with
+no usbip anywhere in the path, track dead with nothing on it. Read-only throughout —
+`os.open(O_RDONLY|O_NONBLOCK|O_NOCTTY)`, `TIOCMGET`, `read`, `close` — not one byte written to
+any node, no `railctl`, no hardware tests.
+
+Eight opens across seven physical replug cycles, every open the first of its cycle. **56
+arrivals, 392 bytes, every single arrival exactly the seven bytes `59 44 2E 51 3A 56 0D`. Not one
+`[CS0]`.**
+
+| cycle | open delay, measured | `TIOCMGET` | arrivals | banner |
+| --- | --- | --- | --- | --- |
+| 1 | 3003.5 ms | DTR, RTS | 8 | no |
+| 2 | 3002.5 ms | DTR, RTS | 8 | no |
+| 3 | 120003.6 ms | DTR, RTS | 9 | no |
+| 4 | 502.6 ms | DTR, RTS | 8 | no |
+| 5 | 503.1 ms, held 5 s, reopened at 10003.1 ms | DTR, RTS twice | 0, then 7 | no, on either open |
+| 6 | 3003.5 ms | DTR, RTS | 8 | no |
+| 7 | 3004.2 ms | DTR, RTS | 8 | no |
+
+### `cu.` raises DTR, which removes DTR as the explanation
+
+`TIOCMGET` on both node families returned `6` = `0x0006` = DTR plus RTS, immediately after the
+open and again 200 ms later. **The BSD `cu.`/`tty.` split governs blocking on carrier detect, not
+the control lines**, so the belief that `cu.` leaves DTR low — load-bearing for a whole arm of
+this experiment — was false. It was caught by measuring it in a cycle that cost no replug, rather
+than by assuming it through seven.
+
+That matters beyond the protocol design. Linux `cdc_acm` asserts DTR and RTS in
+`acm_port_activate`, so all fourteen Linux opens of 2026-11-10 raised DTR too. **Both benches
+raise DTR on every open and only one of them produced banners, so DTR does not distinguish
+them.** Any account of the difference has to be something else.
+
+### The comparison is five cycles against seven, not seven against seven
+
+Two of the macOS cycles opened at 0.5 s, a delay chosen **because** the model under test predicts
+no banner there. Counting them among the zeros tests a model with cycles selected to fail it. The
+comparable set is cycles 1, 2, 3, 6 and 7 — the delays at which Linux produced its three hits —
+so the contrast is **Linux 3/7 against macOS 0/5**.
+
+A one-sided Fisher exact test on that table gives `C(7,3)/C(12,3)` = 35/220 = **p = 0.159**. The
+difference between the benches is **not significant**; it is suggestive. A Wilson interval for
+Linux's own 3/7 runs from **0.16 to 0.75**, so the underlying rate is barely constrained at all,
+and any power calculation treating 3/7 as the true rate quotes a precision nobody has. Reaching
+p < 0.05 would need **0/11** on macOS: `C(7,3)/C(18,3)` = 35/816 = 0.043.
+
+### A model, and the evidence against it
+
+The Linux cycles suggested one: **enumeration arms a one-shot banner, a DTR assertion fires it,
+and arming takes longer than 2 s.** It accounted for six of those seven cycles — the hits at
+2-5 s and at 120 s, the eleven later opens that found nothing already spent, the 12.6 ms open
+that raised DTR before arming and then held the port open so no second edge ever came, and the
+two opens at 2.0 s as below threshold. Its one residue was a cycle at about 5 s that should have
+fired and did not, and whose actual delay was never measured.
+
+The macOS cycles do not support it. DTR was raised on all eight opens, five of them above the
+proposed threshold including one a full 120 s after enumeration, and nothing fired. Cycle 5 was
+built specifically to test the one-shot: open early at 0.5 s, below threshold, so the shot should
+still be loaded; close; reopen at 10 s for a second DTR edge, this time after arming. **No banner
+on either open.** A separate 54-minute cycle with DTR raised produced none either, which extends
+the timer elimination from 90 s to **54 minutes** on that bench.
+
+So the model is **not established**, and on the macOS bench it is contradicted. What survives is
+narrower: a DTR edge is not sufficient, and nothing proposed so far predicts both benches.
+
+### Two Linux findings replicated on a transport that cannot be blamed
+
+**The period, now the best measurement in this project.** 46 gaps, after discarding three
+first-arrival-after-open artefacts: mean **15.30839 s**, SD 0.61 ms, standard error **0.090 ms,
+which is 5.9 ppm**, spread 3.0 ms. That sits 0.57 ppm from the same bench's 300 s listen the day
+before, and 40.4 ppm from the Linux mean of 15.307771 s against a combined standard error of
+53.3 ppm. **0.76 of one error bar: the benches remain indistinguishable**, now from the precise
+side rather than the imprecise one. `TELEMETRY_PERIOD_SECONDS = 15.3084` falls inside one standard
+error of 15.30839 ± 0.00009 and is, for the first time, justified rather than inherited.
+
+**Exactly one query is ever pending.** Cycle 3 opened 120 s after enumeration and saw arrivals at
+t = 0.204 s and t = 6.024 s, then the ordinary cadence. Only the first is a held query: 5.82 s is
+a plausible position for the station's own next scheduled tick, and eight buffered queries would
+have arrived together. At most one was held — matching Linux, and measured here with **no usbip
+in the path at all**. That retires the suspicion that a usbipd buffer explained `bytes_dropped=35`
+more firmly than the 7-plus-28 decomposition did, because it is a different transport rather than
+a better reading of the same one.
+
+### What this does NOT establish
+
+- **Not that the banner is a Linux or usbip artefact.** p = 0.159, five cycles against seven.
+- **Not that the station was in the same state on both benches.** Whether its mains power was
+  interrupted between the vendor-application session on the Windows host and the macOS attachment
+  is **unrecorded**, and it decides how these zeros read. Unbroken power would mean a
+  post-application state reached that bench and produced nothing, which weakens the state account
+  sharply. A break would mean the state was cleared, and the zeros are then merely consistent with
+  it and settle nothing. Nobody wrote it down at the time.
+- **Not that DTR reached the wire.** `TIOCMGET` reports what the host believes it is driving, not
+  that `SET_CONTROL_LINE_STATE` was accepted. `TIOCMBIC` would settle it, and is cheap for the
+  separate reason that every port close lowers DTR anyway, so deasserting it mid-open is not a
+  state the station has never been in.
+- **Not a controlled replug interval.** The macOS gaps were operator-timed, 13.6 to 20.3 s. All
+  above any threshold under discussion, but not constant.
+- **Not that `tty.` and `cu.` differ only in DTR.** They do not: the open semantics differ in
+  other ways too, so this is a comparison of two node families, not an isolated DTR manipulation.
