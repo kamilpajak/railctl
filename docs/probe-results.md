@@ -2225,7 +2225,9 @@ a better reading of the same one.
   | the power supply stayed in its socket throughout the 10→11 November move | operator recall, credible |
   | power was not interrupted between 2026-10-14 and 2026-11-11 | **not supportable — household outages did occur, dates unknown** |
 
-  The third is the statement the inference needed, and it is the one nobody has. For the narrow
+  The third is the statement the inference needed, and it is the one nobody has. The outages
+  themselves were first relayed through the macOS session and then **confirmed directly by the
+  operator**, which is why the row states them rather than calling them unverified. For the narrow
   move window the operator reports no outage, but did not check it, and an outage overnight passes
   unnoticed. **So a reset is not excluded; it is undocumented.** The station exposes no uptime
   counter anybody here knows how to read, so this cannot be recovered after the fact.
@@ -2273,6 +2275,11 @@ here so that it can fail: if the Linux bench now produces **0 of 7**, then the m
 time-dependent rather than host-dependent, the macOS zeros were never evidence about platform at
 all, and both benches' zeros share a cause this file has not named.
 
+**Outcome: the prediction held.** Seven cycles ran that evening and the banner appeared in **3 of
+7**, the predicted rate, which is recorded in its own section below. The host-or-transport account
+survived its first falsifiable test — and the same run then undercut the comparison that test was
+supposed to settle, for a reason neither bench had considered.
+
 ### A fourth variable nobody measured: time since the station last booted
 
 Raised by the macOS session and adopted here, because it sits in none of the three accounts above.
@@ -2298,3 +2305,106 @@ therefore worth running as n = 1 on the boot itself and n = 7 on the post-boot e
 cycle is also the best chance so far to watch a banner **arrive**, which nobody has yet managed:
 a cold boot is a stronger candidate for emitting one than the warm re-enumerations, where a reader
 armed from 12.6 ms caught nothing at all.
+
+## The banner returned, 3 of 7 as predicted — and the gap between opens orders every cycle — 2026-11-11
+
+Step 1 of the protocol: the station back on the Windows host, seven `usbipd` detach-and-attach
+cycles with no physical replugging, the vendor application deliberately not run, five cycles
+opening 3 s after the node appears and two at 120 s. Read-only throughout and procedurally
+identical to 2026-11-10, because the point is a within-bench comparison against that run's 3/7.
+
+| cycle | open delay | `TIOCMGET` | arrivals | bytes | banner |
+| --- | --- | --- | --- | --- | --- |
+| 1 | 3000.5 ms | 38 = DTR, RTS, DSR | 4 | 49 | **yes** |
+| 2 | 3000.7 ms | 38 | 2 | 14 | no |
+| 3 | 3000.8 ms | 38 | 2 | 14 | no |
+| 4 | 3000.2 ms | 38 | 1 | 7 | no |
+| 5 | 3000.0 ms | 38 | 1 | 7 | no |
+| 6 | 120000.5 ms | 38 | 5 | 56 | **yes** |
+| 7 | 120000.5 ms | 38 | 4 | 49 | **yes** |
+
+**3 of 7, which is the rate predicted before the run.** The banner is byte-identical to October's:
+`5b4353305d20563a382e322e38203730313041303030313139340d0a`, 28 bytes,
+`[CS0] V:8.2.8 7010A0001194\r\n`.
+
+### The banner arrives about 4 ms AFTER the open, and a stray byte proves it
+
+Every banner cycle delivered its first chunk ending `0a` and all later chunks ending `0d`, while
+the station's query ends `0d`. That is this procedure's own `ICRNL`: the first chunk was already
+in the tty buffer and was processed by the default line discipline before `tcsetattr` set raw
+mode; everything after it arrived with the translation off. **The terminator byte is therefore a
+marker of which side of the `tcsetattr` a byte landed on**, and it was sitting in the data
+unnoticed.
+
+Read through that marker, the order in a banner cycle is unambiguous: a translated query at
+t = 0.000 s (buffered before the open), then an **untranslated** query at t = 0.003 s, then the
+**untranslated** banner at t = 0.004 s. The banner is on the post-raw side, so it entered the
+buffer after the open rather than waiting in it.
+
+This file has said the banner was "already pending within 2 ms of the open" and that it was
+"never once observed arriving". **Both are withdrawn.** The first was never established by any
+marker — the earlier runs had this same marker available in their bytes and nobody read it — and
+the second is now simply false: the banner arrives, roughly 4 ms after the port is opened, and
+that is measured three times here.
+
+### Open delay is not the variable. Time since the previous close is
+
+The delays were 3 s and 120 s, and the hits do not sort by them cleanly — 1 of 5 at 3 s, 2 of 2
+at 120 s. They sort perfectly by something the protocol never set out to vary:
+
+| cycle | time from the previous port close to this open | banner |
+| --- | --- | --- |
+| 1 | hours — the station had just arrived from the other bench | **yes** |
+| 2, 3, 4, 5 | ≈ 21 s each | no, four times |
+| 6, 7 | ≈ 138 s each | **yes**, twice |
+
+All seven cycles, **no residue** — and it also accounts for the one residue of 2026-11-10, where
+conditions C and D were first opens about 5 s after their attach by an identical procedure and
+only C carried a banner. D followed C closely. Nothing else proposed in this file has explained
+that pair.
+
+The gap arithmetic is forced by the orchestration rather than chosen: each cycle closed its port
+8 s before the detach, stayed detached 10 s, and then opened 3 s or 120 s after the node
+reappeared.
+
+### This collapses the cross-bench comparison, and the error was in both benches' framing
+
+The macOS protocol listened for **120 s per cycle**. Its gap from one close to the next open is
+therefore the operator's unplug interval plus the open delay — **16.6 to 23.3 s** for every cycle
+that opened at 3 s. That is the band in which this bench produces **0 of 4**.
+
+So four of the five macOS cycles previously treated as comparable sit in a band where Linux is
+also silent, and they carry no information about the platform at all. The only macOS cycle in the
+band where a banner is expected is its cycle 3, which opened 120 s after enumeration for a gap of
+roughly 134 to 140 s.
+
+The informative contrast is therefore **Linux 2/2 against macOS 0/1**, whose one-sided Fisher
+exact is `C(2,2)/C(3,2)` = **p = 0.333**.
+
+| comparison | Linux | macOS | one-sided p |
+| --- | --- | --- | --- |
+| as framed on 2026-11-11, matched on open delay | 3/7 | 0/5 | 0.159 |
+| matched on the inter-open gap, long band | 2/2 | 0/1 | **0.333** |
+| matched on the inter-open gap, short band | 0/4 | 0/4 | identical, uninformative |
+
+**Both sessions made the same mistake**, this one included: cycles were matched on open delay,
+which is the variable the protocol controlled, while the gap between opens — which the two
+protocols set very differently, through their listen durations — went unrecorded and unmatched.
+The apparent platform difference is largely a difference in cycle timing.
+
+### What this does NOT establish
+
+- **Not that the gap explains everything.** The macOS cycle 3 is a live counterexample: a gap of
+  about 137 s, inside this bench's banner band, and no banner. So either the threshold differs
+  between the benches, or the variable is not quite "time since the previous close", or the
+  platform matters too. The platform account is **not eliminated** — it is reduced to n = 1.
+- **Not a threshold.** The gap is bracketed between 21 s and 138 s by four and three observations
+  respectively, and nothing here locates it inside that range.
+- **Not that `DSR` means anything yet.** `TIOCMGET` read 38 here against the macOS bench's 6: both
+  assert DTR and RTS, and Linux additionally reports DSR. On `cdc_acm` that bit comes from the
+  device's own `SERIAL_STATE` notification, so this is most likely a difference in what the two
+  hosts surface rather than a difference on the wire, and it is recorded as unexplained.
+- **Not that the vendor application is irrelevant.** It was not run before this measurement, so
+  what is tested here is a bench roughly a day past its last application contact. That is the same
+  position the macOS bench was in, which is what makes the comparison fair, and it says nothing
+  about what a fresh application session would do.
