@@ -30,6 +30,8 @@ CRTSCTS, no HUPCL so closing does not reset the adapter).
 from __future__ import annotations
 
 import errno
+import fcntl
+import logging
 import os
 import select
 import termios
@@ -49,6 +51,11 @@ from railctl.errors import (
 # They say "this is not a serial device" exactly as a rejected tcgetattr does,
 # and routing them to PortBusy published them as retryable.
 _NOT_A_DEVICE_ERRNOS = frozenset({errno.EISDIR, errno.ENOTDIR, errno.ELOOP})
+
+# What flock() reports when somebody else already holds the port. EWOULDBLOCK
+# and EAGAIN are the same number on Linux and macOS; both are named because
+# POSIX permits them to differ and a frozenset costs nothing.
+_LOCK_HELD_ERRNOS = frozenset({errno.EWOULDBLOCK, errno.EAGAIN})
 
 BAUDRATE = 57600
 # Suggested read size for callers; Link uses its own private _READ_CHUNK, a
@@ -79,6 +86,9 @@ CDC_INDEX_HINT = (
 )
 
 
+_log = logging.getLogger("railctl.transport")
+
+
 @dataclass(frozen=True, slots=True)
 class SerialConfig:
     port: str
@@ -89,10 +99,24 @@ class SerialTransport:
     def __init__(self, config: SerialConfig) -> None:
         self._config = config
         self._fd: int | None = None
+        self._lock_held = False
 
     @property
     def is_open(self) -> bool:
         return self._fd is not None
+
+    @property
+    def lock_held(self) -> bool:
+        """Whether this open port is actually protected against a second opener.
+
+        False means the device refused advisory locking and the port was
+        opened anyway - a deliberate choice, see open() - so a second process
+        CAN still take it and the #68 misdiagnosis is back in play. It is a
+        field rather than only a log line because a guarantee that silently
+        evaporates is exactly what this project forbids: whoever must not act
+        on a guess reads this, not the fact that open() returned.
+        """
+        return self._lock_held
 
     @property
     def description(self) -> str:
@@ -107,6 +131,23 @@ class SerialTransport:
         return CDC_INDEX_HINT
 
     def open(self) -> None:
+        if self._fd is not None:
+            # NOT PortBusy, which is what this used to raise. A BSD flock
+            # belongs to the open file description, so a second os.open makes
+            # a new one that conflicts with the fd this object already holds:
+            # re-opening reported "another process holds it" about ITSELF and
+            # sent the reader hunting for a second railctl or a JMRI session
+            # that was never running. Measured 2026-11-11 - the same
+            # misdiagnosis #68 exists to remove, inverted.
+            #
+            # Raising rather than returning quietly: a caller that re-opens
+            # usually wants a fresh connection, and silently keeping the old
+            # fd would hand it a stale one after a replug. TransportError is
+            # not in RETRYABLE_CODES, which is right - no retry fixes this.
+            raise TransportError(
+                f"{self._config.port} is already open in this process - "
+                f"close() it before opening it again"
+            )
         try:
             fd = os.open(self._config.port, os.O_RDWR | os.O_NOCTTY | os.O_NONBLOCK)
         except FileNotFoundError as exc:
@@ -146,6 +187,63 @@ class SerialTransport:
                     f"{self._config.port} is not a serial device: {exc.strerror}"
                 ) from exc
             raise PortBusy(f"cannot open {self._config.port}: {exc.strerror}") from exc
+        locked = True
+        try:
+            # os.open on a CDC-ACM node is NOT exclusive, so without this two
+            # railctl processes both succeed, both write their telegrams, and
+            # either one can consume the reply addressed to the other. Measured
+            # 2026-10-15: the second process reported link_timeout, exit 7,
+            # retryable: true - "the station did not answer" - when the station
+            # had answered and the other railctl had read it (#68).
+            #
+            # flock(), NOT lockf(). This is the one choice here that cannot be
+            # made by taste. JMRI drives the same CDC nodes through jSerialComm,
+            # whose POSIX backend takes flock(LOCK_EX | LOCK_NB) on open and
+            # releases it on close, and which JMRI never disables. BSD flock
+            # locks and fcntl record locks are separate, non-interoperating
+            # spaces on Linux - measured: lockf() succeeds while a flock is
+            # held - so lockf() here would still fix railctl against railctl
+            # while silently losing mutual exclusion with JMRI. TIOCEXCL was
+            # considered and rejected: it is kernel-wide, so it also refuses
+            # passive readers that ask for no lock, and it buys nothing against
+            # JMRI that flock does not already give.
+            fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        except OSError as exc:
+            if exc.errno in _LOCK_HELD_ERRNOS:
+                os.close(fd)
+                raise PortBusy(
+                    f"cannot open {self._config.port}: another process holds it",
+                    hint=(
+                        "this is the port being held, not a silent station: look "
+                        "for another railctl still running, such as a monitor in "
+                        "a second terminal, or for JMRI, which holds the same "
+                        "lock while its connection is open. It clears when that "
+                        "process exits, so retrying is the right response"
+                    ),
+                ) from exc
+            # flock is refused outright on some filesystems and some exotic
+            # character devices. Carry on unlocked rather than refuse to open:
+            # the lock makes a misdiagnosis impossible, it is not a prerequisite
+            # for talking to the station, and failing here would turn a working
+            # setup into a dead one over a diagnostic.
+            #
+            # But SAY SO, and record it. Without this the guarantee vanished
+            # in silence: an unlocked open was indistinguishable from a
+            # locked one, so the #68 misdiagnosis could come back with
+            # nothing anywhere saying the instrument had never been armed.
+            # railctl's root logger sits at WARNING by default (cli/deps.py),
+            # so this reaches the operator without -v.
+            locked = False
+            _log.warning(
+                "%s refused advisory locking (%s); opening it unlocked, so a second "
+                "process taking this port will not be detected and may look like a silent "
+                "station",
+                self._config.port,
+                exc.strerror or exc,
+            )
+        # No LOCK_UN anywhere: the lock belongs to the open file description and
+        # the kernel drops it when the fd closes, including on a crash. Releasing
+        # it by hand would only create a window in which close() has not yet run.
         try:
             cc = list(termios.tcgetattr(fd)[6])
             cc[termios.VMIN] = 0
@@ -163,11 +261,13 @@ class SerialTransport:
             os.close(fd)
             raise
         self._fd = fd
+        self._lock_held = locked
 
     def close(self) -> None:
         if self._fd is not None:
             os.close(self._fd)
             self._fd = None
+            self._lock_held = False
 
     def __enter__(self) -> SerialTransport:
         self.open()
