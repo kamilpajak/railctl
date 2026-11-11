@@ -2601,13 +2601,50 @@ kernels treat a CDC-ACM node the same way.
 
 ### What this does NOT establish
 
-- **Not that JMRI and railctl have been observed excluding each other.** The lock each takes is
-  read from source on both sides and `flock`'s semantics are measured here, but the two programs
-  have never been run against one port at the same time. That is a single cheap test and it has
-  not been done.
+- ~~Not that JMRI and railctl have been observed excluding each other.~~ **Done — measured the
+  same day, and the section below records it.**
 - **Not anything about Windows.** `railctl` cannot run there at all, `serial_posix.py` importing
   `termios`, and Windows COM ports are exclusive at the OS level anyway, so the question does not
   arise.
 - **Not that `flock` is honoured by every tool.** It is advisory. `cat /dev/ttyACM1`, the vendor's
   YD.Control application and anything else that does not ask for a lock will still open the port,
   and railctl will not notice. That is the deliberate price of not using `TIOCEXCL`.
+
+### Measured both ways against JMRI's own jSerialComm — SETTLED 2026-11-11
+
+The claim above rested on two halves read from source. It is now measured end to end, against
+**the Linux native actually shipped inside the jar JMRI bundles** rather than against the C it is
+built from — `lib/jSerialComm-2.11.4.jar`, sha256
+`b5f7ec40d622864b92dc679159cdbaa3030d37884f0af2deef45b56c16bda7a6`.
+
+Run on a **pty**, never on the station's node: jSerialComm configures and would write to a real
+command station, and what is under test is the lock, not the hardware. Four phases, and the first
+is the control that makes the rest mean anything — a refusal in phase 3 would prove nothing if
+jSerialComm simply could not open a pty.
+
+| phase | who holds the port | who then opens it | result |
+| --- | --- | --- | --- |
+| 1, control | nobody | jSerialComm | **opened** — so this port is openable by it |
+| 2 | jSerialComm | railctl | **refused**, `PortBusy`, "another process holds it" |
+| 3 | railctl | jSerialComm | **refused**, `openPort()` false, `lastErrorCode=11` |
+| 4 | nobody, railctl having closed | jSerialComm | **opened** — released cleanly |
+
+**Phase 3's `lastErrorCode=11` is the decisive number: errno 11 is `EAGAIN`, which is exactly how
+`flock` refuses.** jSerialComm did not fail for some unrelated reason; it failed on railctl's
+lock. In phases 1 and 4 the same field reads 25 (`ENOTTY`, left over from an `ioctl` a pty
+rejects) and is meaningless there, because `openPort()` returned true.
+
+Reproduced with a ten-line Java program on the jar's classpath —
+`SerialPort.getCommPort(path)`, `setBaudRate(57600)`, `openPort()`, reporting
+`getLastErrorCode()` — driven from Python against `SerialTransport`, on a pty from
+`pty.openpty()` whose master is held open throughout.
+
+### What this still does NOT establish
+
+- **Not that JMRI itself was run.** This exercises jSerialComm, which is the component that takes
+  the lock; JMRI's only contribution to the outcome is that it never calls
+  `disableExclusiveLock()`, and that is established by source search rather than by running the
+  application. Doing better needs a full JMRI build and a non-headless JVM, for an increment over
+  what is measured here that is close to nothing.
+- **Still not that `flock` is honoured by every tool.** It remains advisory, and anything that asks
+  for no lock — `cat`, the vendor's YD.Control application — still opens the port unnoticed.
