@@ -2211,25 +2211,33 @@ a better reading of the same one.
 ### What this does NOT establish
 
 - **Not that the banner is a Linux or usbip artefact.** p = 0.159, five cycles against seven.
-- **Not that the banner needs recent contact with the vendor application** — and one specific
-  version of that account is now dead. This was the open question above, and the operator reports
-  that **the station's mains power was never interrupted** between the vendor-application session
-  on the Windows host and the macOS attachment: its own power supply stayed in the socket
-  throughout the move, so the station never restarted. That is **operator recall, not an
-  instrument reading**, and it is recorded as such — the station exposes no uptime counter anybody
-  here knows how to read, so it cannot be checked after the fact.
+- **Not that the station was in the same state on both benches** — and an earlier revision of
+  this file claimed it was. That revision said the operator had reported mains power "never
+  interrupted" between the vendor-application session and the macOS attachment, and concluded
+  that a post-application state had therefore reached that bench and produced nothing. **The
+  conclusion is withdrawn, and so is the premise.** It conflated the plug staying in its socket
+  with the grid staying up, which does not follow: a house-wide outage interrupts power with the
+  plug untouched. Separated properly, three different statements had been run together:
 
-  What it kills: "a power cycle cleared the state". The state, whatever it was, survived into the
-  macOS bench and produced nothing in five comparable cycles. What it leaves standing: a state
-  that **decays**, on a timescale shorter than the roughly one day between the application
-  session of 2026-11-10 and the macOS attachment of 2026-11-11. Continuous power rules out the
-  reset, not the decay.
+  | statement | status |
+  | --- | --- |
+  | the operator did not deliberately switch the station off for months | operator recall, credible |
+  | the power supply stayed in its socket throughout the 10→11 November move | operator recall, credible |
+  | power was not interrupted between 2026-10-14 and 2026-11-11 | **not supportable — household outages did occur, dates unknown** |
 
-  There is a cheaper test of the decay account already in this file, and it cuts against it: the
-  2026-10-14 banner. Whether the configuration tool had been run on or before that date is **not
-  recorded here** — its only dated run is 2026-11-10 — and nobody has yet been asked. If it had
-  not, then a banner was emitted with no recent application contact at all, and the decay account
-  is finished without a single further replug.
+  The third is the statement the inference needed, and it is the one nobody has. For the narrow
+  move window the operator reports no outage, but did not check it, and an outage overnight passes
+  unnoticed. **So a reset is not excluded; it is undocumented.** The station exposes no uptime
+  counter anybody here knows how to read, so this cannot be recovered after the fact.
+
+  The cheaper test of the decay account that this file hoped for **does not exist**, and that is
+  settled rather than pending. Whether the configuration tool had been run on or before
+  2026-10-14 is `unknown`: the operator does not remember nearly a month later, and the only
+  machine in the house carrying a power log is the macOS laptop, whose `pmset` history reaches
+  back only to 2026-11-04 and could not settle it even if it reached further, since a grid outage
+  and an unplugged laptop charger are the same entry in it. Recorded as `unknown` and **not** as
+  "the application had not run" — the same distinction this project enforces for `pom_read`,
+  where silence is not an authoritative no.
 - **Not that DTR reached the wire.** `TIOCMGET` reports what the host believes it is driving, not
   that `SET_CONTROL_LINE_STATE` was accepted. `TIOCMBIC` would settle it, and is cheap for the
   separate reason that every port close lowers DTR anyway, so deasserting it mid-open is not a
@@ -2249,9 +2257,11 @@ this file's own 3/7 baseline by an identical procedure, seven cycles at the cost
 detach and attach rather than seven physical replugs, and — uniquely — the ability to **run the
 vendor application again** and re-test, which is an intervention rather than another observation.
 
-Continuous power is what makes that re-test clean. Both benches now sit roughly one day from the
-application session and neither has restarted, so "time since the vendor application" is matched
-between them for the first time, and a difference in outcome can no longer be attributed to it.
+Continuous power was offered here as what would make that comparison clean. It does not, for the
+reason withdrawn above: the station's power history across the window is unknown. What the
+re-test rests on instead is that it is **within one bench**, against this file's own 3/7 baseline
+by an identical procedure — which needs no assumption about the station's power history at all,
+and is why it was the right next step even on a premise that turned out to be wrong.
 
 Planned: seven attach cycles, five opening at 3 s and two at 120 s, mirroring the delays that
 produced all three Linux hits, with the vendor application **not** run beforehand.
@@ -2262,3 +2272,29 @@ sighting supports it, having occurred on this same host and transport. The predi
 here so that it can fail: if the Linux bench now produces **0 of 7**, then the mechanism is
 time-dependent rather than host-dependent, the macOS zeros were never evidence about platform at
 all, and both benches' zeros share a cause this file has not named.
+
+### A fourth variable nobody measured: time since the station last booted
+
+Raised by the macOS session and adopted here, because it sits in none of the three accounts above.
+With the outage history unknown, the station may have reset at some point between 2026-10-14 and
+now and not seen the vendor application since. That is neither the host, nor the transport, nor
+the time since the application — it is **time since boot**, and it is a free variable in every
+reading this file has offered.
+
+It is also the one variable that is cheap to remove permanently: a **deliberate reset at a noted
+moment** makes it known once and for all, which no amount of replugging can. Hence an order, and
+the order matters because each step destroys what the earlier ones measure:
+
+1. **Seven cycles exactly as they are**, nothing changed — the prediction above, within one bench
+   against its own baseline. Only valid if run first.
+2. **A deliberate reset at a noted time**, then cycles — fixes time since boot.
+3. **The vendor application, then cycles** — fixes time since the application, with boot known.
+
+One correction to that design, which belongs here rather than in the reply that proposed it: only
+the **first** attach cycle after a reset carries a fresh boot. Cycles two onward are warm
+re-enumerations again, so step 2 is one fresh-boot cycle plus six post-boot ones, not seven
+fresh-boot cycles, and reaching n = 7 on the boot variable would need a reset per cycle. Step 2 is
+therefore worth running as n = 1 on the boot itself and n = 7 on the post-boot era. Its first
+cycle is also the best chance so far to watch a banner **arrive**, which nobody has yet managed:
+a cold boot is a stronger candidate for emitting one than the warm re-enumerations, where a reader
+armed from 12.6 ms caught nothing at all.
