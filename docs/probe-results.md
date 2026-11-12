@@ -100,6 +100,33 @@ and nothing suggests anyone has run it against a YD7010. It is worth recording f
 reason: a reader who checks our claim against the best-known open implementation will find it
 disagrees, and should know that was checked rather than missed.
 
+**An absent override is not an absent mechanism — checked 2026-11-11.** JMRI's `lenz/` package
+holds fourteen subdirectories: three are station-specific (`hornbyelite`, `ztc640` with its own
+packetizer, `lzv200`), seven are interface adapters (`li100`, `li100f`, `li101`, `liusb`,
+`liusbethernet`, `liusbserver`, `xntcp`) and four are shared infrastructure. There is an
+established place to encode a station's departures from the Lenz specification, and JMRI uses it
+when a station departs.
+
+The SHAPE of that mechanism matters more here than its size.
+`lenz/hornbyelite/HornbyEliteCommandStation.java` extends `LenzCommandStation` and overrides
+exactly one method — `isOpsModePossible()`. That is a CAPABILITY override on the command-station
+class, which is the same kind of statement as this document's POM-read verdict and its status-bit
+order: one station answers differently from the specification, and the difference is expressed by
+subclassing the station rather than by editing the protocol. Hornby's Elite goes further than the
+one method, replacing the programmer, throttle, throttle manager, turnout, turnout manager and
+connection memo — eight `Elite*` classes in a directory of eleven.
+
+Neither the YD7010 nor its predecessor the Digikeijs DR5000 has any of this. `grep -ri yamorc`
+returns nothing, and the DR5000 appears exactly once, as a javadoc example of a station without
+turnout feedback (`lenz/xnetsimulator/XNetSimulatorAdapter.java:543`). Both greps ran over a
+checkout sparse to `java/src/jmri/jmrix`, which is where every connection implementation lives;
+nothing outside that path was read, and these are negative results, so the scope is part of the
+claim. Neither station needs a connection type of its own, because both emulate LocoNet,
+XpressNet and Z21 — JMRI would drive this one through the generic Lenz package — so this
+establishes that nobody encoded a deviation for this hardware family, NOT that JMRI cannot talk
+to it. Our bit order is a deviation that would require exactly the `isOpsModePossible()` move to
+express.
+
 ### The order is now a measured capability, not a constant
 
 Issue #13. The reading above is still the reading, and it is still the DEFAULT the tool applies
@@ -491,6 +518,29 @@ alter that.
 
 This remains an inference: YaMoRC does not publish a hardware block diagram, and nothing
 found so far states outright that the YD7010 lacks a global detector.
+
+**Independent corroboration of the DR5088RC link — 2026-11-11, documentary, not measured.**
+JMRI names this detector in three files under `java/src/jmri/jmrix/loconet/`, spelled three ways
+by three contributors — which is why it reads as corroboration rather than one note copied
+around:
+
+| file | line | what it says |
+| --- | --- | --- |
+| `messageinterp/LocoNetMessageInterpret.java` | 555-558 | the undocumented `OPC_MULTI_SENSE_LONG` opcode "was observed when using a Digikeijs 5088RC", and with a capable decoder carries "additional Railcom information (direction, speed, QoS)" |
+| `uhlenbrock/LncvMessageContents.java` | 269 | `LNCV_READ_REPLY2`, "for Digikeijs DK5088RC not following specs" |
+| `LncvDevicesManager.java` | 101 | the same undocumented reply format, dated 2022, spelled DR5088 |
+
+**The first row is the one that bears on this inference, and the other two do not.** It ties the
+device to RailCom reporting in code, reverse-engineered independently of the adjacent opcode's
+author. The two LNCV rows are a configuration-reply quirk and mention RailCom nowhere, so they
+corroborate only that the device exists and that JMRI knows it by name. Nor does JMRI "support"
+it in the sense of a class of its own: what exists is an interpretation of an opcode observed
+coming from it, plus a reply-format workaround named after it.
+
+So this is a second source for the DR5088RC being a RailCom detector in this ecosystem, reached
+from code rather than from the YaMoRC manual this inference otherwise rests on alone. It does not
+establish that the YD7010 lacks a global detector — it raises the DR5000 half of the chain from
+one source to two.
 
 ### POM WRITE works, even though POM read does not
 
