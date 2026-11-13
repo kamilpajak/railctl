@@ -53,6 +53,13 @@ uv run pytest -m hardware -s      # needs the YD7010 attached; deselected by def
 ## Things that will bite you
 
 - **Layering is enforced mechanically** by `tests/test_layering.py`, which greps rather than imports, so it also covers code no test exercises. `station/` and `cli/` may not name framing bytes, port names, `socket`, or any word starting with `tty` — not even inside a comment. All CV arithmetic lives in `xbus/cv.py`. Only `errors.py` defines a class whose name ends in `Error`, `Exception` or `Timeout`. When a guard fires on your code, fix the code; narrowing the guard to silence one false positive once blinded it to 21 classes.
+- **A version bump needs `uv sync --reinstall-package railctl`, not `uv sync --frozen`.**
+  Nothing in `uv.lock` changes when `__version__` does - the project is recorded as
+  `source = { editable = "." }` with no version field - so `--frozen` reports "Checked 17
+  packages" and does nothing, and the editable install keeps serving the old metadata.
+  `tests/unit/test_version.py::test_the_installed_distribution_agrees_with_the_module` then
+  fails on the bench and passes in CI, which builds its environment from scratch. A test that
+  is red only locally reads as flaky and is not. Measured on the 0.4.0 bump.
 - **Restoring a file with `git checkout` leaves stale bytecode.** Same size, same-second mtime, so Python keeps running the `.pyc` built from the broken version. After any deliberate break-and-restore, re-run with `PYTHONDONTWRITEBYTECODE=1`.
 - **Hypothesis derandomizes itself when it sees `CI` in the environment**, so a CI job that names no profile runs `default` with a value never declared. Every CI job sets `HYPOTHESIS_PROFILE` explicitly.
 - **`FakeTransport` raises on an unscripted request rather than timing out.** A test that wants silence must script it: `expect(request, reply=b"")`. Silence by omission is a different thing.

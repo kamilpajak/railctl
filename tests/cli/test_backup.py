@@ -19,6 +19,7 @@ from pathlib import Path
 import pytest
 from typer.testing import CliRunner
 
+import railctl
 import railctl.cli.commands.backup as backup_module
 from railctl.backup import BACKUP_SCHEMA, CAVEAT_ZERO_IS_NOT_PROOF, SWEEP_CAVEATS, read_backup
 from railctl.catalog import curated_cvs, load_catalog
@@ -319,6 +320,36 @@ def test_backup_json_result_is_the_file_document_plus_the_path(monkeypatch, tmp_
     assert summary["complete"] is True
     assert "interrupted" not in body
     assert PROG_TRACK_NOTICE in result.stderr
+
+
+def test_the_document_stamp_names_this_version_rather_than_a_literal(monkeypatch, tmp_path):
+    """The `tool` field reads `railctl.__version__`, and nothing asserted that until now.
+
+    That one line carries the longest comment in `cli/commands/backup.py`, because on
+    the 0.2.0 bump it stamped every file `railctl 0.1.0` while `railctl version` said
+    0.2.0: it was reading the installed distribution's metadata instead of the module.
+    The fix landed and the guard did not. `railctl version` has one
+    (`tests/cli/test_wiring.py`, asserted against the attribute), and a backup carries
+    its `tool` string forward for years, which is the longer-lived of the two.
+
+    Asserted against the attribute, never a literal - a literal here turns every
+    release into a test edit, which is how a release ships with the previous number
+    still asserted.
+
+    What this does and does not constrain, so the next reader does not have to find
+    out: it kills a literal, and it kills the field being dropped or renamed. It does
+    NOT distinguish `__version__` from `metadata.version("railctl")`, because in any
+    environment where those two disagree
+    `tests/unit/test_version.py::test_the_installed_distribution_agrees_with_the_module`
+    has already failed - that test is the detector for the disagreement, this one is
+    the detector for the literal, and the pair is what covers the 0.2.0 defect.
+    """
+    _install(monkeypatch, FakeBackupStation())
+    out = tmp_path / "stamped.json"
+    result = runner.invoke(app, ["backup", "--address", "3", "--out", str(out)])
+    assert result.exit_code == 0, result.stderr
+    document = json.loads(out.read_text(encoding="utf-8"))
+    assert document["tool"] == f"railctl {railctl.__version__}"
 
 
 def test_a_station_proving_only_the_z21_opcodes_still_reads_the_curated_cvs_above_255(

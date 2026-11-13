@@ -6,6 +6,8 @@ All notable changes to this project are documented in this file. The format foll
 
 ## [Unreleased]
 
+## [0.4.0] - 2026-11-12
+
 ### Added
 
 - **`--target auto` now finds the station on Linux as well as macOS.** Discovery globs
