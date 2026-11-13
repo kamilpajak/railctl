@@ -563,6 +563,13 @@ value back — verification requires the programming track.
 
 ### Next step for R1
 
+**This step cannot discriminate on this bench — 2026-11-13.** With no RailCom module fitted
+(see "The bench has no RailCom detector at all"), both of its branches below predict the same
+failure: the vendor tool would report "No Reed - No read result" whether or not the capability
+exists in the station. Run as written it would produce a silence that answers nothing. It becomes
+informative only once a detector is fitted, so until then R1 is open for want of hardware rather
+than for want of a test.
+
 Read any CV through the YaMoRC tool's own **"Loco POM"** mode (Prog.Track CV Programming
 → Mode → Loco POM). That tool has a dedicated "No Reed — No read result" status, so the
 vendor anticipates this failure.
@@ -898,6 +905,9 @@ decoder is present and there is no RailCom detector" from "nothing was there". `
 already records that ambiguity — pointing the doctor at an address with no decoder produces the
 same result. Settling it needs a second decoder on the rolling road while the first stays on the
 programming track.
+
+**Closed 2026-11-13** — by a re-run that moved the one decoder instead of adding a second. See
+"M6 re-run with the decoder on the energised main track".
 
 **Window 1 of stage 2 was not stressed.** Locomotive 3 entered the run with a stored speed of 0,
 so the gap between energising and holding had nothing to resume. That window was measured
@@ -2698,3 +2708,76 @@ Reproduced with a ten-line Java program on the jar's classpath —
   what is measured here that is close to nothing.
 - **Still not that `flock` is honoured by every tool.** It remains advisory, and anything that asks
   for no lock — `cat`, the vendor's YD.Control application — still opens the port unnoticed.
+
+## M6 re-run with the decoder on the energised main track — PASSED 2026-11-13
+
+The 2026-08-10 M6 run left one thing open, in its own words: D4's silence was "trivial" because
+the rolling road was empty, so that run could not separate "a decoder is present and there is no
+RailCom detector" from "nothing was there". This run separates them.
+
+**Bench:** railctl 0.4.0, Linux (WSL2 + usbipd), XpressNet on the `-if02` node. Locomotive 3
+(ZIMO MS450P22) on the PROGRAMMING track for stage 1, then **moved to the rolling road, with the
+track dead, at stage 2's own gate** — one decoder in two places across the run, instead of the
+two decoders the August note said it would take. Four stages, all four passed, 6 h 47 min of
+wall clock, nearly all of it gates waiting on the operator.
+
+**Locomotive 3 did not turn a wheel at any point, in any stage.** Watched by the owner. A green
+run with a locomotive that moved is a failed acceptance, and no assertion in that file can make
+the call.
+
+**Final status byte: `0x07`** — the same value the August run ended on.
+
+### What this settles about R1
+
+Stage 1 read the decoder's identity in service mode minutes earlier, in the same session:
+`CV28 = 3`, so RailCom channel 2 was enabled, alongside `CV8 = 145` and `CV29 = 14`. Stage 2
+then energised the main track with that decoder standing on it and sent three POM reads:
+
+```
+D4  POM read  ok   POM read produced no result at all (neither 61 13 nor 61 82)
+                   after 3 attempts
+pom_read: false    pom_read_provenance: "silence"    pom_result_channel: "none"
+```
+
+The silence held with a decoder present, powered, and configured exactly as a POM read requires.
+**"Nothing was there" is excluded**, and the ambiguity the August run recorded about its own D4
+is closed.
+
+### The bench has no RailCom detector at all — operator-reported 2026-11-13
+
+Asked directly, the owner confirms that **no RailCom feedback module of any kind is fitted** to
+this layout: no DR5088RC, no YD6016LN-RC, none of the modules the manual lists. This is reported
+by the operator, not measured by us, and it is recorded because it changes what the remaining R1
+experiments can show.
+
+It does **not** promote the RailCom-detector inference to a cause. The note at the top of R1 still
+outranks it: the XpressNet specification marks POM CV *read* as a *(future feature)*, so a station
+that acknowledges and then says nothing may simply be answering a request the protocol never
+finished defining. What the detector fact does is remove a confound. The manual states that
+RailCom information is shown only when such a module is fitted, so this bench has never once been
+in a configuration where a POM read could have succeeded, whatever the station's internals do.
+
+`pom_read = false` from silence is therefore correct here for a reason now known, and **the code
+needs no change**. In particular nothing was added to `pom_read_provenance`: whether a detector is
+bolted to the rails is a fact about the layout, not an event on the wire, so railctl cannot measure
+it and must not carry a field that claims it. The place for it is this document and D4's own hint,
+which already names the detector as the thing to check before suspecting the decoder.
+
+### A cheap second opinion on the status-bit order, noted and not taken
+
+Before anything was energised, `railctl status` read `raw_hex: 0x06`. That value is worth writing
+down because, unlike the `0x04` and `0x07` this bench usually sits in, it does **not** fit both
+manuals. Under `lenz_23151` (bit 0 emergency stop, bit 1 emergency off — the order measured here)
+`0x06` is a dead track with no stop; under `lenz_spec` it is a live track under an emergency stop.
+The two readings predict **opposite physical states for the same byte**.
+
+railctl's own `track_power` cannot be the witness. It is derived as `not emergency_off`
+(`xbus/replies.py`, the `track_power` property) from the mask of whichever order is configured, so
+reading it back as confirmation is circular — it hands back the assumption under test. That
+mistake was made and withdrawn while interpreting this run, which is why it is written down here
+rather than left as a lesson for the next person to repeat. The witness has to be the panel LED or
+the rails themselves.
+
+Nobody read the LED at that moment, so this is an opportunity noted, not a measurement: **next
+time the byte shows `0x06`, look at the panel.** It would settle the bit order without D13's
+`--measure-status-bits`, which holds the whole layout in order to do it.
