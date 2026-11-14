@@ -564,11 +564,11 @@ value back — verification requires the programming track.
 ### Next step for R1
 
 **This step cannot discriminate on this bench — 2026-11-13.** With no RailCom module fitted
-(see "The bench has no RailCom detector at all"), both of its branches below predict the same
-failure: the vendor tool would report "No Reed - No read result" whether or not the capability
-exists in the station. Run as written it would produce a silence that answers nothing. It becomes
-informative only once a detector is fitted, so until then R1 is open for want of hardware rather
-than for want of a test.
+(see "The bench has no RailCom detector at all"), the two hypotheses it is meant to separate — the
+station can read via POM, or it cannot — predict the same outcome: the vendor tool would report
+"No Reed — No read result" either way. Run as written it would produce a silence that answers
+nothing. It becomes informative only once a detector is fitted, so until then R1 is open for want
+of hardware rather than for want of a test.
 
 Read any CV through the YaMoRC tool's own **"Loco POM"** mode (Prog.Track CV Programming
 → Mode → Loco POM). That tool has a dedicated "No Reed — No read result" status, so the
@@ -906,8 +906,11 @@ already records that ambiguity — pointing the doctor at an address with no dec
 same result. Settling it needs a second decoder on the rolling road while the first stays on the
 programming track.
 
-**Closed 2026-11-13** — by a re-run that moved the one decoder instead of adding a second. See
-"M6 re-run with the decoder on the energised main track".
+**Narrowed 2026-11-13, not closed.** A re-run put the one decoder on the rolling road at stage 2
+instead of adding a second, and D4 was silent again. That excludes an empty track by placement
+only: nothing in the run measured the decoder's contact with the rollers. See "M6 re-run with the
+decoder on the energised main track". The strong evidence that a live decoder on the main track
+gets no POM answer is still R1's own, from 2026-08-04, where the headlight was switched and seen.
 
 **Window 1 of stage 2 was not stressed.** Locomotive 3 entered the run with a stored speed of 0,
 so the gap between energising and holding had nothing to resume. That window was measured
@@ -2713,7 +2716,8 @@ Reproduced with a ten-line Java program on the jar's classpath —
 
 The 2026-08-10 M6 run left one thing open, in its own words: D4's silence was "trivial" because
 the rolling road was empty, so that run could not separate "a decoder is present and there is no
-RailCom detector" from "nothing was there". This run separates them.
+RailCom detector" from "nothing was there". This run narrows that — by placement, not by
+measurement, as "What this does not add" below explains.
 
 **Bench:** railctl 0.4.0, Linux (WSL2 + usbipd), XpressNet on the `-if02` node. Locomotive 3
 (ZIMO MS450P22) on the PROGRAMMING track for stage 1, then **moved to the rolling road, with the
@@ -2727,11 +2731,11 @@ the call.
 
 **Final status byte: `0x07`** — the same value the August run ended on.
 
-### What this settles about R1
+### What this adds
 
-Stage 1 read the decoder's identity in service mode minutes earlier, in the same session:
-`CV28 = 3`, so RailCom channel 2 was enabled, alongside `CV8 = 145` and `CV29 = 14`. Stage 2
-then energised the main track with that decoder standing on it and sent three POM reads:
+Stage 1 read the decoder's identity in service mode in the same session: `CV28 = 3` (RailCom
+channel 2 enabled), `CV8 = 145`, `CV29 = 14`. Stage 2 then energised the main track with that
+decoder placed on the rolling road and sent three POM reads:
 
 ```
 D4  POM read  ok   POM read produced no result at all (neither 61 13 nor 61 82)
@@ -2739,9 +2743,31 @@ D4  POM read  ok   POM read produced no result at all (neither 61 13 nor 61 82)
 pom_read: false    pom_read_provenance: "silence"    pom_result_channel: "none"
 ```
 
-The silence held with a decoder present, powered, and configured exactly as a POM read requires.
-**"Nothing was there" is excluded**, and the ambiguity the August run recorded about its own D4
-is closed.
+So the shipped `doctor` — not the frozen probe — now records `pom_read = false` from silence with
+a decoder placed on the main track, on the Linux bench, instead of over an empty rolling road. The
+M6 run's own D4 is no longer trivially empty.
+
+### What this does not add
+
+**Evidence that the decoder was electrically present.** Nothing in the run measured the decoder's
+contact with the rollers during stage 2. `CV28 = 3` was read on the programming track, before the
+move. D11 and D12 are acknowledged by the station, not by the decoder. A locomotive that does not
+move is equally consistent with no contact at all. The owner heard nothing from the decoder and did
+not watch the headlights — and the headlights could not have told either way, because D12 sends
+F0 **off**. Poor contact on a rolling road is exactly the case "nothing was there", so placement
+narrows the August ambiguity without closing it.
+
+**Anything to R1.** R1 already measured this silence with a decoder on the main track that was
+**proven live**: on 2026-08-04 `E4 F8 00 03 40` switched its headlight on, confirmed visually, and
+POM reads of CV1, CV8 and CV29 were silent across 8 s windows and a 30 s capture, with `CV28 = 3`
+and `CV29 = 14` read back the same day. That remains the strongest evidence in this file that a
+live, correctly configured decoder gets no POM answer from this station. On presence this re-run
+is weaker than R1, and it adds nothing to it.
+
+**What would make a future run a witness:** the check R1 used — F0 **on** for address 3 with the
+track energised, and the headlight seen lit, with the locomotive left exactly where it stays for the
+POM reads. It is a function command, not a CV write. The M6 file does not do it, and D12's F0 off
+would undo it, so it has to be done and observed around the run rather than inside it.
 
 ### The bench has no RailCom detector at all — operator-reported 2026-11-13
 
@@ -2763,26 +2789,23 @@ bolted to the rails is a fact about the layout, not an event on the wire, so rai
 it and must not carry a field that claims it. The place for it is this document and D4's own hint,
 which already names the detector as the thing to check before suspecting the decoder.
 
-### A cheap second opinion on the status-bit order, noted and not taken
+### The `0x06` reading agrees with the settled bit order
 
-Before anything was energised, `railctl status` read `raw_hex: 0x06`. That value is worth writing
-down because, unlike the `0x04` and `0x07` this bench usually sits in, it does **not** fit both
-manuals. Under `lenz_23151` (bit 0 emergency stop, bit 1 emergency off — the order measured here)
-`0x06` is a dead track with no stop; under `lenz_spec` it is a live track under an emergency stop.
-The two readings predict **opposite physical states for the same byte**.
+Before anything was energised, `railctl status` read `raw_hex: 0x06`. That byte has exactly one of
+the two disputed bits set, so it is one of the states that tell the two manuals apart — and it has
+already been measured with a witness. "Status byte: bits 0 and 1 are the reverse of the Lenz spec
+— SETTLED 2026-08-05" records `21 80` → `62 22 06` with the panel LED **red** and the track voltage
+off. Nobody read the LED on 2026-11-13, so this reading adds nothing to that measurement. It is
+recorded because an earlier draft of this section offered `0x06` as a way to settle the order, when
+the order was settled three months before by exactly that byte and exactly that witness.
 
-railctl's own `track_power` cannot be the witness. It is derived as `not emergency_off`
-(`xbus/replies.py`, the `track_power` property) from the mask of whichever order is configured, so
-reading it back as confirmation is circular — it hands back the assumption under test. That
-mistake was made and withdrawn while interpreting this run, which is why it is written down here
-rather than left as a lesson for the next person to repeat. The witness has to be the panel LED or
-the rails themselves.
+railctl's own `track_power` could not have been the witness either. It is derived as
+`not emergency_off` (`xbus/replies.py`, the `track_power` property) from the mask of whichever
+order is configured, so reading it back as confirmation is circular — it hands back the assumption
+under test. That mistake was made and withdrawn while interpreting this run. The witness for the
+bit order is the panel LED, and it has already been read.
 
-Nobody read the LED at that moment, so this is an opportunity noted, not a measurement: **next
-time the byte shows `0x06`, look at the panel.** It would settle the bit order without D13's
-`--measure-status-bits`, which holds the whole layout in order to do it.
-
-### Repeated 2026-11-14, identically — the silence is reproducible
+### Repeated 2026-11-14, identically
 
 The whole file was run again the next day, same bench, same choreography (loco 3 on the
 programming track for stage 1, moved to the rolling road at stage 2's gate with the track dead).
@@ -2794,26 +2817,22 @@ Every value that mattered came back the same:
 | | 2026-11-13 | 2026-11-14 |
 | --- | --- | --- |
 | stage 1, decoder on the programming track | `CV8=145`, `CV1=3`, `CV28=3`, `CV29=14`; D5–D7, D9 `ok` | identical |
-| stage 2, decoder on the energised main track | POM read silent after 3 attempts; `pom_read: false`, `pom_read_provenance: "silence"`, `pom_result_channel: "none"` | identical |
-| stage 2, D5/D6/D9 with the decoder off the programming track | `unknown`, while `capabilities` kept `service_direct_cv: true` | identical |
+| stage 2, decoder placed on the energised main track | POM read silent after 3 attempts; `pom_read: false`, `pom_read_provenance: "silence"`, `pom_result_channel: "none"` | identical |
+| stage 2, D5–D7 and D9 with the decoder off the programming track | `unknown`, while `capabilities` kept `service_direct_cv: true` | identical |
 | stage 3 | `61 00` decoded as `power.off` | identical |
 | stage 4 | `0x07`, `changed: false` | identical |
 
-**What the repeat adds:** `pom_read = false` from silence now rests on two independent runs with
-the decoder demonstrably present, powered and `CV28 = 3`, rather than on one. A single silent run
-could have been a one-off on the wire; two cannot be dismissed that way.
+**What the repeat adds:** the doctor's silence with the decoder placed on the main track
+reproduces. It was not a one-off of the 2026-11-13 run.
 
-**What it does not add:** nothing whatsoever about the cause. Both runs are the same station, the
-same decoder, the same absent detector and the same usbip transport. A silence that reproduces is
-still a silence measured in one configuration, so the R1 verdict is unchanged — open for want of a
-RailCom detector, with the XpressNet specification's *(future feature)* note still outranking every
-inference about the detector.
+**What it does not add:** contact was not measured this time either — the owner heard nothing and
+did not watch the headlights, which D12 had switched off in any case. Nor does it add anything about
+the cause. On transport the record as a whole is better than either run: R1's silence was measured
+on macOS with the station on native USB, these two on Linux through usbip, so usbip is not the
+cause. The R1 verdict is unchanged — open for want of a RailCom detector to test with, with the
+XpressNet specification's *(future feature)* note still outranking every inference about the
+detector.
 
-Two incidental notes from the repeat:
-
-- **The `0x06` opportunity did not recur.** `railctl status` read `0x07` before anything was
-  energised, which fits both manuals and therefore discriminates nothing. The instruction above
-  stands: next time the byte shows `0x06`, look at the panel LED.
-- **A second witness for the D5 wording defect.** Stage 2 again printed `decoder answered 61 13 on
-  the programming track` while the programming track was empty and the decoder was on the rolling
-  road. Same line, same run shape, filed as issue #80.
+**A second witness for the D5 wording defect.** Stage 2 again printed `decoder answered 61 13 on
+the programming track` while the programming track was empty and the decoder was on the rolling
+road. Same line, same run shape, filed as issue #80.
