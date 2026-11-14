@@ -2781,3 +2781,39 @@ the rails themselves.
 Nobody read the LED at that moment, so this is an opportunity noted, not a measurement: **next
 time the byte shows `0x06`, look at the panel.** It would settle the bit order without D13's
 `--measure-status-bits`, which holds the whole layout in order to do it.
+
+### Repeated 2026-11-14, identically — the silence is reproducible
+
+The whole file was run again the next day, same bench, same choreography (loco 3 on the
+programming track for stage 1, moved to the rolling road at stage 2's gate with the track dead).
+**4 passed in 332.68 s**, and locomotive 3 again did not turn a wheel in any stage — watched by
+the owner. Final status byte `0x07` once more.
+
+Every value that mattered came back the same:
+
+| | 2026-11-13 | 2026-11-14 |
+| --- | --- | --- |
+| stage 1, decoder on the programming track | `CV8=145`, `CV1=3`, `CV28=3`, `CV29=14`; D5–D7, D9 `ok` | identical |
+| stage 2, decoder on the energised main track | POM read silent after 3 attempts; `pom_read: false`, `pom_read_provenance: "silence"`, `pom_result_channel: "none"` | identical |
+| stage 2, D5/D6/D9 with the decoder off the programming track | `unknown`, while `capabilities` kept `service_direct_cv: true` | identical |
+| stage 3 | `61 00` decoded as `power.off` | identical |
+| stage 4 | `0x07`, `changed: false` | identical |
+
+**What the repeat adds:** `pom_read = false` from silence now rests on two independent runs with
+the decoder demonstrably present, powered and `CV28 = 3`, rather than on one. A single silent run
+could have been a one-off on the wire; two cannot be dismissed that way.
+
+**What it does not add:** nothing whatsoever about the cause. Both runs are the same station, the
+same decoder, the same absent detector and the same usbip transport. A silence that reproduces is
+still a silence measured in one configuration, so the R1 verdict is unchanged — open for want of a
+RailCom detector, with the XpressNet specification's *(future feature)* note still outranking every
+inference about the detector.
+
+Two incidental notes from the repeat:
+
+- **The `0x06` opportunity did not recur.** `railctl status` read `0x07` before anything was
+  energised, which fits both manuals and therefore discriminates nothing. The instruction above
+  stands: next time the byte shows `0x06`, look at the panel LED.
+- **A second witness for the D5 wording defect.** Stage 2 again printed `decoder answered 61 13 on
+  the programming track` while the programming track was empty and the decoder was on the rolling
+  road. Same line, same run shape, filed as issue #80.
