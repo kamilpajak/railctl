@@ -2740,8 +2740,8 @@ What the two runs do and do not show:
   the YD7010 transmits a POM read at all under that hold is not recorded anywhere in this file, so
   D4's silence and R1's are not yet shown to be the same measurement. Issue #81.
 - **D5's message was wrong again.** Stage 2 printed `decoder answered 61 13 on the programming
-  track` with that track empty, the same shape as the 2026-08-12 re-probe — at least the third
-  time. Issue #80.
+  track` with that track empty, on both days. The 2026-08-12 re-probe hit the same condition; what
+  its message said then is not recorded. Issue #80.
 
 ### No external RailCom module is fitted — operator-reported 2026-11-13
 
