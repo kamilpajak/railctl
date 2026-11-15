@@ -563,6 +563,9 @@ value back — verification requires the programming track.
 
 ### Next step for R1
 
+**2026-11-13:** the owner reports that no external RailCom detector module is fitted to this
+layout — see "No RailCom detector is fitted". The step below was written before that was known.
+
 Read any CV through the YaMoRC tool's own **"Loco POM"** mode (Prog.Track CV Programming
 → Mode → Loco POM). That tool has a dedicated "No Reed — No read result" status, so the
 vendor anticipates this failure.
@@ -898,6 +901,12 @@ decoder is present and there is no RailCom detector" from "nothing was there". `
 already records that ambiguity — pointing the doctor at an address with no decoder produces the
 same result. Settling it needs a second decoder on the rolling road while the first stays on the
 programming track.
+
+**See also 2026-08-12 and 2026-11-13/14.** The post-firmware re-probe of 2026-08-12 ran
+`--power-on` with locomotive 3 on the rollers and recorded the same total silence — "Station
+firmware updated (KLUG) — re-probed 2026-08-12". The M6 file was run the same way on Linux on
+2026-11-13 and 2026-11-14 — "M6 on Linux with the decoder on the rollers". No measurement of the
+decoder's contact with the rollers is recorded for any of these runs.
 
 **Window 1 of stage 2 was not stressed.** Locomotive 3 entered the run with a stored speed of 0,
 so the gap between energising and holding had nothing to resume. That window was measured
@@ -2698,3 +2707,43 @@ Reproduced with a ten-line Java program on the jar's classpath —
   what is measured here that is close to nothing.
 - **Still not that `flock` is honoured by every tool.** It remains advisory, and anything that asks
   for no lock — `cat`, the vendor's YD.Control application — still opens the port unnoticed.
+
+## M6 on Linux with the decoder on the rollers — PASSED 2026-11-13, repeated 2026-11-14
+
+The whole M6 acceptance file, run twice on the Linux bench (railctl 0.4.0, WSL2 + usbipd,
+XpressNet on `-if02`). Four of four stages passed both days: 24450.46 s the first time, nearly all
+of it gates waiting on the operator, and 332.68 s the second. Locomotive 3 was on the programming
+track for stage 1; at stage 2's gate the owner moved it to the rollers — confirmed for both days
+when asked on 2026-11-15.
+
+**Recorded output.** Identical on both days in every field quoted below except D2, which reads the station's state at the
+start of each doctor run: on 2026-11-13 "track power off, emergency_stop=False,
+auto_start_mode=True, service_mode=False", on 2026-11-14 the same with `emergency_stop=True`, in
+both stage 1 and stage 2.
+
+| stage | recorded |
+| --- | --- |
+| 1 | D5 `CV8=145`, D6 `CV1=3`, D7 ok, D9 `CV28=3`, `CV29=14` |
+| 2 | D3 ok: "track power turned on, then the whole layout was held and loco 3 was sent speed 0; the hold is re-asserted and read back at the end of the run" |
+| 2 | D4: "POM read produced no result at all (neither 61 13 nor 61 82) after 3 attempts; …"; `pom_read: false`, `pom_read_provenance: "silence"`, `pom_result_channel: "none"` |
+| 2 | D5: "decoder answered 61 13 on the programming track"; D6: "decoder answered 61 13"; D7: "CV8's band gave no conclusive result within the service-mode budget"; D9: "…; no identity CV was read (['ServiceEncodingUnknownError'])" |
+| 3 | `61 00 61` decoded as `power.off` |
+| 4 | `power off` with `changed: false`; final status byte `0x07` |
+
+**Reported by the owner:** locomotive 3 did not move during stage 2, either day (asked about stage
+2 only). Asked on 2026-11-14 about stage 2 on either day, the owner reported hearing nothing from
+the decoder and not watching the headlights.
+
+**Not measured:** the decoder's contact with the rollers.
+
+This is the layout configuration of "Station firmware updated (KLUG) — re-probed 2026-08-12" —
+locomotive 3 on the rollers and off the programming track, `--power-on` — on a different host, with
+the same D4 result. Open questions from these runs are in issues #81 (D4 runs after D3's hold) and
+#80 (D5's and D6's messages).
+
+### No RailCom detector is fitted — operator-reported 2026-11-13
+
+Asked whether any RailCom detector is fitted to this layout, with the DR5088RC given as an example
+and a detector described as a separate module on the rails, the owner answered that there is none.
+This covers external modules only, not a receiver inside the station. Operator-reported, not
+measured.
