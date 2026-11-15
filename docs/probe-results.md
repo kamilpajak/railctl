@@ -563,18 +563,8 @@ value back — verification requires the programming track.
 
 ### Next step for R1
 
-**Read this step with the bench in mind — 2026-11-13.** It means something only under two
-conditions the step does not state: the decoder on the **main track** (the rollers), since a read
-on the programming output says nothing about the path D4 uses; and the decoder **shown live there**
-first, by a function command and a lit headlight, as R1 did on 2026-08-04. No RailCom detector is
-fitted to this layout (operator-reported; see "No RailCom detector is fitted"). Under those
-conditions a **success** would be decisive: with no detector it could only come from a receiver
-inside the station, which candidate 2 above holds absent by inference only, and it would put the
-gap in XpressNet as railctl uses it — the station's implementation or railctl's own request. A
-**failure** would say much less than the second bullet below assumes. It rules out only an onboard
-receiver hidden behind such a gap; it cannot tell a station with no receiver from any other
-station-side cause, such as the cut-out not being generated. Read as "POM read is unavailable on
-this hardware", it would describe the bench as fitted, not the station.
+**2026-11-13:** the owner reports that no RailCom detector is fitted to this layout — see "No
+RailCom detector is fitted". The step below was written before that was known.
 
 Read any CV through the YaMoRC tool's own **"Loco POM"** mode (Prog.Track CV Programming
 → Mode → Loco POM). That tool has a dedicated "No Reed — No read result" status, so the
@@ -912,13 +902,11 @@ already records that ambiguity — pointing the doctor at an address with no dec
 same result. Settling it needs a second decoder on the rolling road while the first stays on the
 programming track.
 
-**Narrowed 2026-08-12, not closed.** Two days later the post-firmware re-probe ran `--power-on`
-with locomotive 3 on the rollers and got the same total silence — see "Station firmware updated
-(KLUG) — re-probed 2026-08-12". Reproduced on Linux on 2026-11-13 and 2026-11-14, see "M6 on Linux
-with the decoder on the rollers". None of those runs measured the decoder's contact with the
-rollers. The evidence that a decoder proven live on the main track gets no POM answer is R1's own,
-from 2026-08-04, whose hold state was not recorded. Every D4 recorded since 2026-08-10 came from a
-`--power-on` run on a dead track, which D3 holds before D4 runs (issue #81).
+**See also 2026-08-12 and 2026-11-13/14.** The post-firmware re-probe of 2026-08-12 ran
+`--power-on` with locomotive 3 on the rollers and recorded the same total silence — "Station
+firmware updated (KLUG) — re-probed 2026-08-12". The M6 file was run the same way on Linux on
+2026-11-13 and 2026-11-14 — "M6 on Linux with the decoder on the rollers". No measurement of the
+decoder's contact with the rollers is recorded for any of these runs.
 
 **Window 1 of stage 2 was not stressed.** Locomotive 3 entered the run with a stored speed of 0,
 so the gap between energising and holding had nothing to resume. That window was measured
@@ -2723,49 +2711,32 @@ Reproduced with a ten-line Java program on the jar's classpath —
 ## M6 on Linux with the decoder on the rollers — PASSED 2026-11-13, repeated 2026-11-14
 
 The whole M6 acceptance file, run twice on the Linux bench (railctl 0.4.0, WSL2 + usbipd,
-XpressNet on `-if02`). Four of four stages passed both days — 6 h 47 min the first time, nearly
-all of it gates waiting on the operator, and 332.68 s the second. Locomotive 3 sat on the
-programming track for stage 1 and was moved to the rollers at stage 2's gate with the track dead —
-confirmed by the owner for both days when asked on 2026-11-15 — so one decoder covered both
-halves. Final status byte `0x07` both days.
+XpressNet on `-if02`). Four of four stages passed both days: 24450.46 s the first time, nearly all
+of it gates waiting on the operator, and 332.68 s the second. Locomotive 3 was on the programming
+track for stage 1; at stage 2's gate the owner moved it to the rollers — confirmed for both days
+when asked on 2026-11-15.
 
-**This reproduces "Station firmware updated (KLUG) — re-probed 2026-08-12" on Linux; it is not a
-new result.** Stage 1 read `CV8 = 145`, `CV1 = 3`, `CV28 = 3` and `CV29 = 14` in service mode.
-Stage 2's D4 got no result to three POM reads: `pom_read: false`, `pom_read_provenance:
-"silence"`, `pom_result_channel: "none"`. Identical both days, and the same as on 2026-08-12.
+**Recorded output, identical on both days:**
 
-What the two runs do and do not show:
+| stage | recorded |
+| --- | --- |
+| 1 | D5 `CV8=145`, D6 `CV1=3`, D7 ok, D9 `CV28=3`, `CV29=14` |
+| 2 | D3 ok: "track power turned on, then the whole layout was held and loco 3 was sent speed 0; the hold is re-asserted and read back at the end of the run" |
+| 2 | D4: "POM read produced no result at all (neither 61 13 nor 61 82) after 3 attempts"; `pom_read: false`, `pom_read_provenance: "silence"`, `pom_result_channel: "none"` |
+| 2 | D5 and D6: "decoder answered 61 13 on the programming track"; D7: "CV8's band gave no conclusive result within the service-mode budget"; D9: "no identity CV was read (['ServiceEncodingUnknownError'])" |
+| 3 | `61 00 61` decoded as `power.off` |
+| 4 | `power off` with `changed: false`; final status byte `0x07` |
 
-- **The placement is reported; the contact is not measured.** The data agree with the move: the
-  programming track stopped answering after stage 1 — D5 and D6 `unknown` on `61 13`, D7 with no
-  conclusive result within the service-mode budget, and D9 then refusing to read because no
-  service encoding had been proven in the run. That alone would not prove the decoder left, since
-  `61 13` has been seen with it still on that track ("The programming-track output latches off
-  after an overload, and nothing reports it", "The session gap crosses invocations"). Nothing
-  measured the decoder's contact with the rollers. The owner heard nothing and did not watch the
-  headlights; had they been lit, seeing them go out at D12 (F0 off) would have shown contact.
-- **Locomotive 3 did not move during stage 2**, either day — the owner was asked and answered. No
-  movement was reported in the other stages, which the owner was not asked about separately.
-- **D4's reads were sent after D3's `80 80` was acknowledged.** D3 energised the dead track and
-  sent `80 80` (`hold_applied: true`); nothing releases that hold before D4, but nothing reads the
-  status at that moment either — the `held: true` in both outputs is the end-of-run read-back,
-  taken after the hold is re-asserted. A doctor run that finds the track already live does not hold
-  it at all. R1's reads of 2026-08-04 did not record the hold state, and the 2026-08-06 doctor runs
-  — including the one `61 13` — predate D3 holding anything. Whether the YD7010 transmits a POM
-  read under `80 80` is not recorded, so D4's silence and the earlier ones are not yet shown to be
-  the same measurement. Issue #81.
-- **D5's message was wrong again.** Stage 2 printed `decoder answered 61 13 on the programming
-  track` with that track empty, on both days. The 2026-08-12 re-probe hit the same condition; what
-  its message said then is not recorded. Issue #80.
+**Reported by the owner:** locomotive 3 did not move during stage 2, either day (asked about stage
+2 only). The owner heard nothing from the decoder and did not watch the headlights.
+
+**Not measured:** the decoder's contact with the rollers.
+
+This is the configuration of "Station firmware updated (KLUG) — re-probed 2026-08-12", with the
+same D4 result. Open questions from these runs are in issues #81 (D4 runs after D3's hold) and #80
+(D5's message).
 
 ### No RailCom detector is fitted — operator-reported 2026-11-13
 
-Asked directly whether any RailCom detector is fitted to this layout, with the DR5088RC given as an
-example, the owner answered that there is none. Operator-reported, not measured; the owner was not
-taken through the manual's full list of receiving modules.
-
-It does not settle R1. Whether the YD7010 has a receiver of its own is still the inference of
-candidate 2, and the XpressNet note at the top of R1 outranks that inference. What it changes is
-how the remaining experiment reads; see the note under "Next step for R1". Nothing is added to
-`pom_read_provenance` for it: whether a detector is bolted to the rails is a fact about the layout,
-not an event on the wire, so railctl cannot measure it and must not carry a field that claims it.
+Asked whether any RailCom detector is fitted to this layout, with the DR5088RC given as an example,
+the owner answered that there is none. Operator-reported, not measured.
