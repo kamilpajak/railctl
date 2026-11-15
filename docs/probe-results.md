@@ -2716,7 +2716,7 @@ of it gates waiting on the operator, and 332.68 s the second. Locomotive 3 was o
 track for stage 1; at stage 2's gate the owner moved it to the rollers — confirmed for both days
 when asked on 2026-11-15.
 
-**Recorded output.** Identical on both days except D2, which reads the station's state at the
+**Recorded output.** Identical on both days in every field quoted below except D2, which reads the station's state at the
 start of each doctor run: on 2026-11-13 "track power off, emergency_stop=False,
 auto_start_mode=True, service_mode=False", on 2026-11-14 the same with `emergency_stop=True`, in
 both stage 1 and stage 2.
@@ -2736,7 +2736,7 @@ both stage 1 and stage 2.
 **Not measured:** the decoder's contact with the rollers.
 
 This is the layout configuration of "Station firmware updated (KLUG) — re-probed 2026-08-12" —
-locomotive 3 on the rollers, `--power-on`, the programming track empty — on a different host, with
+locomotive 3 on the rollers and off the programming track, `--power-on` — on a different host, with
 the same D4 result. Open questions from these runs are in issues #81 (D4 runs after D3's hold) and
 #80 (D5's and D6's messages).
 
