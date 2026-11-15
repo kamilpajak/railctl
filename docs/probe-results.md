@@ -2748,98 +2748,116 @@ and a detector described as a separate module on the rails, the owner answered t
 This covers external modules only, not a receiver inside the station. Operator-reported, not
 measured.
 
-## The main output went dead under load and nothing reported it — 2026-11-15, cause NOT established
+## Locomotive 3 went dead on the rollers and nothing reported it — 2026-11-15, cause NOT established
 
 Locomotive 3 on the rollers, rollers wired to the **Main Track** terminals (owner-reported when
 asked), Linux bench (railctl 0.4.0, WSL2 + usbipd, XpressNet on `-if02`). The task was to drive it
-forward for a minute. The first attempts ended with a decoder that answered nothing, while every
-channel railctl can read described a healthy, powered track. After the locomotive was lifted clear
-and set back, every later run worked, up to step 126 and including the step-80 start from
-standstill that had preceded the dead state.
+forward for a minute. Partway through, the decoder stopped answering anything — no light, no
+sound, no motor — while every channel railctl read described a powered track. After the
+locomotive was lifted clear and set back, every later run the owner watched worked, up to step 126
+and including the step-80 start from standstill that had preceded the dead state.
 
-The observations below are the owner's — the only instrument for whether the wheels turn. Runs the
-owner was not watching are listed as such and carry no observation.
+The observations below are the owner's — the only instrument for whether the wheels turn — in the
+owner's words where they are quoted. Runs the owner was not watching, or was not asked about, are
+listed as such and carry no observation.
 
 ### Sequence
 
-Every `drive` below was answered `01 04`; every `monitor` window decoded **zero** broadcasts;
-every status read after a run was `0x04` (track power on, no emergency state).
+Every `drive` was reported `ok` by railctl; the reply bytes were captured in one run (15:34) and
+were `01 04`. Every `monitor` window decoded **zero** broadcasts. Every status read taken after a
+run was `0x04` (track power on, no emergency state); the runs at 15:34, ~15:35 and 15:37 had no
+status read after them, and the one at 15:38 had its output truncated.
 
 | time | sent | observed by the owner |
 | --- | --- | --- |
 | 15:32:09–15:33:09 | `power on -a 3`, `power resume`, `drive 40 --forward`, 60 s, `drive 0` | "in my opinion it did not move" |
-| 15:34:20–15:34:50 | F0 on, 10 s, `drive 80 --forward` 20 s | not watched |
-| ~15:35 | F0 on 15 s, then `drive 80 --forward` 30 s | headlight lit and the speaker sounded; movement not observed |
-| 15:37:33–15:38:03 | `drive 80 --forward` 30 s | "looked like it accelerated and stopped three times" — not established whether within this run or across the three step-80 runs so far |
-| 15:39:44–15:40:14 | `drive 80 --forward`, `monitor` 30 s | no sound; the motor is clearly audible when accelerating hard |
-| 15:42:09–15:42:42 | F0 on, `drive 80 --forward`, `monitor` 30 s | **motor silent, headlight dark, no sound** |
-| ~15:44 | `function f0 on`, nothing else | headlight dark |
-| — | locomotive lifted and set back, **no command sent** | first lift: no change — the owner thinks a wheel was still touching a roller. Second lift: **headlight on and sound back by itself** |
+| 15:34:20–15:34:50 | F0 on, 10 s, `drive 80 --forward` 20 s | "I didn't look closely" |
+| from 15:35:38 | F0 on 15 s, then `drive 80 --forward` 30 s, `drive 0`, F0 off | lights "certainly" came on and the speaker sounded; driving not observed |
+| 15:37:33–15:38:03 | `drive 80 --forward` 30 s | "looks as if it accelerated and stopped three times" — not established whether within this run or across the step-80 runs so far |
+| 15:38:44–15:39:14 | `drive 80 --forward`, status polled | not asked; status output truncated, no usable data |
+| 15:39:44–15:40:14 | `drive 80 --forward`, `monitor` 30 s | "certainly no sound"; lights not watched. On the rollers only the wheels can be watched, "which is hard"; the motor is clearly audible when accelerating hard |
+| 15:42:09–15:42:42 | F0 on, `drive 80 --forward`, `monitor` 30 s | **"the motor did not run, the lights did not shine, there was no sound"** |
+| after 15:42:42 (time not recorded) | `function f0 on`, nothing else | not asked; the light state just before the first lift is unknown |
+| — | locomotive lifted and set back, **no command sent** | first lift: no change — the owner thinks a wheel may still have touched a roller. Second lift: **front lights on and sound back by themselves**, wheels not turning (speed 0) |
 
 The first status read of the session, before anything was sent, was `0x07` (track off, both
 emergency bits set).
 
-The wire-level telegrams were what they should be: `E4 13 00 03 D1` for step 80 forward (128-step
-mode, address 3, `0x80 | 0x51`, where `0x51` is step 80 because encoded step 1 is the emergency
-stop), and the loco-info reply `E4 0C 80 10 00` — in use by another device, 128 steps, forward,
-F0 on. railctl warned `loco_in_use_by_other` on every `drive`; every invocation connects as a new
-device, so this does not by itself point at a second throttle.
+The wire-level telegrams captured at 15:34 were what they should be: `E4 13 00 03 D1` for step 80
+forward (128-step mode, address 3, `0x80 | 0x51`, where `0x51` is step 80 because encoded step 1
+is the emergency stop), and the loco-info reply `E4 0C 80 10 00` — in use by another device, 128
+steps, forward, F0 on. railctl warned `loco_in_use_by_other` wherever the warning text was kept
+(15:32, 15:39); every invocation connects as a new device, so this does not by itself point at a
+second throttle.
 
-### After the lift, nothing failed
+### After the lift, nothing the owner watched failed
 
 | time | run | observed by the owner |
 | --- | --- | --- |
-| 15:47:49–15:48:10 | step 20, 20 s | not watched |
-| 15:51:10–15:51:31 | step 20, 20 s | wheels turned throughout; headlight and sound unchanged |
-| 15:53:38–15:54:40 | step 20, 60 s | wheels turned the whole minute; headlight on |
-| 15:55:03–15:55:53 | steps 30, 40, 50, 60, 70, ~10 s each | wheels turned throughout, accelerating at each change; headlight on |
-| 15:57:04–15:58:04 | steps 70, 80, 90, 100, 110, 126, 10 s each | wheels turned throughout, including at 126; headlight on |
-| 15:58:53–15:59:14 | standstill straight to step 80, 20 s | wheels turned the whole 20 s, **speed rising gradually**; headlight on |
+| 15:47:49–15:48:10 | step 20, 20 s | "I didn't look" |
+| 15:51:10–15:51:31 | step 20, 20 s | wheels turned for 20 s; lights and sound unchanged |
+| 15:53:38–15:54:40 | step 20, 60 s | wheels turned the whole minute; lights on |
+| 15:55:03–15:55:53 | steps 30, 40, 50, 60, 70, ~10 s each | wheels turned throughout, gradually accelerating; lights on |
+| 15:57:04–15:58:04 | steps 70, 80, 90, 100, 110, 126, 10 s each | wheels turned throughout, also at 126; lights on |
+| 15:58:53–15:59:14 | standstill straight to step 80, 20 s | wheels turned the whole 20 s, **speed rising gradually**; lights on |
 
-The last row is the same command as the runs before the dead state. It did not reproduce it.
+The last row is the same command as the step-80 runs before the dead state. It did not reproduce it.
 
-### What the dead state looked like from every channel
+### What the dead state looked like from the channels that were read
 
-| channel | during the dead state |
+| channel | during the dead state (15:42 run) |
 | --- | --- |
 | status byte | `0x04`, identical to a working track |
-| `monitor` (`-if02` broadcasts) | nothing — no `61 00`, no short-circuit or takeover broadcast |
-| command replies | `01 04`, accepted |
+| `monitor` (`-if02` broadcasts) | nothing decoded |
+| command replies | reported `ok` |
 | decoder | no light on F0, no sound, no motor |
 
 The telemetry stream was not consulted as evidence; "The telemetry stream is not an instrument for
 track power" above explains why. A 5 s raw read of `-if04` with `cat` returned nothing, which is
 consistent with its ~15 s cadence and says nothing about the track.
 
-This is the signature of "The programming-track output latches off after an overload, and nothing
-reports it", **observed on the main output**: decoder dead, every indicator normal, recovered by
-removing the load and by nothing that was sent. That section's measurement was on the programming
-output; this is the first time the same signature is recorded on Main.
+This matches two of the indicators in "The programming-track output latches off after an
+overload, and nothing reports it", **observed with the locomotive on the main output**: a decoder
+dead to every command while the status byte read normal, recovered by a lift and by nothing that
+was sent. The two tests that defined that case — the Track Out LED, and cutting track power to see
+whether that clears it — were not run here.
 
 ### What this does NOT establish
 
 - **Not the cause.** An output latch after overload, an intermittent short across the rollers, and a
-  locomotive seated badly enough to lose pickup are all compatible with what was seen, and the lift
-  that cured it changes both the load and the seating. The section on the programming output
-  makes the same point about lifting: it removes the load *and* changes the contact.
-- **Not that the main output latches.** The Track Out LED was not checked during the dead state, and
-  main track power was not cycled to see whether that alone recovers it — the test that settled the
-  programming-output case. Both are the next things to try if it recurs.
-- **Not that the first run failed.** "Did not move" at step 40 was a judgement the owner offered
-  without having watched closely; later runs at step 20 visibly turned the wheels. Whether the
-  output was already dead at 15:32 is unknown.
-- **Not that the speed has a threshold.** Nothing failed after the lift, at any step or with any
-  ramp, so no step can be named as the trigger.
-- **The M6 runs of 2026-11-13/14 are not explained by this.** Their stage 2 also reported a
-  locomotive on the rollers that did not move; whether it was the same dead state is unknown, since
-  the headlight was not watched then either.
+  locomotive seated badly enough to lose pickup are all compatible with what was seen; the last
+  leaves the output healthy. The programming-output section ruled contact out because the
+  locomotive was untouched between the working read and the failing one ("Not contact
+  resistance" above). No such control exists here: the locomotive was handled before the cure, and
+  the owner suspects a wheel was still touching after the first lift.
+- **Not that the main output latches, or went dead at all.** The Track Out LED was not checked
+  during the dead state, and track power was not cycled to see whether that alone recovers it.
+  Both are the next things to try if it recurs.
+- **Not when the dead state began.** At the run from 15:35:38 the lights and sound were "certainly"
+  on; at 15:39 there was no sound and the lights were not watched; at 15:42 everything was dead. The
+  onset lies between those, and the "accelerated and stopped three times" at 15:37 may itself be
+  intermittent dropout rather than three separate runs.
+- **Not that the first run failed.** "Did not move" at 15:32 was offered as an opinion, and on the
+  rollers the wheels are hard to watch (the owner's words at 15:39). Whether anything was wrong at
+  15:32 is unknown.
+- **Not that `monitor` would have reported a main-output fault.** The only broadcast this file
+  records `monitor` decoding is `61 00` from the station's STOP button ("`monitor` decodes a
+  station-generated broadcast on Linux"). Silence there is the absence of a signal never shown to
+  exist for this case.
+- **Not the light state before the first lift.** Not asked.
+- **Not that the speed has a threshold.** Nothing the owner watched failed after the lift, at any
+  step or with any ramp, so no step can be named as the trigger.
+- **Nothing about the M6 runs of 2026-11-13/14.** Their stage 2 commanded speed 0, so a locomotive
+  that did not move was the expected outcome. The owner also heard nothing from the decoder then;
+  whether that was this dead state is unknown.
 
 ### The gradual acceleration is the decoder's
 
 The owner noted that the speed rose gradually after a jump from standstill to step 80. CV3 (the
-acceleration rate) reads **26** on this decoder ("batch read CV1,3,8,29" above), so the decoder
-ramps rather than jumping to the commanded step. The conversion to seconds is in ZIMO's MS manual
-and was not checked against a stopwatch here. CV4 (deceleration) has not been read.
+acceleration rate) read **26** in the M8 acceptance run of 2026-08-12 ("batch read CV1,3,8,29"
+above) and has not been re-read since, so a decoder that ramps rather than jumping to the
+commanded step is the expected behaviour. The conversion to seconds is in ZIMO's MS manual and was
+not checked against a stopwatch here. CV4 (deceleration) has not been read.
 
 ### The locomotive has a speaker — operator-reported 2026-11-15
 
