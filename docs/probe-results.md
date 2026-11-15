@@ -563,8 +563,8 @@ value back — verification requires the programming track.
 
 ### Next step for R1
 
-**2026-11-13:** the owner reports that no RailCom detector is fitted to this layout — see "No
-RailCom detector is fitted". The step below was written before that was known.
+**2026-11-13:** the owner reports that no external RailCom detector module is fitted to this
+layout — see "No RailCom detector is fitted". The step below was written before that was known.
 
 Read any CV through the YaMoRC tool's own **"Loco POM"** mode (Prog.Track CV Programming
 → Mode → Loco POM). That tool has a dedicated "No Reed — No read result" status, so the
@@ -2731,7 +2731,8 @@ both stage 1 and stage 2.
 | 4 | `power off` with `changed: false`; final status byte `0x07` |
 
 **Reported by the owner:** locomotive 3 did not move during stage 2, either day (asked about stage
-2 only). The owner heard nothing from the decoder and did not watch the headlights.
+2 only). Asked on 2026-11-14 about stage 2 on either day, the owner reported hearing nothing from
+the decoder and not watching the headlights.
 
 **Not measured:** the decoder's contact with the rollers.
 
@@ -2742,5 +2743,7 @@ the same D4 result. Open questions from these runs are in issues #81 (D4 runs af
 
 ### No RailCom detector is fitted — operator-reported 2026-11-13
 
-Asked whether any RailCom detector is fitted to this layout, with the DR5088RC given as an example,
-the owner answered that there is none. Operator-reported, not measured.
+Asked whether any RailCom detector is fitted to this layout, with the DR5088RC given as an example
+and a detector described as a separate module on the rails, the owner answered that there is none.
+This covers external modules only, not a receiver inside the station. Operator-reported, not
+measured.
