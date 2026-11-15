@@ -2716,14 +2716,17 @@ of it gates waiting on the operator, and 332.68 s the second. Locomotive 3 was o
 track for stage 1; at stage 2's gate the owner moved it to the rollers — confirmed for both days
 when asked on 2026-11-15.
 
-**Recorded output, identical on both days:**
+**Recorded output.** Identical on both days except D2, which reads the station's state at the
+start of each doctor run: on 2026-11-13 "track power off, emergency_stop=False,
+auto_start_mode=True, service_mode=False", on 2026-11-14 the same with `emergency_stop=True`, in
+both stage 1 and stage 2.
 
 | stage | recorded |
 | --- | --- |
 | 1 | D5 `CV8=145`, D6 `CV1=3`, D7 ok, D9 `CV28=3`, `CV29=14` |
 | 2 | D3 ok: "track power turned on, then the whole layout was held and loco 3 was sent speed 0; the hold is re-asserted and read back at the end of the run" |
-| 2 | D4: "POM read produced no result at all (neither 61 13 nor 61 82) after 3 attempts"; `pom_read: false`, `pom_read_provenance: "silence"`, `pom_result_channel: "none"` |
-| 2 | D5 and D6: "decoder answered 61 13 on the programming track"; D7: "CV8's band gave no conclusive result within the service-mode budget"; D9: "no identity CV was read (['ServiceEncodingUnknownError'])" |
+| 2 | D4: "POM read produced no result at all (neither 61 13 nor 61 82) after 3 attempts; …"; `pom_read: false`, `pom_read_provenance: "silence"`, `pom_result_channel: "none"` |
+| 2 | D5: "decoder answered 61 13 on the programming track"; D6: "decoder answered 61 13"; D7: "CV8's band gave no conclusive result within the service-mode budget"; D9: "…; no identity CV was read (['ServiceEncodingUnknownError'])" |
 | 3 | `61 00 61` decoded as `power.off` |
 | 4 | `power off` with `changed: false`; final status byte `0x07` |
 
@@ -2732,9 +2735,10 @@ when asked on 2026-11-15.
 
 **Not measured:** the decoder's contact with the rollers.
 
-This is the configuration of "Station firmware updated (KLUG) — re-probed 2026-08-12", with the
-same D4 result. Open questions from these runs are in issues #81 (D4 runs after D3's hold) and #80
-(D5's message).
+This is the layout configuration of "Station firmware updated (KLUG) — re-probed 2026-08-12" —
+locomotive 3 on the rollers, `--power-on`, the programming track empty — on a different host, with
+the same D4 result. Open questions from these runs are in issues #81 (D4 runs after D3's hold) and
+#80 (D5's and D6's messages).
 
 ### No RailCom detector is fitted — operator-reported 2026-11-13
 
