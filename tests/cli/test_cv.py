@@ -1627,6 +1627,45 @@ def test_cv_write_a_bad_page_is_refused_even_for_a_cv_outside_the_indexed_range(
     assert _stderr_envelope(result)["details"]["reason"] == "malformed_page"
 
 
+@pytest.mark.parametrize("token", ["bad", "0:256"])
+def test_a_bad_page_on_a_cv_no_page_indexes_suggests_the_command_without_page(
+    monkeypatch, token: str
+):
+    """Following `--page <example>` there would only earn `page_not_applicable`
+    next, so the suggestion is the one that refusal makes: no `--page`, the
+    answers already given kept."""
+    _station_must_not_open(monkeypatch)
+    written = _stderr_envelope(
+        runner.invoke(app, ["cv", "write", "29", "6", "--page", token, "--yes", "--format", "json"])
+    )
+    assert written["code"] == "usage", written
+    assert written["suggestions"] == [["railctl", "cv", "write", "29", "6", "--yes"]]
+    read = _stderr_envelope(
+        runner.invoke(app, ["cv", "read", "29", "--page", token, "--format", "json"])
+    )
+    assert read["code"] == "usage", read
+    assert read["suggestions"] == [["railctl", "cv", "read", "29"]]
+
+
+def test_cv_read_an_inapplicable_page_keeps_a_yes_already_given(monkeypatch):
+    """`cv read 1-40` is a sweep over SWEEP_CONFIRM_CVS and asks again: a
+    suggestion that dropped the `--yes` would answer `confirmation_required`.
+    A `--yes` typed before the verb counts the same, as `cv write` has it."""
+    _station_must_not_open(monkeypatch)
+    sweep = _stderr_envelope(
+        runner.invoke(app, ["cv", "read", "1-40", "--page", "145:0", "--yes", "--format", "json"])
+    )
+    assert sweep["details"]["reason"] == "page_not_applicable", sweep
+    assert sweep["suggestions"] == [["railctl", "cv", "read", "1-40", "--yes"]]
+    root = _stderr_envelope(
+        runner.invoke(
+            app,
+            ["--yes", "cv", "read", "3", "--page", "0:1", "--mode", "pom", "--format", "json"],
+        )
+    )
+    assert root["suggestions"] == [["railctl", "cv", "read", "3", "--mode", "pom", "--yes"]]
+
+
 def test_cv_write_a_page_for_a_cv_outside_the_indexed_range_is_refused(monkeypatch):
     """`--page` on CV3 would select nothing: refused as a usage error, not
     ignored, before the station opens. The suggestion is the same command

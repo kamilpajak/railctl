@@ -46,6 +46,7 @@ from railctl.errors import (
     exit_code_for,
 )
 from railctl.exit_codes import INTERNAL_EXIT_CODE, INTERRUPTED_EXIT_CODE, USAGE_EXIT_CODE
+from railctl.station.types import INDEXED_CV_RANGE
 
 
 @dataclass(frozen=True, slots=True)
@@ -161,8 +162,11 @@ def default_suggestions(
             # (`page_selection`), and its hint says the decoder may now sit on
             # another one. A read without `--page` would run and answer from that
             # unknown page; with it, the read selects the write's own bank first.
+            # Only for an indexed CV: a page step fails against CV31 or CV32,
+            # which no page indexes, and `cv read 31 --page X` is refused as
+            # `page_not_applicable` - a suggestion that cannot run.
             page = _recorded_page(exc)
-            if page is not None:
+            if page is not None and cv in INDEXED_CV_RANGE:
                 read += ["--page", page]
             suggestions.append(read)
         return suggestions

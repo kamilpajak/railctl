@@ -280,7 +280,11 @@ READ_PAGE_EXAMPLE: Final[str] = "145:0"
 
 
 def parse_page(
-    token: str | None, *, argv_hint: Sequence[str], example: str = READ_PAGE_EXAMPLE
+    token: str | None,
+    *,
+    argv_hint: Sequence[str],
+    example: str = READ_PAGE_EXAMPLE,
+    without_page: Sequence[str] | None = None,
 ) -> CvPage | None:
     """`"145:0"` -> `(145, 0)`, the CV31/CV32 pair; `None` stays `None`.
 
@@ -293,15 +297,20 @@ def parse_page(
 
     Whether the page applies to any requested CV is NOT decided here: `backup`
     shares this parser and has its own rules, so the `page_not_applicable`
-    refusal lives in the command bodies (`_refuse_inapplicable_page`).
+    refusal lives in the command bodies (`_refuse_inapplicable_page`). But a
+    command body that already knows no requested CV is indexed passes
+    `without_page` - the argv its `page_not_applicable` refusal would suggest -
+    and a malformed token then suggests that, because following an example
+    page there only earns the second refusal.
     """
     if token is None:
         return None
+    suggestion = list(without_page) if without_page is not None else [*argv_hint, "--page", example]
     parts = token.split(":")
     if len(parts) != 2 or not all(part.strip().isdigit() for part in parts):
         raise UsageProblem(
             f"--page takes the CV31 and CV32 values as two numbers separated by ':', got {token!r}",
-            suggestions=[[*argv_hint, "--page", example]],
+            suggestions=[suggestion],
             details={"reason": "malformed_page", "page": token},
         )
     cv31, cv32 = (int(part) for part in parts)
@@ -309,7 +318,7 @@ def parse_page(
         if not VALUE_MIN <= value <= VALUE_MAX:
             raise UsageProblem(
                 f"--page {name} value {value} is outside {VALUE_MIN}..{VALUE_MAX}",
-                suggestions=[[*argv_hint, "--page", example]],
+                suggestions=[suggestion],
                 details={"reason": "page_value_not_a_byte", "field": name, "value": value},
             )
     return (cv31, cv32)
@@ -411,6 +420,25 @@ _READ_THE_PAIR: Final[str] = (
 )
 
 
+def _write_fact(write: object, *, cv: int) -> str:
+    """The clause a restore-phase hint opens with: what the station recorded
+    about the indexed CV (`details.write`, see `WriteState`) before the restore
+    failed. Empty when nothing was recorded - then nothing is claimed."""
+    if not isinstance(write, dict):
+        return ""
+    state = write.get("state")
+    value = write.get("value")
+    if state == "written":
+        if write.get("verified") is True:
+            return f"CV{cv} = {value} was written and confirmed by read-back, but "
+        return f"CV{cv} = {value} was written but not confirmed by read-back, and "
+    if state == "failed":
+        return f"writing CV{cv} = {value} failed first ({write.get('error')}), and then "
+    if state == "not_sent":
+        return f"CV{cv} was not written (selecting the page failed first), and then "
+    return ""
+
+
 def _page_note(error: RailctlError, page: CvPage, *, cv: int, track: str) -> str:
     """The hint sentence for a failed `cv write --page`, from what the station
     recorded on the error - never from what this layer would like to be true.
@@ -430,9 +458,12 @@ def _page_note(error: RailctlError, page: CvPage, *, cv: int, track: str) -> str
             f"was selected, so CV{cv} and the index page are as they were"
         )
     if phase == "restore":
+        # This error replaced the write's own outcome, so the station put that
+        # outcome on it (`details.write`); the hint says it before the page.
         return (
-            f"putting CV31/CV32 back to the pair found before the write failed, so which "
-            f"index page the decoder is on is unknown; {_READ_THE_PAIR}"
+            f"{_write_fact(error.details.get('write'), cv=cv)}putting CV31/CV32 back to the "
+            f"pair found before the write failed, so which index page the decoder is on is "
+            f"unknown; {_READ_THE_PAIR}"
         )
     prefix = ""
     if phase == "select":
@@ -765,9 +796,10 @@ def register(app: typer.Typer) -> None:
             catalog = load_catalog()
             cvs = parse_cv_spec(cvspec, catalog, argv_prefix=prefix)
             check_choice("mode", mode, CV_READ_MODE_OPT.enum or ())
-            declared_page = parse_page(page, argv_hint=argv_hint)
             # The caller's own argv without `--page`: every flag that changes
-            # what is read or where rides along, resolved as `cv write` does.
+            # what is read or where rides along, resolved as `cv write` does,
+            # and so does a `--yes` already given - a sweep over
+            # SWEEP_CONFIRM_CVS asks again, and the suggestion must run as typed.
             page_retry = list(argv_hint)
             if mode != CV_READ_MODE_OPT.default:
                 page_retry += ["--mode", mode]
@@ -775,6 +807,12 @@ def register(app: typer.Typer) -> None:
                 page_retry += ["--address", str(settings.address)]
             if settings.target != DEFAULT_TARGET:
                 page_retry += ["--target", settings.target]
+            if settings.assume_yes:
+                page_retry.append("--yes")
+            indexed = any(cv in INDEXED_CV_RANGE for cv in cvs)
+            declared_page = parse_page(
+                page, argv_hint=argv_hint, without_page=None if indexed else page_retry
+            )
             _refuse_inapplicable_page(declared_page, cvs, command="cv read", retry=page_retry)
             if declared_page is not None and any(cv in INDEXED_CV_RANGE for cv in cvs):
                 # The one path through a read that WRITES the decoder: the
@@ -976,20 +1014,26 @@ def register(app: typer.Typer) -> None:
                 retry += ["--address", str(settings.address)]
             if settings.target != DEFAULT_TARGET:
                 retry += ["--target", settings.target]
-            # Parsed for every CV, so a malformed token is a usage error first -
-            # the same order `cv read` checks in. The suggested page is the
-            # resting one, never the read's example: a main-track write leaves
-            # the decoder on whatever page it selected.
-            declared_page = parse_page(page, argv_hint=retry, example=RESTING_PAGE_EXAMPLE)
-            # A well-formed `--page` on a CV outside 257-512 selects nothing:
-            # refused, before any question and before the station opens. The
-            # suggestion is this command without `--page`, keeping an answer
-            # already given (`--yes`, `--confirm`) so it runs as typed.
+            # A `--page` on a CV outside 257-512 selects nothing: refused,
+            # before any question and before the station opens. The suggestion
+            # is this command without `--page`, keeping an answer already given
+            # (`--yes`, `--confirm`) so it runs as typed.
             not_applicable_retry = list(retry)
             if confirm_token is not None:
                 not_applicable_retry += ["--confirm", confirm_token]
             if settings.assume_yes:
                 not_applicable_retry.append("--yes")
+            # Parsed for every CV, so a malformed token is a usage error first -
+            # the same order `cv read` checks in. The suggested page is the
+            # resting one, never the read's example: a main-track write leaves
+            # the decoder on whatever page it selected. For a CV no page
+            # indexes, the suggestion drops `--page` instead.
+            declared_page = parse_page(
+                page,
+                argv_hint=retry,
+                example=RESTING_PAGE_EXAMPLE,
+                without_page=None if number in INDEXED_CV_RANGE else not_applicable_retry,
+            )
             _refuse_inapplicable_page(
                 declared_page, [number], command="cv write", retry=not_applicable_retry
             )

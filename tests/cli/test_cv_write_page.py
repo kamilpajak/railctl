@@ -290,6 +290,12 @@ def test_a_prog_write_whose_pair_cannot_be_read_first_writes_nothing_and_says_so
     assert "may already have written" not in envelope["hint"]
     # Only the status check and the one CV31 read went out - no write at all.
     assert bench.sent == [STATUS_REQUEST, cmd_z21_cv_read(31)]
+    # The read it suggests is of CV31 itself, which no page indexes: `--page`
+    # there is refused as `page_not_applicable`, so it must not be added.
+    assert envelope["suggestions"] == [
+        ["railctl", "doctor"],
+        ["railctl", "cv", "read", "31", "--mode", "service"],
+    ]
 
 
 def test_a_prog_write_whose_restore_does_not_stick_says_the_page_is_unknown(monkeypatch):
@@ -319,6 +325,18 @@ def test_a_prog_write_whose_restore_does_not_stick_says_the_page_is_unknown(monk
     assert envelope["details"]["page_selection"]["state"] == "unknown"
     assert "putting CV31/CV32 back to the pair found before the write failed" in envelope["hint"]
     assert "railctl cv read 31 32" in envelope["hint"]
+    # The restore error replaced the write's result; the write's own outcome
+    # rides on it, so "CV266 written, page lost" is not read as "CV266 failed".
+    assert envelope["details"]["write"] == {
+        "cv": MASTER_VOLUME_CV,
+        "value": VALUE,
+        "state": "written",
+        "verified": True,
+    }
+    assert (
+        f"CV{MASTER_VOLUME_CV} = {VALUE} was written and confirmed by read-back"
+        in (envelope["hint"])
+    )
 
 
 def test_a_main_track_write_that_fails_after_the_selection_says_the_page_is_unknown(monkeypatch):
@@ -458,6 +476,46 @@ def test_an_interrupt_between_cv31_and_cv32_still_says_the_page_is_unknown(monke
     assert "which index page the decoder is on is unknown" in envelope["hint"]
 
 
+def test_an_interrupt_during_a_prog_write_puts_the_pair_back_and_never_says_main_track(
+    monkeypatch,
+):
+    """Ctrl-C as CV266 goes out on the programming track: the station still
+    re-selects the pair it found (the restore runs for any exception, not only
+    a `RailctlError`), and the `aborted` envelope speaks of the programming
+    track - never the main track's "never puts the pair back"."""
+    bench = _service_bench(monkeypatch)
+    _script_pair_read(bench)
+    _script_selection(bench, RESTING_PAGE)
+    bench.expect(STATUS_REQUEST, reply=STATUS_POWER_ON)
+    indexed_write = cmd_z21_cv_write(MASTER_VOLUME_CV, VALUE)
+    _script_selection(bench, RESTING_PAGE)  # the restore
+    original_write = bench.transport.write
+
+    def write(data: bytes) -> None:
+        if indexed_write in data:
+            raise KeyboardInterrupt
+        original_write(data)
+
+    monkeypatch.setattr(bench.transport, "write", write)
+
+    result = runner.invoke(app, [*_PROG_ARGV, "--format", "json"])
+
+    envelope = json.loads(result.stderr.strip().splitlines()[-1])
+    assert result.exit_code == INTERRUPTED_EXIT_CODE, result.stderr
+    assert envelope["code"] == "aborted", envelope
+    assert envelope["details"]["page_selection"]["state"] == "unknown"
+    assert "never puts the pair back" not in envelope["hint"]
+    assert "whether the pair found before the write was put back is unknown" in envelope["hint"]
+    # The restore went out after the interrupt: CV31/CV32 written back.
+    selection_writes = [
+        telegram
+        for telegram in bench.sent
+        if telegram
+        in (cmd_z21_cv_write(31, RESTING_PAGE[0]), cmd_z21_cv_write(32, RESTING_PAGE[1]))
+    ]
+    assert len(selection_writes) == 4
+
+
 def test_an_address_typed_before_the_verb_rides_along_in_the_confirmation_retry():
     """`railctl --address 7 cv write ...`: the root callback takes the address,
     and the verb's own `--address` stays None. A retry built from the verb's
@@ -544,3 +602,63 @@ def test_a_prog_write_that_failed_with_no_restore_fact_stays_hedged():
     assert "whether the pair found before the write was put back is unknown" in error.hint
     assert "never puts the pair back" not in error.hint
     assert "railctl cv read 31 32" in error.hint
+
+
+def test_a_prog_write_whose_restore_was_not_read_back_never_claims_it_was_confirmed():
+    """`page_restore.verified` is `null`: the pair was written back and nothing
+    read it. Saying "read back to confirm it" would be a measurement nobody made."""
+    error = _noted(
+        DecoderNotRespondingError(
+            "silent",
+            cv=MASTER_VOLUME_CV,
+            details={"page_restore": {"pair": [0, 1], "verified": None}},
+        ),
+        track="prog",
+    )
+    assert "CV31/CV32 were written back to 0:1" in error.hint
+    assert "nothing read them back" in error.hint
+    assert "confirm it" not in error.hint
+    assert "railctl cv read 31 32" in error.hint
+
+
+@pytest.mark.parametrize(
+    ("write", "expected"),
+    [
+        (
+            {"cv": 266, "value": 35, "state": "written", "verified": None},
+            "CV266 = 35 was written but not confirmed by read-back",
+        ),
+        (
+            {"cv": 266, "value": 35, "state": "failed", "error": "decoder_no_ack"},
+            "writing CV266 = 35 failed first (decoder_no_ack)",
+        ),
+        (
+            {"cv": 266, "value": 35, "state": "not_sent", "error": "cv_verify"},
+            "CV266 was not written (selecting the page failed first)",
+        ),
+    ],
+)
+def test_a_failed_restore_says_what_happened_to_the_indexed_cv_first(write, expected):
+    error = _noted(
+        DecoderNotRespondingError(
+            "silent", cv=31, details={"page_phase": "restore", "write": write}
+        ),
+        track="prog",
+    )
+    assert error.hint.startswith(expected), error.hint
+    assert "putting CV31/CV32 back to the pair found before the write failed" in error.hint
+    assert "confirmed by read-back, but" not in error.hint
+
+
+def test_a_page_step_failing_on_cv31_suggests_a_read_of_it_without_page():
+    """A page step fails against CV31 or CV32, which no page indexes: the read
+    suggested for it carries no `--page`, which `page_not_applicable` refuses."""
+    from railctl.cli._errors import report_for
+
+    error = _noted(
+        DecoderNotRespondingError("silent", cv=31, details={"page_phase": "restore"}),
+        track="prog",
+    )
+    suggestions = report_for(error, command="cv write").suggestions
+    assert ["railctl", "cv", "read", "31", "--mode", "service"] in suggestions
+    assert not any("--page" in argv for argv in suggestions)

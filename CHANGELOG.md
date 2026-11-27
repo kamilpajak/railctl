@@ -17,9 +17,12 @@ All notable changes to this project are documented in this file. The format foll
 - **`cv write --page` puts the index page back on the programming track.** The station
   reads CV31/CV32 before anything is written, selects the page, writes the CV, and then
   re-selects the pair it found and reads it back - the leave-as-found `cv read --page`
-  already had. A pre-read that fails writes nothing; a restore that fails turns the
-  command into an error, even after a successful write, because the decoder is then not
-  as it was found. The pair found is put back rather than a fixed "neutral" one: the ZIMO
+  already had. The restore runs after a failed write and after Ctrl-C as well. A pre-read
+  that fails writes nothing; a restore that fails turns the command into an error, even
+  after a successful write, because the decoder is then not as it was found - and that
+  error carries `details.write` (`cv`, `value`, `state`: `written` with its `verified`,
+  `failed` with the `error` code, or `not_sent`; an open set), with the hint opening on
+  it, so a write that landed is never read as one that failed. The pair found is put back rather than a fixed "neutral" one: the ZIMO
   MS manual (EN) says to reset the CV page after programming (p. 68) but names three
   different neutral pairs (pp. 68, 69, 70), and NMRA S-9.2.2 defines none. It matters
   beyond railctl: JMRI's ZIMO MS decoder definitions address CV257-512 by plain number and
@@ -41,6 +44,9 @@ All notable changes to this project are documented in this file. The format foll
   station opens; the suggestion is the same command without `--page`. This covers
   `cv write` on a CV outside 257-512 and a `cv read` with no CV in that window, where the
   flag used to be ignored. A `cv read` batch mixing indexed and plain CVs still takes it.
+  The suggestion keeps a `--yes` already given (a `cv read` sweep asks again), and a
+  malformed `--page` on such a command suggests the same no-`--page` argv rather than an
+  example page that would only be refused next.
 
 ### Changed
 
@@ -60,7 +66,10 @@ All notable changes to this project are documented in this file. The format foll
   `details.page_selection` (`page`, `state`, the station events seen); `state` is
   `"unknown"` today and is an open set of values, so a consumer should treat one it does
   not know as unknown. The station adds `details.page_phase` when a page step failed
-  (`pre_read`, `select` or `restore` - also on `cv read --page`) and, on the programming
+  (`pre_read`, `select` or `restore`; an open set). It is a station fact, so it appears on
+  every command whose error came from a page step - `cv read --page` and `backup --page`
+  (pre-read, selection, restore) and `restore`'s indexed rows (selection) too - always
+  with the same meaning; `cv write` is the one that also turns it into a hint. On the programming
   track, `details.page_restore` (`{pair, verified}`) when the found pair was put back after
   the failure. The hint follows them: nothing was written after a failed pre-read, the
   indexed CV was not written after a failed selection, the pair is back after a confirmed
@@ -69,7 +78,9 @@ All notable changes to this project are documented in this file. The format foll
   `reason: "page_selection_mismatch"`, `wrote` and `read_back` (both `[cv31, cv32]`), so it
   is never mistaken for the indexed CV failing to verify. An interrupt (Ctrl-C) during the
   write carries the same record on its `aborted` envelope, and a silent decoder's
-  suggested `cv read` names the same `--page`, so it reads the write's own bank.
+  suggested `cv read` names the same `--page` when the silent CV is in 257-512, so it reads
+  the write's own bank; a page step silent on CV31/CV32 suggests a plain `cv read 31`,
+  since `--page` there is `page_not_applicable`.
 
 ### Fixed
 

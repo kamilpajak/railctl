@@ -1739,7 +1739,16 @@ class _ProgTrackDecoder:
     does not keep - how a selection or a restore that "did not stick" looks.
     """
 
-    def __init__(self, programmer, monkeypatch, *, ignored=(), fail_reads=(), fail_write=False):
+    def __init__(
+        self,
+        programmer,
+        monkeypatch,
+        *,
+        ignored=(),
+        fail_reads=(),
+        fail_write=False,
+        interrupt_write=False,
+    ):
         self.cvs = {31: FOUND[0], 32: FOUND[1]}
         self.log: list[tuple[object, ...]] = []
         ignored = set(ignored)
@@ -1757,6 +1766,8 @@ class _ProgTrackDecoder:
 
         def service_write(cv, value, *, verify, page=None):
             self.log.append(("write", cv, value))
+            if interrupt_write:
+                raise KeyboardInterrupt
             if fail_write:
                 raise DecoderNoAckError("no ack", cv=cv)
             return make_cv_result(
@@ -1861,11 +1872,15 @@ def test_a_restore_that_did_not_stick_replaces_a_successful_write(prog_track, mo
     _ProgTrackDecoder(prog_track.station.programmer, monkeypatch, ignored={(31, 0)})
     with pytest.raises(CvVerifyError) as caught:
         _write_restoring(prog_track)
+    # The restore error replaces the `CvResult`, so what happened to the
+    # indexed CV rides on it as `write` - otherwise "written and verified, page
+    # lost" and "nothing written, page lost" would read the same.
     assert caught.value.details == {
         "reason": "page_selection_mismatch",
         "wrote": [0, 1],
         "read_back": [145, 1],
         "page_phase": "restore",
+        "write": {"cv": INDEXED, "value": 7, "state": "written", "verified": True},
     }
 
 
@@ -1879,6 +1894,43 @@ def test_a_restore_that_fails_after_a_failed_write_keeps_the_write_error_as_cont
         _write_restoring(prog_track)
     assert caught.value.details["page_phase"] == "restore"
     assert isinstance(caught.value.__context__, DecoderNoAckError)
+    # `__context__` never reaches an envelope; `write` does.
+    assert caught.value.details["write"] == {
+        "cv": INDEXED,
+        "value": 7,
+        "state": "failed",
+        "error": "decoder_no_ack",
+    }
+
+
+def test_a_restore_that_fails_after_a_failed_selection_says_the_cv_was_never_sent(
+    prog_track, monkeypatch
+):
+    # The selection's CV31=145 does not stick (a mismatch), and then the
+    # restore's CV32=1 does not either.
+    decoder = _ProgTrackDecoder(
+        prog_track.station.programmer, monkeypatch, ignored={(31, 145), (32, 1)}
+    )
+    with pytest.raises(CvVerifyError) as caught:
+        _write_restoring(prog_track)
+    assert ("write", INDEXED, 7) not in decoder.log
+    assert caught.value.details["page_phase"] == "restore"
+    assert caught.value.details["write"] == {
+        "cv": INDEXED,
+        "value": 7,
+        "state": "not_sent",
+        "error": "cv_verify",
+    }
+
+
+def test_an_interrupt_during_a_prog_track_write_still_puts_the_pair_back(prog_track, monkeypatch):
+    """Ctrl-C is not a `RailctlError`, and the restore runs for it too -
+    `cv_read_many`'s `finally` does the same for an interrupted read."""
+    decoder = _ProgTrackDecoder(prog_track.station.programmer, monkeypatch, interrupt_write=True)
+    with pytest.raises(KeyboardInterrupt):
+        _write_restoring(prog_track)
+    assert decoder.pair == FOUND
+    assert decoder.log[-4:] == [("write", 31, 0), ("write", 32, 1), ("read", 31), ("read", 32)]
 
 
 def test_a_prog_track_write_without_restore_page_leaves_the_pair_alone(prog_track, monkeypatch):

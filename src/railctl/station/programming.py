@@ -14,6 +14,7 @@ from dataclasses import dataclass, replace
 from typing import TYPE_CHECKING, Final, Literal, TypeVar
 
 from railctl.errors import (
+    AbortedError,
     CvOutOfRangeError,
     CvVerifyError,
     DecoderNoAckError,
@@ -209,6 +210,14 @@ _REGISTER_COLLISION_MAX: Final[int] = 8  # registers 1..8 collide with CV1..8
 #: the requested page; `restore` = putting the found pair back. An error with
 #: no `page_phase` came from the CV operation itself.
 PagePhase = Literal["pre_read", "select", "restore"]
+
+#: `details["write"]["state"]` on a failed restore after a programming-track
+#: indexed write - what had happened to the indexed CV when the restore failed:
+#: `not_sent` = the selection failed first, so its telegram never went out;
+#: `failed` = it was sent and raised (`error` names the code; the CV's value is
+#: then whatever that error says about it); `written` = it succeeded, with its
+#: own `verified` (`true` or `null`, never `false`). An open set.
+WriteState = Literal["not_sent", "failed", "written"]
 
 
 def _tag_page_phase(exc: RailctlError, phase: PagePhase) -> None:
@@ -1352,8 +1361,11 @@ class CvProgrammer:
         - a restore that fails raises (tagged `page_phase: "restore"`) and
           replaces whatever was in flight, which stays reachable only as
           `__context__`: the decoder is then NOT as it was found, and that is
-          the fact the caller must be told first. A successful write's
-          `CvResult` is lost with it, as `cv_read_many`'s outcomes are.
+          the fact the caller must be told first. Unlike `cv_read_many`, whose
+          outcomes are lost with it, the restore error carries
+          `details["write"]` (`WriteState`): whether the indexed CV was never
+          sent, failed, or was written - so "written, page lost" and "nothing
+          written, page lost" stay distinguishable in the envelope.
 
         Where `cv_read_many` reports a successful restore by saying nothing,
         this returns it as `CvResult.page_restore`, and a write that failed
@@ -1381,25 +1393,43 @@ class CvProgrammer:
         except RailctlError as exc:
             _tag_page_phase(exc, "pre_read")
             raise
+        state: WriteState = "not_sent"
         try:
             selection = self._select_for_write(None, ProgMode.SERVICE, cv, page)
+            state = "failed"
             written = self.service_write(cv, value, verify=verify, page=page)
         except BaseException as exc:
-            restored = self._restore_page(found)
+            code = exc.code if isinstance(exc, RailctlError) else AbortedError.code
+            restored = self._restore_page(
+                found, write={"cv": cv, "value": value, "state": state, "error": code}
+            )
             if isinstance(exc, RailctlError):
                 exc.details = {
                     **exc.details,
                     "page_restore": {"pair": list(restored.pair), "verified": restored.verified},
                 }
             raise
-        restored = self._restore_page(found)
+        restored = self._restore_page(
+            found,
+            write={
+                "cv": written.cv,
+                "value": written.value,
+                "state": "written",
+                "verified": written.verified,
+            },
+        )
         return replace(written, page=selection, page_restore=restored)
 
-    def _restore_page(self, found: CvPage) -> PageSelection:
+    def _restore_page(self, found: CvPage, *, write: dict[str, object]) -> PageSelection:
+        """Re-select `found`. A failure is tagged `page_phase: "restore"` and
+        carries `write` - what happened to the indexed CV before it - because
+        this error replaces the `CvResult` (or the write's own error, which
+        survives only as `__context__` and never reaches an envelope)."""
         try:
             return self.select_page(found, address=None, mode=ProgMode.SERVICE, force=True)
         except RailctlError as exc:
             _tag_page_phase(exc, "restore")
+            exc.details = {**exc.details, "write": write}
             raise
 
     def cv_read_many(
