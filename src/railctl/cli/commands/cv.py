@@ -684,6 +684,38 @@ def _page_lines(written: CvResult) -> list[str]:
     return lines
 
 
+#: The station event `cv write` publishes itself instead of passing through.
+#: The station emits it whenever a write returns `verified=None`, and
+#: `build_cv_write` raises its own warning of the same name for exactly that
+#: result - with a message the operator can act on. Passing both through gave
+#: the envelope the same warning twice, the second time as the generic "the
+#: station reported ..." sentence. `restore` drops the same event for its own
+#: reason (`restore.SUPPRESSED_EVENT`).
+WRITE_UNVERIFIED_EVENT: Final[str] = "cv.write_unverified"
+
+
+class _WriteEventLog(StationEventLog):
+    """`StationEventLog` that folds the station's `cv.write_unverified` into
+    the command's own warning rather than publishing it a second time.
+
+    Folded, not dropped: the event's `reason` ("verify=False: no read-back was
+    attempted", "CV29 bit 5 changes the answering address ...") is the one
+    thing it says that the command's warning does not, so it is kept and
+    `build_cv_write` puts it in that warning's details.
+    """
+
+    def __init__(self) -> None:
+        super().__init__()
+        self.unverified_reason: str | None = None
+
+    def __call__(self, name: str, payload: dict[str, object]) -> None:
+        if name == WRITE_UNVERIFIED_EVENT:
+            reason = payload.get("reason")
+            self.unverified_reason = reason if isinstance(reason, str) else None
+            return
+        super().__call__(name, payload)
+
+
 def build_cv_write(
     written: CvResult,
     *,
@@ -691,6 +723,7 @@ def build_cv_write(
     address: int | None,
     name: str,
     verify: bool,
+    reason: str | None = None,
 ) -> CommandResult:
     """The one write, with `verified` carried honestly: `true` only when an
     independent read-back (or a decoder-level Ready) confirmed it, `null` when
@@ -705,7 +738,12 @@ def build_cv_write(
     reference station - `page.verified` is `null` and the `page.unverified`
     event says so beside this result. The top-level `verified` covers the CV
     that was written and nothing else.
+
+    `reason` is the station's own account of why no read-back ran, taken from
+    the `cv.write_unverified` event `_WriteEventLog` folds in; it rides in the
+    warning's details when there is one, and is never invented here.
     """
+    extra: dict[str, object] = {} if reason is None else {"reason": reason}
     result = CommandResult(schema=CV_WRITE_SCHEMA, command="cv write")
     label = _label(written.cv, name)
     result.result = {
@@ -749,6 +787,7 @@ def build_cv_write(
             f"the write went out on the main track and cannot be checked there; put the "
             f"locomotive on the programming track and run `{read_back}` to verify it",
             cv=written.cv,
+            **extra,
         )
         return result
     if not verify:
@@ -759,6 +798,7 @@ def build_cv_write(
         f"read-back confirmed it; the echo shows what the station produced, not what "
         f"the decoder retained",
         cv=written.cv,
+        **extra,
     )
     return result
 
@@ -1129,7 +1169,7 @@ def register(app: typer.Typer) -> None:
                     )
             wanted = MODE_FOR_TRACK[track]
             effective_verify = (track == TRACK_PROG) if verify is None else verify
-            events = StationEventLog()
+            events = _WriteEventLog()
             station = open_station(settings, capabilities_path=capabilities_path(), on_event=events)
             try:
                 resolved_address: int | None = None
@@ -1193,6 +1233,7 @@ def register(app: typer.Typer) -> None:
                     address=resolved_address,
                     name=name,
                     verify=effective_verify,
+                    reason=events.unverified_reason,
                 )
                 events.attach_to(outcome)
                 outcome.link = link_info(station, settings)
