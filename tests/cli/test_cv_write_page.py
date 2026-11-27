@@ -8,8 +8,9 @@ then the indexed CV - and what the envelope says about each part of it.
 Two stubs, both the ones `tests/station/test_cv_write.py` already uses for its
 service-write tests: `await_result` (the poll loop, which owns its own tests)
 answers from a small decoder model, and `exit_service_mode` (which owns its own
-tests in `tests/station/test_cv_service_mode.py`) does nothing. Everything else
-- the telegrams, their order, the page bookkeeping, the events - is real.
+tests in `tests/station/test_cv_service_mode.py`) sends nothing and only clears
+the caches, as the real one does. Everything else - the telegrams, their order,
+the page bookkeeping, the events - is real.
 
 The bench is the one measured in docs/probe-results.md: a ZIMO MS450P22 resting
 at CV31=0, CV32=1, and CV266 (`volume_master`) written to 35.
@@ -23,6 +24,7 @@ import pytest
 from typer.testing import CliRunner
 
 from railctl.cli.main import app
+from railctl.errors import DecoderNotRespondingError
 from railctl.exit_codes import INTERRUPTED_EXIT_CODE
 from railctl.station import Station
 from railctl.station.capabilities import Capabilities
@@ -72,18 +74,28 @@ def _install(monkeypatch, bench: Bench) -> Bench:
     return bench
 
 
-def _decoder_model(monkeypatch, bench: Bench, cvs: dict[int, int]) -> None:
+def _decoder_model(monkeypatch, bench: Bench, cvs: dict[int, int | list[int]]) -> None:
     """Every service-mode wait answers with the model's value for the CV the
     request named: an echo after a write, a value after a read. The model holds
     the values AFTER the writes, so a read-back agrees exactly when the write
-    went to the CV the test expects."""
+    went to the CV the test expects. A list answers in call order instead.
+
+    `exit_service_mode` sends nothing, but it does what the real one does to
+    the station's caches: every service session ends by invalidating them, so
+    each page selection - the restore included - is verified by reading back,
+    exactly as on the bench."""
     programmer = bench.station.programmer
 
     def answer(matcher, **_kwargs):
-        return CvValue(raw_cv=matcher.cv, value=cvs[matcher.cv], ident=0x14, z21_form=True)
+        value = cvs[matcher.cv]
+        if isinstance(value, list):
+            value = value.pop(0)
+        return CvValue(raw_cv=matcher.cv, value=value, ident=0x14, z21_form=True)
 
     monkeypatch.setattr(programmer, "await_result", answer)
-    monkeypatch.setattr(programmer, "exit_service_mode", lambda **_: None)
+    monkeypatch.setattr(
+        programmer, "exit_service_mode", lambda **_: bench.station.invalidate_caches()
+    )
 
 
 def _service_bench(monkeypatch) -> Bench:
@@ -108,41 +120,49 @@ def _script_service_read(bench: Bench, cv: int) -> None:
     bench.expect(cmd_z21_cv_read(cv), reply=ACK)
 
 
-def test_a_prog_write_with_a_page_selects_reads_the_page_back_then_writes_and_verifies(
+def _script_pair_read(bench: Bench) -> None:
+    _script_service_read(bench, 31)
+    _script_service_read(bench, 32)
+
+
+def _script_selection(bench: Bench, page: tuple[int, int]) -> None:
+    """select_page: write CV31, write CV32, then read both back (service reads
+    ARE available on this station, so the selection is verified, not assumed)."""
+    _script_service_write(bench, 31, page[0])
+    _script_service_write(bench, 32, page[1])
+    _script_pair_read(bench)
+
+
+_PROG_ARGV = ["cv", "write", str(MASTER_VOLUME_CV), str(VALUE), "--page", "0:1", "--yes"]
+
+
+def test_a_prog_write_with_a_page_reads_the_pair_selects_writes_and_puts_the_pair_back(
     monkeypatch,
 ):
     bench = _service_bench(monkeypatch)
-    # select_page: write CV31, write CV32, then read both back (service reads
-    # ARE available on this station, so the selection is verified, not assumed).
-    _script_service_write(bench, 31, RESTING_PAGE[0])
-    _script_service_write(bench, 32, RESTING_PAGE[1])
-    _script_service_read(bench, 31)
-    _script_service_read(bench, 32)
+    # The pair as found, read BEFORE anything is written.
+    _script_pair_read(bench)
+    _script_selection(bench, RESTING_PAGE)
     # The write itself, echo-confirmed, then the independent read-back.
     _script_service_write(bench, MASTER_VOLUME_CV, VALUE)
     _script_service_read(bench, MASTER_VOLUME_CV)
+    # The restore: the found pair re-selected and read back, even though it
+    # equals the page used - the same leave-as-found `cv read --page` does.
+    _script_selection(bench, RESTING_PAGE)
     bench.expect(cmd_station_version(), reply=VERSION_REPLY)
 
-    result = runner.invoke(
-        app,
-        [
-            "cv",
-            "write",
-            str(MASTER_VOLUME_CV),
-            str(VALUE),
-            "--page",
-            "0:1",
-            "--yes",
-            "--format",
-            "json",
-        ],
-    )
+    result = runner.invoke(app, [*_PROG_ARGV, "--format", "json"])
 
     assert result.exit_code == 0, result.stderr
     payload = json.loads(result.stdout)
     assert payload["result"]["cv"] == MASTER_VOLUME_CV
     assert payload["result"]["name"] == "volume_master"
-    assert payload["result"]["page"] == list(RESTING_PAGE)
+    assert payload["result"]["page"] == {
+        "pair": list(RESTING_PAGE),
+        "verified": True,
+        "source": "selected",
+        "restore": {"pair": list(RESTING_PAGE), "verified": True},
+    }
     assert payload["result"]["verified"] is True
     # The selection read back as written, so nothing is flagged unverified.
     assert [w["name"] for w in payload["warnings"]] == []
@@ -160,34 +180,59 @@ def test_a_prog_write_with_a_page_selects_reads_the_page_back_then_writes_and_ve
         cmd_z21_cv_write(31, RESTING_PAGE[0]),
         cmd_z21_cv_write(32, RESTING_PAGE[1]),
         cmd_z21_cv_write(MASTER_VOLUME_CV, VALUE),
+        cmd_z21_cv_write(31, RESTING_PAGE[0]),
+        cmd_z21_cv_write(32, RESTING_PAGE[1]),
     ]
 
 
-def test_a_prog_write_whose_page_does_not_stick_names_cv31_and_never_writes_the_indexed_cv(
+def test_a_prog_write_with_a_page_says_it_was_confirmed_and_put_back_in_human_output(
+    monkeypatch,
+):
+    """The decoder sits on the audio bank 145:2 when the write starts: the
+    write goes to 0:1, and 145:2 is what is put back - the pair FOUND, never a
+    fixed "neutral" one (the ZIMO MS manual names three: pp. 68, 69, 70)."""
+    bench = _service_bench(monkeypatch)
+    _decoder_model(
+        monkeypatch,
+        bench,
+        # pre-read, select echo, select read-back, restore echo, restore read-back
+        {31: [145, 0, 0, 145, 145], 32: [2, 1, 1, 2, 2], MASTER_VOLUME_CV: VALUE},
+    )
+    _script_pair_read(bench)
+    _script_selection(bench, RESTING_PAGE)
+    _script_service_write(bench, MASTER_VOLUME_CV, VALUE)
+    _script_service_read(bench, MASTER_VOLUME_CV)
+    _script_selection(bench, (145, 2))
+    bench.expect(cmd_station_version(), reply=VERSION_REPLY)
+
+    result = runner.invoke(app, _PROG_ARGV)
+
+    assert result.exit_code == 0, result.stderr
+    assert "index page CV31:CV32 = 0:1 selected and confirmed by read-back" in result.stdout
+    assert (
+        "index page put back to 145:2, as found before the write, and confirmed by read-back"
+        in result.stdout
+    )
+    assert "left on" not in result.stdout
+
+
+def test_a_prog_write_whose_page_does_not_stick_names_the_pair_and_never_writes_the_indexed_cv(
     monkeypatch,
 ):
     """The bench case: the MS450P22 refuses CV32=0, so `--page 0:0` is echoed
     and then reads back as 0:1. The selection must fail against CV31 - the pair,
-    not CV266 - and CV266 must never be written onto a page nobody asked for."""
+    not CV266 - CV266 must never be written onto a page nobody asked for, and
+    the pair found before the write is put back all the same."""
     bench = Bench(
         capabilities=Capabilities.unknown("bench").with_learned(z21_cv_opcodes=True)
     ).open()
-    programmer = bench.station.programmer
-    # Per-CV answers in call order: the write echo first, then the read-back.
-    answers = {31: [0, 0], 32: [0, 1]}
-
-    def answer(matcher, **_kwargs):
-        return CvValue(
-            raw_cv=matcher.cv, value=answers[matcher.cv].pop(0), ident=0x14, z21_form=True
-        )
-
-    monkeypatch.setattr(programmer, "await_result", answer)
-    monkeypatch.setattr(programmer, "exit_service_mode", lambda **_: None)
+    # Per-CV answers in call order: the pre-read, the write echo, the
+    # read-back, then the restore's echo and read-back.
+    _decoder_model(monkeypatch, bench, {31: [0, 0, 0, 0, 0], 32: [1, 0, 1, 1, 1]})
     _install(monkeypatch, bench)
-    _script_service_write(bench, 31, 0)
-    _script_service_write(bench, 32, 0)
-    _script_service_read(bench, 31)
-    _script_service_read(bench, 32)
+    _script_pair_read(bench)
+    _script_selection(bench, (0, 0))
+    _script_selection(bench, RESTING_PAGE)
 
     result = runner.invoke(
         app,
@@ -207,17 +252,81 @@ def test_a_prog_write_whose_page_does_not_stick_names_cv31_and_never_writes_the_
     envelope = json.loads(result.stderr.strip().splitlines()[-1])
     assert result.exit_code != 0
     assert envelope["code"] == "cv_verify", envelope
-    assert envelope["details"]["cv"] == 31
-    assert envelope["details"]["page_selection"]["page"] == [0, 0]
-    assert envelope["details"]["page_selection"]["state"] == "unknown"
+    details = envelope["details"]
+    assert details["cv"] == 31
+    # The station's own account of the mismatch, not the indexed CV's.
+    assert details["reason"] == "page_selection_mismatch"
+    assert details["wrote"] == [0, 0]
+    assert details["read_back"] == [0, 1]
+    assert details["page_phase"] == "select"
+    assert details["page_restore"] == {"pair": [0, 1], "verified": True}
+    assert details["page_selection"]["page"] == [0, 0]
+    assert details["page_selection"]["state"] == "unknown"
+    assert f"CV{MASTER_VOLUME_CV} was not written" in envelope["hint"]
+    assert "put back to 0:1" in envelope["hint"]
     assert cmd_z21_cv_write(MASTER_VOLUME_CV, VALUE) not in bench.sent
+
+
+def test_a_prog_write_whose_pair_cannot_be_read_first_writes_nothing_and_says_so(monkeypatch):
+    """Silence on the pre-read: nothing may be selected, because the pair it
+    would have to be put back to is unknown. The hint must not claim CV31/CV32
+    "may already have been written" - they were not."""
+    bench = _service_bench(monkeypatch)
+    programmer = bench.station.programmer
+
+    def silent(matcher, **_kwargs):
+        raise DecoderNotRespondingError("silent", cv=matcher.cv)
+
+    monkeypatch.setattr(programmer, "await_result", silent)
+    _script_service_read(bench, 31)
+
+    result = runner.invoke(app, [*_PROG_ARGV, "--format", "json"])
+
+    envelope = json.loads(result.stderr.strip().splitlines()[-1])
+    assert envelope["code"] == "decoder_not_responding", envelope
+    assert envelope["details"]["page_phase"] == "pre_read"
+    assert envelope["details"]["page_selection"]["state"] == "unknown"
+    assert "nothing was written" in envelope["hint"]
+    assert "may already have written" not in envelope["hint"]
+    # Only the status check and the one CV31 read went out - no write at all.
+    assert bench.sent == [STATUS_REQUEST, cmd_z21_cv_read(31)]
+
+
+def test_a_prog_write_whose_restore_does_not_stick_says_the_page_is_unknown(monkeypatch):
+    """The write went through, then the found pair 145:2 did not read back as
+    written: the decoder is NOT as it was found, and that is what the command
+    reports - an error tagged `restore`, never a success."""
+    bench = _service_bench(monkeypatch)
+    _decoder_model(
+        monkeypatch,
+        bench,
+        {31: [145, 0, 0, 145, 145], 32: [2, 1, 1, 2, 1], MASTER_VOLUME_CV: VALUE},
+    )
+    _script_pair_read(bench)
+    _script_selection(bench, RESTING_PAGE)
+    _script_service_write(bench, MASTER_VOLUME_CV, VALUE)
+    _script_service_read(bench, MASTER_VOLUME_CV)
+    _script_selection(bench, (145, 2))
+
+    result = runner.invoke(app, [*_PROG_ARGV, "--format", "json"])
+
+    envelope = json.loads(result.stderr.strip().splitlines()[-1])
+    assert envelope["code"] == "cv_verify", envelope
+    assert envelope["details"]["page_phase"] == "restore"
+    assert envelope["details"]["reason"] == "page_selection_mismatch"
+    assert envelope["details"]["wrote"] == [145, 2]
+    assert envelope["details"]["read_back"] == [145, 1]
+    assert envelope["details"]["page_selection"]["state"] == "unknown"
+    assert "putting CV31/CV32 back to the pair found before the write failed" in envelope["hint"]
+    assert "railctl cv read 31 32" in envelope["hint"]
 
 
 def test_a_main_track_write_that_fails_after_the_selection_says_the_page_is_unknown(monkeypatch):
     """CV31/CV32 go out and are acked (page.unverified is emitted), then CV266
-    is refused busy. `cv write` does not put the pair back, so the error envelope
-    - which carries no warnings - must say in `details` and the hint that the
-    page is unknown, and keep the page.unverified event rather than drop it."""
+    is refused busy. The main track never puts the pair back, so the error
+    envelope - which carries no warnings - must say in `details` and the hint
+    that the page is unknown, and keep the page.unverified event rather than
+    drop it."""
     bench = _pom_bench(monkeypatch)
     bench.expect(STATUS_REQUEST, reply=STATUS_POWER_ON)
     bench.expect(cmd_pom_write_byte(ADDRESS, 31, RESTING_PAGE[0], threshold=THRESHOLD), reply=ACK)
@@ -234,6 +343,7 @@ def test_a_main_track_write_that_fails_after_the_selection_says_the_page_is_unkn
     selection = envelope["details"]["page_selection"]
     assert selection == {"page": [0, 1], "state": "unknown", "events": ["page.unverified"]}
     assert "which index page the decoder is on is unknown" in envelope["hint"]
+    assert "the main track never puts the pair back" in envelope["hint"]
     assert "railctl cv read 31 32" in envelope["hint"]
 
 
@@ -290,7 +400,12 @@ def test_a_main_track_write_with_a_page_warns_the_page_is_unverified_and_claims_
     # back either. The page is reported as SELECTED, and the warning says the
     # selection is unknown.
     assert payload["result"]["verified"] is None
-    assert payload["result"]["page"] == list(RESTING_PAGE)
+    assert payload["result"]["page"] == {
+        "pair": list(RESTING_PAGE),
+        "verified": None,
+        "source": "selected",
+        "restore": None,
+    }
     by_name = {w["name"]: w for w in payload["warnings"]}
     assert by_name["page.unverified"]["details"] == {"page": [0, 1], "mode": "pom"}
     assert "unknown" in by_name["page.unverified"]["message"]
@@ -312,7 +427,8 @@ def test_a_main_track_write_with_a_page_says_the_same_in_human_output(monkeypatc
     assert "warning: page.unverified:" in result.stdout
     assert "verified: unknown" in result.stdout
     assert "verified: yes" not in result.stdout
-    assert "index page CV31:CV32 = 0:1 selected before the write" in result.stdout
+    assert "index page CV31:CV32 = 0:1 selected, not confirmed" in result.stdout
+    assert "the decoder is left on index page 0:1" in result.stdout
 
 
 def test_an_interrupt_between_cv31_and_cv32_still_says_the_page_is_unknown(monkeypatch):
@@ -382,9 +498,49 @@ def test_a_silent_decoder_after_a_page_selection_suggests_a_read_on_that_page():
     from railctl.errors import DecoderNotRespondingError
 
     paged = DecoderNotRespondingError("silent", cv=MASTER_VOLUME_CV)
-    _note_page_left_unknown(paged, RESTING_PAGE, StationEventLog())
+    _note_page_left_unknown(
+        paged, RESTING_PAGE, StationEventLog(), cv=MASTER_VOLUME_CV, track="main"
+    )
     plain = DecoderNotRespondingError("silent", cv=MASTER_VOLUME_CV)
 
     read = ["railctl", "cv", "read", str(MASTER_VOLUME_CV), "--mode", "service"]
     assert [*read, "--page", "0:1"] in report_for(paged, command="cv write").suggestions
     assert read in report_for(plain, command="cv write").suggestions
+
+
+def _noted(error, *, track: str):
+    from railctl.cli.commands.cv import _note_page_left_unknown
+    from railctl.cli.deps import StationEventLog
+
+    _note_page_left_unknown(error, (145, 2), StationEventLog(), cv=MASTER_VOLUME_CV, track=track)
+    return error
+
+
+def test_a_prog_write_that_failed_after_a_confirmed_restore_says_the_pair_is_back():
+    """The CV write failed and the station put the found pair back and read it
+    back (`details.page_restore`): the hint says so instead of "unknown", while
+    `page_selection.state` stays "unknown" - this layer measured nothing."""
+    error = _noted(
+        DecoderNotRespondingError(
+            "silent",
+            cv=MASTER_VOLUME_CV,
+            details={"page_restore": {"pair": [0, 1], "verified": True}},
+        ),
+        track="prog",
+    )
+    assert error.details["page_selection"]["state"] == "unknown"
+    assert "CV31/CV32 were put back to 0:1" in error.hint
+    assert "read back to confirm it" in error.hint
+    assert "unknown" not in error.hint
+    # Not a selection failure: nothing claims the indexed CV went unwritten.
+    assert "was not written" not in error.hint
+
+
+def test_a_prog_write_that_failed_with_no_restore_fact_stays_hedged():
+    """An interrupt, or anything else that carried no `page_restore`: whether
+    the pair was put back is unknown, and the hint must not say it was - nor
+    borrow the main track's "never puts the pair back"."""
+    error = _noted(DecoderNotRespondingError("silent", cv=MASTER_VOLUME_CV), track="prog")
+    assert "whether the pair found before the write was put back is unknown" in error.hint
+    assert "never puts the pair back" not in error.hint
+    assert "railctl cv read 31 32" in error.hint

@@ -10,6 +10,7 @@ the envelope, which exit code came out - never about wire bytes, which
 from __future__ import annotations
 
 import json
+from dataclasses import replace
 
 import pytest
 from typer.testing import CliRunner
@@ -56,11 +57,13 @@ from railctl.errors import (
 )
 from railctl.exit_codes import DOMAIN_FAILURE_EXIT_CODE, PARTIAL_EXIT_CODE, USAGE_EXIT_CODE
 from railctl.station import (
+    INDEXED_CV_RANGE,
     Capabilities,
     CvEncoding,
     CvReadOutcome,
     CvResult,
     CvSpec,
+    PageSelection,
     ProgMode,
     Station,
 )
@@ -514,6 +517,10 @@ class FakeCvStation:
         #: The `page` each `cv_write` was handed, kept apart from `write_calls`
         #: so the many exact-dict assertions on those stay about what they were.
         self.write_pages: list[object] = []
+        #: The `restore_page` switch each `cv_write` was handed, same reason.
+        self.write_restores: list[bool] = []
+        #: The pair the fake decoder sat on before a write; what a restore puts back.
+        self.found_page: tuple[int, int] = (0, 1)
         self.status_calls = 0
         #: Events the fake emits through the `on_event` callback `Station.open`
         #: was handed, once the first facade call runs - `None` callback means
@@ -579,11 +586,22 @@ class FakeCvStation:
             )
         return outcomes
 
-    def cv_write(self, cv, value, *, address=None, mode=ProgMode.SERVICE, page=None, verify=True):
+    def cv_write(
+        self,
+        cv,
+        value,
+        *,
+        address=None,
+        mode=ProgMode.SERVICE,
+        page=None,
+        verify=True,
+        restore_page=False,
+    ):
         self.write_calls.append(
             {"cv": cv, "value": value, "address": address, "mode": mode, "verify": verify}
         )
         self.write_pages.append(page)
+        self.write_restores.append(restore_page)
         self._emit_all()
         if self.write_error is not None:
             raise self.write_error
@@ -592,6 +610,15 @@ class FakeCvStation:
         # overrides for tests that need a specific value.
         default_verified = True if verify else None
         verified = default_verified if self.write_verified is None else self.write_verified
+        # The page as the real station reports it: selected for an indexed CV,
+        # read back in service mode and not over POM, and put back as found
+        # only when asked to and only in service mode.
+        selection = restored = None
+        if page is not None and cv in INDEXED_CV_RANGE:
+            in_service = mode is ProgMode.SERVICE
+            selection = PageSelection(pair=page, verified=True if in_service else None)
+            if restore_page and in_service:
+                restored = PageSelection(pair=self.found_page, verified=True)
         return CvResult(
             cv=cv,
             value=value,
@@ -600,6 +627,8 @@ class FakeCvStation:
             operation="write",
             verified=verified,
             elapsed=0.02,
+            page=selection,
+            page_restore=restored,
         )
 
     def close(self) -> None:
@@ -803,15 +832,38 @@ def test_cv_read_with_a_page_on_an_indexed_cv_is_confirmed_before_the_station_op
     ]
 
 
-def test_cv_read_with_a_page_and_no_indexed_cv_needs_no_confirmation(monkeypatch):
-    # The page is attached to indexed CVs only, so nothing gets written and
-    # nothing needs confirming.
-    fake = _install(monkeypatch, FakeCvStation(read_values={8: 145}))
+def test_cv_read_with_a_page_and_no_indexed_cv_is_refused_before_the_station_opens(monkeypatch):
+    """A page no requested CV can use would select nothing: refused as a usage
+    error (`page_not_applicable`), not dropped, and before the confirmation
+    and the port - the run is non-interactive with no `--yes`, so reaching the
+    question would have answered `confirmation_required` instead."""
+
+    def _boom(*_a, **_k):
+        raise AssertionError("the page refusal must come before the station opens")
+
+    monkeypatch.setattr(Station, "open", staticmethod(_boom))
     result = runner.invoke(
-        app, ["cv", "read", "8", "--page", "145:0", "--non-interactive", "--format", "json"]
+        app,
+        [
+            "cv",
+            "read",
+            "8",
+            "29",
+            "--mode",
+            "service",
+            "--page",
+            "145:0",
+            "--non-interactive",
+            "--format",
+            "json",
+        ],
     )
-    assert result.exit_code == 0, result.stderr
-    assert fake.read_calls[0]["specs"][0].page is None
+    assert result.exit_code == USAGE_EXIT_CODE, result.stderr
+    envelope = _stderr_envelope(result)
+    assert envelope["code"] == "usage"
+    assert envelope["details"] == {"reason": "page_not_applicable", "page": "145:0", "cvs": [8, 29]}
+    # The same command without `--page`, a non-default `--mode` kept.
+    assert envelope["suggestions"] == [["railctl", "cv", "read", "8", "29", "--mode", "service"]]
 
 
 def test_cv_read_rows_come_back_in_request_order_not_station_order(monkeypatch):
@@ -1368,6 +1420,14 @@ def test_cv_write_publishes_a_page_option():
     options = {option.name: option for option in command_meta("cv write").options}
     assert "--page" in options
     assert "CV31:CV32" in options["--page"].help
+    # What happens to the pair afterwards, per track, and no "ignored".
+    assert "--track prog the pair is read first and re-selected" in options["--page"].help
+    assert "--track main nothing can read it" in options["--page"].help
+    assert "Refused for a CV outside 257-512" in options["--page"].help
+    assert "gnored" not in options["--page"].help
+    read_help = {option.name: option for option in command_meta("cv read").options}["--page"].help
+    assert "re-selected as found" in read_help
+    assert "refused when no requested CV is in 257-512" in read_help
     help_text = runner.invoke(app, ["cv", "write", "--help"]).stdout
     assert "--page" in help_text
 
@@ -1381,9 +1441,55 @@ def test_cv_write_hands_the_page_to_the_station_for_an_indexed_cv(monkeypatch):
     assert result.exit_code == 0, result.stderr
     assert fake.write_calls[0]["cv"] == MASTER_VOLUME_CV
     assert fake.write_pages == [(0, 1)]
+    # The programming track asks the station to put the pair back as found.
+    assert fake.write_restores == [True]
     payload = json.loads(result.stdout)
-    assert payload["result"]["page"] == [0, 1]
+    # What the STATION reported, not the token echoed back.
+    assert payload["result"]["page"] == {
+        "pair": [0, 1],
+        "verified": True,
+        "source": "selected",
+        "restore": {"pair": [0, 1], "verified": True},
+    }
     assert payload["result"]["name"] == "volume_master"
+
+
+def test_cv_write_a_main_track_page_is_not_restored_and_says_the_decoder_is_left_on_it(
+    monkeypatch,
+):
+    fake = _install(monkeypatch, FakeCvStation(capabilities=POM_CAPS))
+    argv = ["cv", "write", str(MASTER_VOLUME_CV), "35", "--track", "main", "--address", "3"]
+    result = runner.invoke(app, [*argv, "--page", "0:1", "--yes", "--format", "json"])
+    assert result.exit_code == 0, result.stderr
+    assert fake.write_restores == [False]
+    assert json.loads(result.stdout)["result"]["page"] == {
+        "pair": [0, 1],
+        "verified": None,
+        "source": "selected",
+        "restore": None,
+    }
+    human = runner.invoke(app, [*argv, "--page", "0:1", "--yes"])
+    assert "index page CV31:CV32 = 0:1 selected, not confirmed" in human.stdout
+    assert "the decoder is left on index page 0:1" in human.stdout
+
+
+def test_cv_write_a_prog_page_says_in_human_output_it_was_confirmed_and_put_back(monkeypatch):
+    fake = _install(monkeypatch, FakeCvStation())
+    fake.found_page = (145, 2)
+    result = runner.invoke(
+        app, ["cv", "write", str(MASTER_VOLUME_CV), "35", "--page", "0:1", "--yes"]
+    )
+    assert result.exit_code == 0, result.stderr
+    assert "index page CV31:CV32 = 0:1 selected and confirmed by read-back" in result.stdout
+    assert "index page put back to 145:2, as found before the write" in result.stdout
+    assert "left on" not in result.stdout
+
+
+def test_cv_write_without_a_page_reports_page_null(monkeypatch):
+    _install(monkeypatch, FakeCvStation())
+    result = runner.invoke(app, ["cv", "write", "3", "20", "--format", "json"])
+    assert result.exit_code == 0, result.stderr
+    assert json.loads(result.stdout)["result"]["page"] is None
 
 
 def test_cv_write_an_indexed_cv_without_a_page_is_refused_before_the_station_opens(monkeypatch):
@@ -1433,7 +1539,10 @@ def test_cv_write_a_page_is_confirmed_before_the_station_opens(monkeypatch):
     envelope = _stderr_envelope(result)
     assert envelope["code"] == "confirmation_required"
     assert "CV31=0" in envelope["message"] and "CV32=1" in envelope["message"]
-    assert "left on that page" in envelope["message"]
+    # The programming track puts the pair back, and the question says so -
+    # not the main track's "left on that page".
+    assert "re-selected as found afterwards" in envelope["message"]
+    assert "left on that page" not in envelope["message"]
     assert envelope["suggestions"] == [
         ["railctl", "cv", "write", str(MASTER_VOLUME_CV), "35", "--page", "0:1", "--yes"]
     ]
@@ -1461,6 +1570,10 @@ def test_cv_write_a_page_confirmation_on_main_suggests_the_main_track_argv(monke
     )
     envelope = _stderr_envelope(result)
     assert envelope["code"] == "confirmation_required", result.stderr
+    # Nothing reads the pair on the main track, so the question says the
+    # decoder stays on the page - before the operator answers.
+    assert "left on that page" in envelope["message"]
+    assert "re-selected as found" not in envelope["message"]
     # `--address` rides along: without it the retry names no locomotive, and
     # exits 2 or writes to the config's default loco instead of loco 3.
     assert envelope["suggestions"] == [
@@ -1498,33 +1611,63 @@ def test_cv_write_a_bad_page_is_a_usage_error_before_the_station_opens(
     assert envelope["code"] == "usage"
     assert envelope["details"]["reason"] == reason
     # The suggested page is the resting one, never `cv read`'s 145:0 example: a
-    # write leaves the decoder on whatever page it selected, so following the
-    # suggestion must not park it on the audio bank.
+    # main-track write leaves the decoder on whatever page it selected, so
+    # following the suggestion must not park it on the audio bank.
     assert envelope["suggestions"] == [
         ["railctl", "cv", "write", str(MASTER_VOLUME_CV), "35", "--page", "0:1"]
     ]
 
 
-def test_cv_write_a_bad_page_is_refused_even_for_a_cv_that_would_ignore_it(monkeypatch):
+def test_cv_write_a_bad_page_is_refused_even_for_a_cv_outside_the_indexed_range(monkeypatch):
     # The same order `cv read` checks in: the token is parsed before anyone asks
-    # whether the CV needs it, so a typo never passes silently.
+    # whether the CV needs it, so a typo is reported as the typo it is.
     _station_must_not_open(monkeypatch)
     result = runner.invoke(app, ["cv", "write", "3", "20", "--page", "145", "--format", "json"])
     assert result.exit_code == USAGE_EXIT_CODE, result.stderr
+    assert _stderr_envelope(result)["details"]["reason"] == "malformed_page"
 
 
-def test_cv_write_a_page_for_a_cv_outside_the_indexed_range_is_ignored(monkeypatch):
-    """The choice, pinned: `--page` on CV3 behaves as `cv read --page` does for
-    the non-indexed CVs of a batch - the page is not handed to the station, so
-    nothing writes CV31/CV32, so nothing needs confirming (the run below is
-    non-interactive with no `--yes`), and the result says `page: null`."""
-    fake = _install(monkeypatch, FakeCvStation())
+def test_cv_write_a_page_for_a_cv_outside_the_indexed_range_is_refused(monkeypatch):
+    """`--page` on CV3 would select nothing: refused as a usage error, not
+    ignored, before the station opens. The suggestion is the same command
+    without `--page`, with every flag that says what or where kept."""
+    _station_must_not_open(monkeypatch)
     result = runner.invoke(
-        app, ["cv", "write", "3", "20", "--page", "0:1", "--non-interactive", "--format", "json"]
+        app,
+        [
+            "cv",
+            "write",
+            "3",
+            "20",
+            "--no-verify",
+            "--address",
+            "7",
+            "--page",
+            "0:1",
+            "--non-interactive",
+            "--format",
+            "json",
+        ],
     )
-    assert result.exit_code == 0, result.stderr
-    assert fake.write_pages == [None]
-    assert json.loads(result.stdout)["result"]["page"] is None
+    assert result.exit_code == USAGE_EXIT_CODE, result.stderr
+    envelope = _stderr_envelope(result)
+    assert envelope["code"] == "usage"
+    assert envelope["details"] == {"reason": "page_not_applicable", "page": "0:1", "cvs": [3]}
+    assert envelope["suggestions"] == [
+        ["railctl", "cv", "write", "3", "20", "--no-verify", "--address", "7"]
+    ]
+
+
+def test_cv_write_an_inapplicable_page_is_refused_before_the_confirmation(monkeypatch):
+    """CV29 is in the confirmation set: a run without `--yes` that reached the
+    question would answer `confirmation_required`. The page refusal comes
+    first, and keeps a `--yes` given so its suggestion runs as typed."""
+    _station_must_not_open(monkeypatch)
+    base = ["cv", "write", "29", "6", "--page", "0:1", "--format", "json"]
+    refused = _stderr_envelope(runner.invoke(app, [*base, "--non-interactive"]))
+    assert refused["details"]["reason"] == "page_not_applicable", refused
+    answered = _stderr_envelope(runner.invoke(app, [*base, "--yes"]))
+    assert answered["suggestions"] == [["railctl", "cv", "write", "29", "6", "--yes"]]
 
 
 def test_cv_write_a_main_track_page_write_without_an_address_suggests_the_page_too(monkeypatch):
@@ -1565,18 +1708,55 @@ def test_cv_write_a_main_track_page_write_without_an_address_suggests_the_page_t
 
 
 def test_build_cv_write_reports_the_selected_page_without_claiming_it_verified():
-    built = build_cv_write(
+    written = replace(
         _write_result(MASTER_VOLUME_CV, 35, verified=None, mode=ProgMode.POM),
-        track="main",
-        address=3,
-        name="volume_master",
-        verify=False,
-        page=(0, 1),
+        page=PageSelection(pair=(0, 1), verified=None),
     )
-    assert built.result["page"] == [0, 1]
+    built = build_cv_write(written, track="main", address=3, name="volume_master", verify=False)
+    assert built.result["page"] == {
+        "pair": [0, 1],
+        "verified": None,
+        "source": "selected",
+        "restore": None,
+    }
     assert built.result["verified"] is None
-    assert "index page CV31:CV32 = 0:1 selected before the write" in built.lines
+    assert (
+        "index page CV31:CV32 = 0:1 selected, not confirmed - nothing could read it back"
+        in built.lines
+    )
+    assert "the decoder is left on index page 0:1" in built.lines
     assert f"railctl cv read {MASTER_VOLUME_CV} --page 0:1" in built.warnings[0].message
+
+
+def test_build_cv_write_reports_a_confirmed_selection_and_the_restore_from_the_station():
+    written = replace(
+        _write_result(MASTER_VOLUME_CV, 35, verified=True),
+        page=PageSelection(pair=(145, 2), verified=True),
+        page_restore=PageSelection(pair=(0, 1), verified=True),
+    )
+    built = build_cv_write(written, track="prog", address=None, name="volume_master", verify=True)
+    assert built.result["page"] == {
+        "pair": [145, 2],
+        "verified": True,
+        "source": "selected",
+        "restore": {"pair": [0, 1], "verified": True},
+    }
+    assert "index page CV31:CV32 = 145:2 selected and confirmed by read-back" in built.lines
+    assert (
+        "index page put back to 0:1, as found before the write, and confirmed by read-back"
+        in built.lines
+    )
+
+
+def test_build_cv_write_an_unconfirmed_restore_says_so():
+    written = replace(
+        _write_result(MASTER_VOLUME_CV, 35, verified=True),
+        page=PageSelection(pair=(145, 2), verified=True),
+        page_restore=PageSelection(pair=(0, 1), verified=None),
+    )
+    built = build_cv_write(written, track="prog", address=None, name="volume_master", verify=True)
+    assert built.result["page"]["restore"] == {"pair": [0, 1], "verified": None}
+    assert "index page written back to 0:1, as found before the write, not confirmed" in built.lines
 
 
 def test_the_bare_cv_group_is_a_usage_error_with_empty_stdout():

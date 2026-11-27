@@ -668,7 +668,17 @@ class _FakeStatusStation:
             for spec in specs
         ]
 
-    def cv_write(self, cv, value, *, address=None, mode=ProgMode.SERVICE, page=None, verify=True):
+    def cv_write(
+        self,
+        cv,
+        value,
+        *,
+        address=None,
+        mode=ProgMode.SERVICE,
+        page=None,
+        verify=True,
+        restore_page=False,
+    ):
         return CvResult(
             cv=cv,
             value=value,

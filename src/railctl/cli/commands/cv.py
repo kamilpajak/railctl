@@ -31,9 +31,18 @@ safety property is explicit here rather than emergent:
 * an indexed CV (257-512) takes `--page CV31:CV32`, confirmed like any write
   to the selectors because that is what selecting it does, and is refused
   with `index_page_required` before the station opens when none is given.
-  Over POM the selection cannot be read back here, and the station's
+  What the selection established is the station's to report
+  (`CvResult.page`, a `PageSelection`), never inferred here. On the
+  programming track the station reads the pair first and re-selects it as
+  found after the write (`CvResult.page_restore`), as `cv read --page` does.
+  Over POM the selection cannot be read back, the station's
   `page.unverified` event reaches the envelope as a warning beside a
-  `verified: null` result - nothing on that path is reported as checked.
+  `verified: null` result, and the decoder is left on the selected page -
+  nothing on that path is reported as checked;
+* a `--page` that no requested CV can use (none in 257-512) is refused as a
+  usage error, `page_not_applicable`, before any question is asked and
+  before the station opens - a flag that would do nothing is not silently
+  dropped.
 """
 
 from __future__ import annotations
@@ -102,6 +111,7 @@ from railctl.station import (
     CvReadOutcome,
     CvResult,
     CvSpec,
+    PageSelection,
     ProgMode,
     resolve_mode,
 )
@@ -243,6 +253,27 @@ _WRITE_PAGE_OPT = typer_option(CV_WRITE_PAGE_OPT)
 RESTING_PAGE_EXAMPLE: Final[str] = "0:1"
 
 
+#: What `cv write --page` does with CV31/CV32 after the write, per track - the
+#: sentence the confirmation question carries, so the operator is told BEFORE
+#: answering. The programming track mirrors `cv read --page`: the station reads
+#: the pair first and re-selects it afterwards, because the ZIMO MS manual (EN,
+#: p. 68) says to reset the CV page after programming and JMRI's ZIMO MS
+#: definitions address CV257-512 by plain number without ever selecting a page
+#: (xml/decoders/zimo/), so a page left behind sends the next tool into the
+#: wrong bank. The main track cannot: no POM read answers on the reference
+#: station (docs/probe-results.md R1), so there is no pair to put back.
+_PAGE_AFTERWARDS: Final[dict[str, str]] = {
+    TRACK_PROG: (
+        "On the programming track the pair is read first and re-selected as found afterwards."
+    ),
+    TRACK_MAIN: (
+        "On the main track nothing can read the pair, so the decoder is left on that "
+        "page afterwards - the ZIMO MS manual (p. 68) says to reset CV31/CV32 after "
+        "programming."
+    ),
+}
+
+
 #: The example `cv read --page` suggests for a malformed token: the ZIMO audio
 #: bank, harmless there because a read puts the pair back as found afterwards.
 READ_PAGE_EXAMPLE: Final[str] = "145:0"
@@ -254,10 +285,15 @@ def parse_page(
     """`"145:0"` -> `(145, 0)`, the CV31/CV32 pair; `None` stays `None`.
 
     `example` is the page the usage suggestion names. It is the caller's to
-    choose because the two callers differ in what following it costs: `cv read`
-    restores the pair afterwards, `cv write` leaves the decoder on whatever page
-    it selected - so `cv write` passes RESTING_PAGE_EXAMPLE, the page the bench
+    choose because the callers differ in what following it costs: `cv read`
+    restores the pair afterwards, and so does `cv write` on the programming
+    track, but a main-track `cv write` leaves the decoder on whatever page it
+    selected - so `cv write` passes RESTING_PAGE_EXAMPLE, the page the bench
     already rests on, and never a bank that moves the decoder somewhere new.
+
+    Whether the page applies to any requested CV is NOT decided here: `backup`
+    shares this parser and has its own rules, so the `page_not_applicable`
+    refusal lives in the command bodies (`_refuse_inapplicable_page`).
     """
     if token is None:
         return None
@@ -277,6 +313,36 @@ def parse_page(
                 details={"reason": "page_value_not_a_byte", "field": name, "value": value},
             )
     return (cv31, cv32)
+
+
+#: `details.reason` of the refusal below.
+REASON_PAGE_NOT_APPLICABLE: Final[str] = "page_not_applicable"
+
+
+def _refuse_inapplicable_page(
+    page: CvPage | None, cvs: Sequence[int], *, command: str, retry: Sequence[str]
+) -> None:
+    """Refuse a `--page` that no CV in `cvs` can use, as a usage error.
+
+    CV31/CV32 index CV257-512 and nothing else - NMRA S-9.2.2 Table 1 ("Primary
+    / Secondary index for CV257-512") and the ZIMO MS manual (EN, p. 68) agree,
+    and JMRI's `MultiIndexProgrammerFacade` writes the index only for an
+    indexed CV id. A page given for CVs outside that window would select
+    nothing and change nothing, and accepting it silently is how a caller who
+    meant CV266 and typed CV26 learns nothing. A batch with at least one
+    indexed CV keeps it: the page applies to that CV. `retry` is the caller's
+    own argv without `--page`, which is the command that does what was asked.
+    Raised before any confirmation and before the station opens.
+    """
+    if page is None or any(cv in INDEXED_CV_RANGE for cv in cvs):
+        return
+    named = ", ".join(f"CV{cv}" for cv in cvs) if len(cvs) <= 4 else f"{len(cvs)} CVs"
+    raise UsageProblem(
+        f"--page selects the ZIMO index page for CV257-512 only, and {command} was given "
+        f"{named}, outside it; refused rather than ignored, because it would select nothing",
+        suggestions=[list(retry)],
+        details={"reason": REASON_PAGE_NOT_APPLICABLE, "page": _page_token(page), "cvs": list(cvs)},
+    )
 
 
 def _catalog_name(catalog: Mapping[int, CatalogEntry], cv: int) -> str:
@@ -331,32 +397,101 @@ def _with_guidance(error: RailctlError, *, mode: ProgMode) -> RailctlError:
     return error
 
 
-def _note_page_left_unknown(error: RailctlError, page: CvPage, events: StationEventLog) -> None:
-    """Record on a failed `cv write --page` that the decoder's index page is now unknown.
+#: `details.page_selection.state` on a failed `cv write --page`. An OPEN set: a
+#: consumer must treat a value it does not know as "unknown". Today `unknown`
+#: is the only value - what the station did establish (a restore it confirmed,
+#: the step that failed) rides beside it as `details.page_restore` and
+#: `details.page_phase`, never folded into a state this layer did not measure.
+PAGE_STATE_UNKNOWN: Final[str] = "unknown"
 
-    The selection writes CV31/CV32 before the indexed CV, and `cv write` - unlike
-    `cv read --page` - does not put the pair back. A failure anywhere inside the
-    write can therefore leave the decoder on the selected page, on half of it
-    (CV31 written, CV32 not), or where it was; this layer cannot tell which. The
-    error envelope carries no warnings, so the fact goes into `details` and the
-    hint, the two fields both output formats publish: `page_selection.state` is
-    `"unknown"`, never a guess, and the station events seen so far (a
-    `page.unverified` among them) ride along instead of being dropped.
+#: The read that settles which pair the decoder is on.
+_READ_THE_PAIR: Final[str] = (
+    "read the pair with `railctl cv read 31 32` on the programming track before trusting "
+    "any CV257-512"
+)
+
+
+def _page_note(error: RailctlError, page: CvPage, *, cv: int, track: str) -> str:
+    """The hint sentence for a failed `cv write --page`, from what the station
+    recorded on the error - never from what this layer would like to be true.
+
+    `details.page_phase` names the page step that failed (`pre_read`, `select`,
+    `restore`; absent = the CV write itself, or an interrupt), and
+    `details.page_restore` - present only on the programming track - is the
+    pair the station put back after the failure and whether it read it back.
+    """
+    token = _page_token(page)
+    phase = error.details.get("page_phase")
+    restored = error.details.get("page_restore")
+    if phase == "pre_read":
+        # The station reads the pair BEFORE writing anything, and stops there.
+        return (
+            f"nothing was written: reading CV31/CV32 as found failed before --page {token} "
+            f"was selected, so CV{cv} and the index page are as they were"
+        )
+    if phase == "restore":
+        return (
+            f"putting CV31/CV32 back to the pair found before the write failed, so which "
+            f"index page the decoder is on is unknown; {_READ_THE_PAIR}"
+        )
+    prefix = ""
+    if phase == "select":
+        # The selection runs before the indexed CV, so its failure is about
+        # CV31/CV32 and never about CV{cv}: that write did not happen.
+        prefix = f"CV{cv} was not written: selecting --page {token} failed before it; "
+    if isinstance(restored, dict) and isinstance(restored.get("pair"), list):
+        found = ":".join(str(v) for v in restored["pair"])
+        if restored.get("verified") is True:
+            return (
+                f"{prefix}CV31/CV32 were put back to {found}, the pair found before the "
+                f"write, and read back to confirm it"
+            )
+        return (
+            f"{prefix}CV31/CV32 were written back to {found}, the pair found before the "
+            f"write, but nothing read them back; {_READ_THE_PAIR}"
+        )
+    if track == TRACK_PROG:
+        return (
+            f"{prefix}--page {token} may already have written CV31/CV32 before this "
+            f"failure, and whether the pair found before the write was put back is "
+            f"unknown, so which index page the decoder is on is unknown; {_READ_THE_PAIR}"
+        )
+    return (
+        f"{prefix}--page {token} may already have written CV31/CV32 before this failure, "
+        f"and the main track never puts the pair back, so which index page the decoder "
+        f"is on is unknown; {_READ_THE_PAIR}"
+    )
+
+
+def _note_page_left_unknown(
+    error: RailctlError, page: CvPage, events: StationEventLog, *, cv: int, track: str
+) -> None:
+    """Record on a failed `cv write --page` what is known about the index page.
+
+    The selection writes CV31/CV32 before the indexed CV. On the main track
+    nothing puts the pair back, and a failure anywhere inside the write can
+    leave the decoder on the selected page, on half of it (CV31 written, CV32
+    not), or where it was; this layer cannot tell which. On the programming
+    track the station read the pair first and puts it back after a failure as
+    well, and says how that went on the error itself (`page_phase`,
+    `page_restore`). The error envelope carries no warnings, so the fact goes
+    into `details` and the hint, the two fields both output formats publish:
+    `page_selection.state` is `"unknown"` (`PAGE_STATE_UNKNOWN`, an open set),
+    never a guess, and the station events seen so far (a `page.unverified`
+    among them) ride along instead of being dropped. A selection that read
+    back as another pair keeps its own `reason: "page_selection_mismatch"`,
+    `wrote` and `read_back` beside this record.
     """
     cv31, cv32 = page
     error.details = {
         **error.details,
         "page_selection": {
             "page": [cv31, cv32],
-            "state": "unknown",
+            "state": PAGE_STATE_UNKNOWN,
             "events": [name for name, _payload in events.events],
         },
     }
-    note = (
-        f"--page {cv31}:{cv32} may already have written CV31/CV32 before this failure, so "
-        f"which index page the decoder is on is unknown; read the pair with `railctl cv "
-        f"read 31 32` on the programming track before trusting any CV257-512"
-    )
+    note = _page_note(error, page, cv=cv, track=track)
     error.hint = f"{error.hint}; {note}" if error.hint else note
 
 
@@ -448,6 +583,63 @@ def _page_token(page: CvPage) -> str:
     return f"{page[0]}:{page[1]}"
 
 
+def _selection_json(selection: PageSelection | None) -> dict[str, object] | None:
+    """`{"pair": [cv31, cv32], "verified": true|null}` - the same shape the
+    station records as `details.page_restore` on a failed write."""
+    if selection is None:
+        return None
+    return {"pair": list(selection.pair), "verified": selection.verified}
+
+
+def _page_json(written: CvResult) -> dict[str, object] | None:
+    """The result's `page`: `null` when no page was selected (a CV outside
+    257-512), otherwise what the station reported about it -
+
+    - `pair`: the CV31/CV32 values written before the CV;
+    - `verified`: `true` when the pair was read back and matched, `null` when
+      nothing could read it (POM) - never `false`, a mismatch is an error;
+    - `source`: `"selected"`, this tool wrote the pair (an open set);
+    - `restore`: `{pair, verified}` of the pair found before the write and put
+      back after it (programming track), or `null` when nothing was put back -
+      on the main track the decoder is left on `pair`.
+    """
+    if written.page is None:
+        return None
+    return {
+        **(_selection_json(written.page) or {}),
+        "source": written.page.source,
+        "restore": _selection_json(written.page_restore),
+    }
+
+
+def _page_lines(written: CvResult) -> list[str]:
+    """The human twin of `_page_json`, one fact per line."""
+    selection = written.page
+    if selection is None:
+        return []
+    token = _page_token(selection.pair)
+    if selection.verified:
+        lines = [f"index page CV31:CV32 = {token} selected and confirmed by read-back"]
+    else:
+        lines = [
+            f"index page CV31:CV32 = {token} selected, not confirmed - nothing could read it back"
+        ]
+    restored = written.page_restore
+    if restored is None:
+        lines.append(f"the decoder is left on index page {token}")
+    elif restored.verified:
+        lines.append(
+            f"index page put back to {_page_token(restored.pair)}, as found before the "
+            f"write, and confirmed by read-back"
+        )
+    else:
+        lines.append(
+            f"index page written back to {_page_token(restored.pair)}, as found before the "
+            f"write, not confirmed"
+        )
+    return lines
+
+
 def build_cv_write(
     written: CvResult,
     *,
@@ -455,7 +647,6 @@ def build_cv_write(
     address: int | None,
     name: str,
     verify: bool,
-    page: CvPage | None = None,
 ) -> CommandResult:
     """The one write, with `verified` carried honestly: `true` only when an
     independent read-back (or a decoder-level Ready) confirmed it, `null` when
@@ -463,12 +654,13 @@ def build_cv_write(
     nobody measured (a real mismatch raises `CvVerifyError`) - and
     the reason it is not `true` said out loud.
 
-    `page` is the CV31:CV32 pair selected ahead of an indexed write, or `None`
-    when none was. It is reported as what was SELECTED, never as what was
-    verified: whether the selection could be read back is the station's to say,
-    and when it could not - every POM selection on the reference station - the
-    `page.unverified` event says so beside this result. `verified` covers the
-    CV that was written and nothing else.
+    `page` comes from the station (`CvResult.page` and `.page_restore`), never
+    from the `--page` token: what was selected, whether it was read back, and
+    what was put back afterwards are the station's to say (`_page_json`). When
+    the selection could not be read back - every POM selection on the
+    reference station - `page.verified` is `null` and the `page.unverified`
+    event says so beside this result. The top-level `verified` covers the CV
+    that was written and nothing else.
     """
     result = CommandResult(schema=CV_WRITE_SCHEMA, command="cv write")
     label = _label(written.cv, name)
@@ -479,11 +671,11 @@ def build_cv_write(
         "mode": written.mode.value,
         "track": track,
         "address": address,
-        "page": list(page) if page is not None else None,
+        "page": _page_json(written),
         "verified": written.verified,
     }
-    if page is not None:
-        result.say(f"index page CV31:CV32 = {_page_token(page)} selected before the write")
+    for line in _page_lines(written):
+        result.say(line)
     result.say(
         f"{label} = {written.value} written ({written.mode.value} mode, "
         f"verified: {tri_state(written.verified)})"
@@ -504,10 +696,10 @@ def build_cv_write(
         # decoder may sit on another page. A service read without `--page` would
         # then read CV{n} from whichever page that is - it runs, and answers about
         # a different register. With `--page`, the read selects the bank the
-        # write went to before it reads.
+        # write went to before it reads, and puts the pair back as it found it.
         read_back = f"railctl cv read {written.cv}"
-        if page is not None:
-            read_back += f" --page {_page_token(page)}"
+        if written.page is not None:
+            read_back += f" --page {_page_token(written.page.pair)}"
         result.warn(
             "cv.write_unverified",
             f"the write went out on the main track and cannot be checked there; put the "
@@ -574,6 +766,16 @@ def register(app: typer.Typer) -> None:
             cvs = parse_cv_spec(cvspec, catalog, argv_prefix=prefix)
             check_choice("mode", mode, CV_READ_MODE_OPT.enum or ())
             declared_page = parse_page(page, argv_hint=argv_hint)
+            # The caller's own argv without `--page`: every flag that changes
+            # what is read or where rides along, resolved as `cv write` does.
+            page_retry = list(argv_hint)
+            if mode != CV_READ_MODE_OPT.default:
+                page_retry += ["--mode", mode]
+            if settings.address is not None:
+                page_retry += ["--address", str(settings.address)]
+            if settings.target != DEFAULT_TARGET:
+                page_retry += ["--target", settings.target]
+            _refuse_inapplicable_page(declared_page, cvs, command="cv read", retry=page_retry)
             if declared_page is not None and any(cv in INDEXED_CV_RANGE for cv in cvs):
                 # The one path through a read that WRITES the decoder: the
                 # page selection writes CV31/CV32, which are in CONFIRM_CVS
@@ -774,11 +976,23 @@ def register(app: typer.Typer) -> None:
                 retry += ["--address", str(settings.address)]
             if settings.target != DEFAULT_TARGET:
                 retry += ["--target", settings.target]
-            # Parsed for every CV, so a malformed token is a usage error even
-            # where it would be ignored - the same order `cv read` checks in.
-            # The suggested page is the resting one, never the read's example:
-            # a write leaves the decoder on whatever page it selected.
+            # Parsed for every CV, so a malformed token is a usage error first -
+            # the same order `cv read` checks in. The suggested page is the
+            # resting one, never the read's example: a main-track write leaves
+            # the decoder on whatever page it selected.
             declared_page = parse_page(page, argv_hint=retry, example=RESTING_PAGE_EXAMPLE)
+            # A well-formed `--page` on a CV outside 257-512 selects nothing:
+            # refused, before any question and before the station opens. The
+            # suggestion is this command without `--page`, keeping an answer
+            # already given (`--yes`, `--confirm`) so it runs as typed.
+            not_applicable_retry = list(retry)
+            if confirm_token is not None:
+                not_applicable_retry += ["--confirm", confirm_token]
+            if settings.assume_yes:
+                not_applicable_retry.append("--yes")
+            _refuse_inapplicable_page(
+                declared_page, [number], command="cv write", retry=not_applicable_retry
+            )
             write_page: CvPage | None = None
             if number in INDEXED_CV_RANGE:
                 if declared_page is None:
@@ -809,18 +1023,13 @@ def register(app: typer.Typer) -> None:
                 confirm(
                     f"--page selects the ZIMO index page by WRITING CV31={cv31} and "
                     f"CV32={cv32} before CV{number} - later indexed CV reads and writes "
-                    f"land where they point, and the decoder is left on that page "
-                    f"afterwards. Write CV31/CV32",
+                    f"land where they point. {_PAGE_AFTERWARDS[track]} Write CV31/CV32",
                     settings=settings,
                     stdin=sys.stdin,
                     stderr=output.stderr,
                     retry_argv=[*retry, "--page", str(page)],
                 )
                 write_page = declared_page
-            # A `--page` given for a CV outside 257-512 is ignored, exactly as
-            # `cv read` ignores it for the non-indexed CVs of a batch: nothing
-            # is selected, nothing is written to CV31/CV32, and so nothing is
-            # asked - `write_page` stays `None` and the result says `page: null`.
             if number in CONFIRM_CVS:
                 if number == FACTORY_RESET_CV and value == FACTORY_RESET_VALUE:
                     # The one question `--yes` does not answer. See FACTORY_RESET_TOKEN for
@@ -888,10 +1097,13 @@ def register(app: typer.Typer) -> None:
                         mode=wanted,
                         page=write_page,
                         verify=effective_verify,
+                        # Leave-as-found on the programming track only: over POM
+                        # no read can tell what pair to put back.
+                        restore_page=wanted is ProgMode.SERVICE,
                     )
                 except RailctlError as exc:
                     if write_page is not None:
-                        _note_page_left_unknown(exc, write_page, events)
+                        _note_page_left_unknown(exc, write_page, events, cv=number, track=track)
                     raise
                 except KeyboardInterrupt:
                     # Ctrl-C between CV31 and CV32 leaves the page just as unknown as
@@ -902,7 +1114,7 @@ def register(app: typer.Typer) -> None:
                     if write_page is None:
                         raise
                     aborted = AbortedError(ABORTED_MESSAGE)
-                    _note_page_left_unknown(aborted, write_page, events)
+                    _note_page_left_unknown(aborted, write_page, events, cv=number, track=track)
                     raise aborted from None
                 outcome = build_cv_write(
                     written,
@@ -910,7 +1122,6 @@ def register(app: typer.Typer) -> None:
                     address=resolved_address,
                     name=name,
                     verify=effective_verify,
-                    page=write_page,
                 )
                 events.attach_to(outcome)
                 outcome.link = link_info(station, settings)
