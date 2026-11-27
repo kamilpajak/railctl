@@ -669,6 +669,23 @@ CV_PAGE_OPT = Option(
     type="string",
     default=None,
 )
+#: `cv write`'s `--page`: the same flag, the same CV31:CV32 token and the same
+#: parser as `cv read`'s, with help that says what a WRITE does with it. A read
+#: puts the pair back as it found it; a write cannot - over POM the pair cannot
+#: even be read on the reference station (docs/probe-results.md R1) - so the
+#: decoder is left on the selected page, and the help says so rather than
+#: borrowing the read's promise.
+CV_WRITE_PAGE_OPT = Option(
+    name="--page",
+    help=(
+        "select the ZIMO index page for CV257-512 by first writing CV31:CV32, for example "
+        "0:1 (confirmed; --yes answers it). The decoder is left on that page afterwards. "
+        "Ignored for a CV outside 257-512; without it such a CV aborts with "
+        "index_page_required"
+    ),
+    type="string",
+    default=None,
+)
 CV_WRITE_CV_ARG = Argument(
     name="cv",
     help="exactly one CV number or catalog slug",
@@ -806,9 +823,11 @@ _CV_WRITE = CommandMeta(
     exit_codes=CV_WRITE_EXIT_CODES,
     error_codes=CV_WRITE_ERROR_CODES,
     arguments=(CV_WRITE_CV_ARG, CV_WRITE_VALUE_ARG),
-    options=(CV_WRITE_VERIFY_OPT, CV_WRITE_TRACK_OPT, CV_WRITE_CONFIRM_OPT),
+    options=(CV_WRITE_VERIFY_OPT, CV_WRITE_TRACK_OPT, CV_WRITE_PAGE_OPT, CV_WRITE_CONFIRM_OPT),
     # The confirmation set {1, 8, 17, 18, 29, 31, 32, 144} lives in
-    # commands/cv.py, derived from the station layer's own constants.
+    # commands/cv.py, derived from the station layer's own constants. `--page`
+    # on an indexed CV writes CV31/CV32, two members of that set, so it is
+    # confirmed through the same gate.
     confirms=True,
 )
 

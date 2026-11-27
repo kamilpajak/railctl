@@ -27,7 +27,13 @@ safety property is explicit here rather than emergent:
   station (measured 2026-08-06);
 * verify-after-write defaults ON; `--no-verify` turns it off; and an
   explicit `--verify` with `--track main` is a usage error, never a silent
-  downgrade, because nothing can confirm a POM write on this hardware.
+  downgrade, because nothing can confirm a POM write on this hardware;
+* an indexed CV (257-512) takes `--page CV31:CV32`, confirmed like any write
+  to the selectors because that is what selecting it does, and is refused
+  with `index_page_required` before the station opens when none is given.
+  Over POM the selection cannot be read back here, and the station's
+  `page.unverified` event reaches the envelope as a warning beside a
+  `verified: null` result - nothing on that path is reported as checked.
 """
 
 from __future__ import annotations
@@ -46,6 +52,7 @@ from railctl.cli._meta import (
     CV_SPEC_ARG,
     CV_WRITE_CONFIRM_OPT,
     CV_WRITE_CV_ARG,
+    CV_WRITE_PAGE_OPT,
     CV_WRITE_TRACK_OPT,
     CV_WRITE_VALUE_ARG,
     CV_WRITE_VERIFY_OPT,
@@ -225,6 +232,14 @@ _VALUE_ARG = typer_argument(CV_WRITE_VALUE_ARG)
 _VERIFY_OPT = typer_option(CV_WRITE_VERIFY_OPT)
 _TRACK_OPT = typer_option(CV_WRITE_TRACK_OPT)
 _CONFIRM_OPT = typer_option(CV_WRITE_CONFIRM_OPT)
+_WRITE_PAGE_OPT = typer_option(CV_WRITE_PAGE_OPT)
+
+#: The pair the reference MS450P22 rests on and refuses to leave, and on which
+#: CV257-512 read as the normal CVs (docs/probe-results.md, "The ZIMO index bank
+#: rests at 0:1 and will not leave it"). Named in the `index_page_required`
+#: hint as the measured example - never applied without being typed, because
+#: one decoder is one decoder and another may rest at 0:0.
+RESTING_PAGE_EXAMPLE: Final[str] = "0:1"
 
 
 def parse_page(token: str | None, *, argv_hint: Sequence[str]) -> CvPage | None:
@@ -385,14 +400,32 @@ def build_cv_read(
     return result
 
 
+def _page_token(page: CvPage) -> str:
+    return f"{page[0]}:{page[1]}"
+
+
 def build_cv_write(
-    written: CvResult, *, track: str, address: int | None, name: str, verify: bool
+    written: CvResult,
+    *,
+    track: str,
+    address: int | None,
+    name: str,
+    verify: bool,
+    page: CvPage | None = None,
 ) -> CommandResult:
     """The one write, with `verified` carried honestly: `true` only when an
     independent read-back (or a decoder-level Ready) confirmed it, `null` when
     nothing measured the decoder - never `false`, which would claim a mismatch
     nobody measured (a real mismatch raises `CvVerifyError`) - and
-    the reason it is not `true` said out loud."""
+    the reason it is not `true` said out loud.
+
+    `page` is the CV31:CV32 pair selected ahead of an indexed write, or `None`
+    when none was. It is reported as what was SELECTED, never as what was
+    verified: whether the selection could be read back is the station's to say,
+    and when it could not - every POM selection on the reference station - the
+    `page.unverified` event says so beside this result. `verified` covers the
+    CV that was written and nothing else.
+    """
     result = CommandResult(schema=CV_WRITE_SCHEMA, command="cv write")
     label = _label(written.cv, name)
     result.result = {
@@ -402,8 +435,11 @@ def build_cv_write(
         "mode": written.mode.value,
         "track": track,
         "address": address,
+        "page": list(page) if page is not None else None,
         "verified": written.verified,
     }
+    if page is not None:
+        result.say(f"index page CV31:CV32 = {_page_token(page)} selected before the write")
     result.say(
         f"{label} = {written.value} written ({written.mode.value} mode, "
         f"verified: {tri_state(written.verified)})"
@@ -419,11 +455,15 @@ def build_cv_write(
     if written.verified:
         return result
     if track == TRACK_MAIN:
+        # The read-back command has to be one that RUNS: an indexed CV read
+        # without its page aborts with `index_page_required`.
+        read_back = f"railctl cv read {written.cv}"
+        if page is not None:
+            read_back += f" --page {_page_token(page)}"
         result.warn(
             "cv.write_unverified",
             f"the write went out on the main track and cannot be checked there; put the "
-            f"locomotive on the programming track and run `railctl cv read {written.cv}` "
-            f"to verify it",
+            f"locomotive on the programming track and run `{read_back}` to verify it",
             cv=written.cv,
         )
         return result
@@ -590,6 +630,7 @@ def register(app: typer.Typer) -> None:
         value: int = _VALUE_ARG,
         verify: bool | None = _VERIFY_OPT,
         track: str = _TRACK_OPT,
+        page: str | None = _WRITE_PAGE_OPT,
         confirm_token: str | None = _CONFIRM_OPT,
         target: str | None = _TARGET,
         address: int | None = _ADDRESS,
@@ -663,12 +704,57 @@ def register(app: typer.Typer) -> None:
                         "max": entry.max,
                     },
                 )
+            # The retry argv repeats what was actually typed (the raw CV token,
+            # so a slug stays a slug) - `confirm` appends `--yes`.
+            retry = [*prefix, cv, str(value)]
+            if track == TRACK_MAIN:
+                retry += ["--track", TRACK_MAIN]
+            # Parsed for every CV, so a malformed token is a usage error even
+            # where it would be ignored - the same order `cv read` checks in.
+            declared_page = parse_page(page, argv_hint=retry)
+            write_page: CvPage | None = None
+            if number in INDEXED_CV_RANGE:
+                if declared_page is None:
+                    # Refused here, before the station opens, rather than by
+                    # `ensure_page` after a port, a status read and (on main) a
+                    # pre-flight - and with the flag this command now has named,
+                    # instead of the station layer's generic wording.
+                    raise IndexPageRequiredError(
+                        f"CV{number} is behind a ZIMO index page (CV31/CV32), and cv write "
+                        f"was given no --page; refused before any telegram went out",
+                        hint=(
+                            f"pass the decoder's index page as --page CV31:CV32, for example "
+                            f"`{' '.join([*retry, '--page', RESTING_PAGE_EXAMPLE])}`. Read "
+                            f"the live pair first with `railctl cv read 31 32` on the "
+                            f"programming track: the reference MS450P22 rests at "
+                            f"{RESTING_PAGE_EXAMPLE}, where CV257-512 are the normal CVs "
+                            f"(docs/probe-results.md), but another decoder may not"
+                        ),
+                        cv=number,
+                        details={"reason": "no_page_given"},
+                    )
+                # The one path through `cv write` that writes a CV the operator
+                # did not name: the selection writes CV31/CV32, which are in
+                # CONFIRM_CVS precisely because later indexed access lands where
+                # they point. Same gate as `cv read --page`, and BEFORE the
+                # station opens - a refusal must cost no port.
+                cv31, cv32 = declared_page
+                confirm(
+                    f"--page selects the ZIMO index page by WRITING CV31={cv31} and "
+                    f"CV32={cv32} before CV{number} - later indexed CV reads and writes "
+                    f"land where they point, and the decoder is left on that page "
+                    f"afterwards. Write CV31/CV32",
+                    settings=settings,
+                    stdin=sys.stdin,
+                    stderr=output.stderr,
+                    retry_argv=[*retry, "--page", str(page)],
+                )
+                write_page = declared_page
+            # A `--page` given for a CV outside 257-512 is ignored, exactly as
+            # `cv read` ignores it for the non-indexed CVs of a batch: nothing
+            # is selected, nothing is written to CV31/CV32, and so nothing is
+            # asked - `write_page` stays `None` and the result says `page: null`.
             if number in CONFIRM_CVS:
-                # The retry argv repeats what was actually typed (the raw CV
-                # token, so a slug stays a slug) - `confirm` appends `--yes`.
-                retry = [*prefix, cv, str(value)]
-                if track == TRACK_MAIN:
-                    retry += ["--track", TRACK_MAIN]
                 if number == FACTORY_RESET_CV and value == FACTORY_RESET_VALUE:
                     # The one question `--yes` does not answer. See FACTORY_RESET_TOKEN for
                     # why the token names the operation rather than the decoder. Raised
@@ -715,10 +801,10 @@ def register(app: typer.Typer) -> None:
             try:
                 resolved_address: int | None = None
                 if wanted is ProgMode.POM:
-                    resolved_address = require_address(
-                        settings,
-                        argv_hint=[*prefix, cv, str(value), "--track", "main"],
-                    )
+                    address_hint = [*prefix, cv, str(value), "--track", "main"]
+                    if write_page is not None:
+                        address_hint += ["--page", str(page)]
+                    resolved_address = require_address(settings, argv_hint=address_hint)
                     preflight(station, speed=None, action="a main-track (POM) CV write")
                 else:
                     print(PROG_TRACK_NOTICE, file=output.stderr)
@@ -727,6 +813,7 @@ def register(app: typer.Typer) -> None:
                     value,
                     address=resolved_address,
                     mode=wanted,
+                    page=write_page,
                     verify=effective_verify,
                 )
                 outcome = build_cv_write(
@@ -735,6 +822,7 @@ def register(app: typer.Typer) -> None:
                     address=resolved_address,
                     name=name,
                     verify=effective_verify,
+                    page=write_page,
                 )
                 events.attach_to(outcome)
                 outcome.link = link_info(station, settings)

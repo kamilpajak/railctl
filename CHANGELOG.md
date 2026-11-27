@@ -6,6 +6,30 @@ All notable changes to this project are documented in this file. The format foll
 
 ## [Unreleased]
 
+### Added
+
+- **`cv write` takes `--page CV31:CV32`, so CV257-512 can be written at all.** Before this,
+  `Programming.cv_write` demanded a page for an indexed CV and `cv write` had no way to pass
+  one, so CV266 (`volume_master`) was unwritable on both tracks. The flag parses exactly as
+  `cv read --page` does, and because selecting the page WRITES CV31/CV32 it is confirmed
+  through the same gate before the station opens (`--yes` answers it). Unlike a read, a
+  write does not put the pair back: the decoder is left on the selected page, and the
+  question says so. A `--page` given for a CV outside 257-512 is ignored, as `cv read`
+  ignores it for the non-indexed CVs of a batch. The result carries `page` - the pair that
+  was selected, or `null`.
+
+### Changed
+
+- **An indexed CV written without `--page` is refused before the station opens**, still as
+  `index_page_required`, now with a hint that names `--page` and a runnable example, and
+  points at `railctl cv read 31 32` to find the live pair first.
+
+- **`page.unverified` says what it means.** Over POM the CV31/CV32 selection cannot be read
+  back on the reference station (docs/probe-results.md R1), and the warning now says the
+  page was written and that whether the decoder is on it is unknown, instead of only naming
+  the event. A main-track write's `cv.write_unverified` advice includes `--page` for an
+  indexed CV, so the read-back it recommends is one that runs.
+
 ## [0.4.0] - 2026-11-12
 
 ### Added

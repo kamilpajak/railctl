@@ -469,9 +469,28 @@ class StationEventLog:
         for name, payload in self.events:
             outcome.warn(
                 name,
-                f"the station reported {name} during this command",
+                _event_message(name, payload),
                 **{key: _jsonable(value) for key, value in payload.items()},
             )
+
+
+def _event_message(name: str, payload: dict[str, object]) -> str:
+    """The warning text for one station event. Most events carry the generic
+    sentence; `page.unverified` says what it means, because it is the one an
+    operator has to act on before trusting any indexed CV the command touched:
+    CV31/CV32 were written and nothing read them back, so which page the
+    decoder is on is UNKNOWN - not confirmed, and not refuted either."""
+    generic = f"the station reported {name} during this command"
+    if name == "page.unverified":
+        page = _jsonable(payload.get("page"))
+        mode = _jsonable(payload.get("mode"))
+        if isinstance(page, list) and len(page) == 2:
+            return (
+                f"{generic}: CV31/CV32 were written to select index page "
+                f"{page[0]}:{page[1]}, but nothing could read them back in {mode} mode, so "
+                f"whether the decoder is on that page is unknown"
+            )
+    return generic
 
 
 def open_station(

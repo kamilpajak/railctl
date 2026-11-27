@@ -428,6 +428,7 @@ def test_build_cv_write_verified_says_so_and_warns_nothing():
         "mode": "service",
         "track": "prog",
         "address": None,
+        "page": None,
         "verified": True,
     }
     assert built.warnings == []
@@ -510,6 +511,9 @@ class FakeCvStation:
         self.read_calls: list[dict[str, object]] = []
         self.singleton_calls: list[dict[str, object]] = []
         self.write_calls: list[dict[str, object]] = []
+        #: The `page` each `cv_write` was handed, kept apart from `write_calls`
+        #: so the many exact-dict assertions on those stay about what they were.
+        self.write_pages: list[object] = []
         self.status_calls = 0
         #: Events the fake emits through the `on_event` callback `Station.open`
         #: was handed, once the first facade call runs - `None` callback means
@@ -579,6 +583,7 @@ class FakeCvStation:
         self.write_calls.append(
             {"cv": cv, "value": value, "address": address, "mode": mode, "verify": verify}
         )
+        self.write_pages.append(page)
         self._emit_all()
         if self.write_error is not None:
             raise self.write_error
@@ -972,6 +977,7 @@ def test_cv_write_prog_happy_path_verifies_by_default(monkeypatch):
         "mode": "service",
         "track": "prog",
         "address": None,
+        "page": None,
         "verified": True,
     }
     assert PROG_TRACK_NOTICE in result.stderr
@@ -1342,6 +1348,224 @@ def test_cv_write_a_bad_track_is_a_usage_error(monkeypatch):
     result = runner.invoke(app, ["cv", "write", "3", "20", "--track", "yard", "--format", "json"])
     assert result.exit_code == USAGE_EXIT_CODE
     assert "--track must be one of" in _stderr_envelope(result)["message"]
+
+
+# -- cv write --page: an indexed CV (257-512) behind the ZIMO CV31/CV32 page ----
+
+#: CV266, `volume_master` - the write that found the gap: unwritable on either
+#: track while `cv write` had no `--page`.
+MASTER_VOLUME_CV = 266
+
+
+def _station_must_not_open(monkeypatch) -> None:
+    def _boom(*_a, **_k):
+        raise AssertionError("this refusal must come before the station opens")
+
+    monkeypatch.setattr(Station, "open", staticmethod(_boom))
+
+
+def test_cv_write_publishes_a_page_option():
+    options = {option.name: option for option in command_meta("cv write").options}
+    assert "--page" in options
+    assert "CV31:CV32" in options["--page"].help
+    help_text = runner.invoke(app, ["cv", "write", "--help"]).stdout
+    assert "--page" in help_text
+
+
+def test_cv_write_hands_the_page_to_the_station_for_an_indexed_cv(monkeypatch):
+    fake = _install(monkeypatch, FakeCvStation())
+    result = runner.invoke(
+        app,
+        ["cv", "write", str(MASTER_VOLUME_CV), "35", "--page", "0:1", "--yes", "--format", "json"],
+    )
+    assert result.exit_code == 0, result.stderr
+    assert fake.write_calls[0]["cv"] == MASTER_VOLUME_CV
+    assert fake.write_pages == [(0, 1)]
+    payload = json.loads(result.stdout)
+    assert payload["result"]["page"] == [0, 1]
+    assert payload["result"]["name"] == "volume_master"
+
+
+def test_cv_write_an_indexed_cv_without_a_page_is_refused_before_the_station_opens(monkeypatch):
+    _station_must_not_open(monkeypatch)
+    result = runner.invoke(app, ["cv", "write", str(MASTER_VOLUME_CV), "35", "--format", "json"])
+    assert result.exit_code == exit_code_for(IndexPageRequiredError("x")), result.stderr
+    assert _publishes("cv write", IndexPageRequiredError.code)
+    envelope = _stderr_envelope(result)
+    assert envelope["code"] == "index_page_required"
+    # Actionable: it names the flag this command takes and a command that runs.
+    assert f"railctl cv write {MASTER_VOLUME_CV} 35 --page 0:1" in envelope["hint"]
+    assert "railctl cv read 31 32" in envelope["hint"]
+    assert envelope["details"]["reason"] == "no_page_given"
+
+
+def test_cv_write_an_indexed_cv_without_a_page_on_main_names_the_main_track_argv(monkeypatch):
+    _station_must_not_open(monkeypatch)
+    result = runner.invoke(
+        app,
+        ["cv", "write", str(MASTER_VOLUME_CV), "35", "--track", "main", "--format", "json"],
+    )
+    envelope = _stderr_envelope(result)
+    assert envelope["code"] == "index_page_required", result.stderr
+    assert f"railctl cv write {MASTER_VOLUME_CV} 35 --track main --page 0:1" in envelope["hint"]
+
+
+def test_cv_write_a_page_is_confirmed_before_the_station_opens(monkeypatch):
+    """Selecting the page WRITES CV31/CV32, two members of the confirmation set,
+    so a non-interactive run without `--yes` is refused - and refused before any
+    port is touched."""
+    _station_must_not_open(monkeypatch)
+    result = runner.invoke(
+        app,
+        [
+            "cv",
+            "write",
+            str(MASTER_VOLUME_CV),
+            "35",
+            "--page",
+            "0:1",
+            "--non-interactive",
+            "--format",
+            "json",
+        ],
+    )
+    assert result.exit_code == USAGE_EXIT_CODE, result.stderr
+    envelope = _stderr_envelope(result)
+    assert envelope["code"] == "confirmation_required"
+    assert "CV31=0" in envelope["message"] and "CV32=1" in envelope["message"]
+    assert "left on that page" in envelope["message"]
+    assert envelope["suggestions"] == [
+        ["railctl", "cv", "write", str(MASTER_VOLUME_CV), "35", "--page", "0:1", "--yes"]
+    ]
+
+
+def test_cv_write_a_page_confirmation_on_main_suggests_the_main_track_argv(monkeypatch):
+    _station_must_not_open(monkeypatch)
+    result = runner.invoke(
+        app,
+        [
+            "cv",
+            "write",
+            str(MASTER_VOLUME_CV),
+            "35",
+            "--track",
+            "main",
+            "--address",
+            "3",
+            "--page",
+            "0:1",
+            "--non-interactive",
+            "--format",
+            "json",
+        ],
+    )
+    envelope = _stderr_envelope(result)
+    assert envelope["code"] == "confirmation_required", result.stderr
+    assert envelope["suggestions"] == [
+        [
+            "railctl",
+            "cv",
+            "write",
+            str(MASTER_VOLUME_CV),
+            "35",
+            "--track",
+            "main",
+            "--page",
+            "0:1",
+            "--yes",
+        ]
+    ]
+
+
+@pytest.mark.parametrize(
+    ("token", "reason"),
+    [("1", "malformed_page"), ("a:b", "malformed_page"), ("0:256", "page_value_not_a_byte")],
+)
+def test_cv_write_a_bad_page_is_a_usage_error_before_the_station_opens(
+    monkeypatch, token: str, reason: str
+):
+    _station_must_not_open(monkeypatch)
+    result = runner.invoke(
+        app,
+        ["cv", "write", str(MASTER_VOLUME_CV), "35", "--page", token, "--yes", "--format", "json"],
+    )
+    assert result.exit_code == USAGE_EXIT_CODE, result.stderr
+    envelope = _stderr_envelope(result)
+    assert envelope["code"] == "usage"
+    assert envelope["details"]["reason"] == reason
+
+
+def test_cv_write_a_bad_page_is_refused_even_for_a_cv_that_would_ignore_it(monkeypatch):
+    # The same order `cv read` checks in: the token is parsed before anyone asks
+    # whether the CV needs it, so a typo never passes silently.
+    _station_must_not_open(monkeypatch)
+    result = runner.invoke(app, ["cv", "write", "3", "20", "--page", "145", "--format", "json"])
+    assert result.exit_code == USAGE_EXIT_CODE, result.stderr
+
+
+def test_cv_write_a_page_for_a_cv_outside_the_indexed_range_is_ignored(monkeypatch):
+    """The choice, pinned: `--page` on CV3 behaves as `cv read --page` does for
+    the non-indexed CVs of a batch - the page is not handed to the station, so
+    nothing writes CV31/CV32, so nothing needs confirming (the run below is
+    non-interactive with no `--yes`), and the result says `page: null`."""
+    fake = _install(monkeypatch, FakeCvStation())
+    result = runner.invoke(
+        app, ["cv", "write", "3", "20", "--page", "0:1", "--non-interactive", "--format", "json"]
+    )
+    assert result.exit_code == 0, result.stderr
+    assert fake.write_pages == [None]
+    assert json.loads(result.stdout)["result"]["page"] is None
+
+
+def test_cv_write_a_main_track_page_write_without_an_address_suggests_the_page_too(monkeypatch):
+    _install(monkeypatch, FakeCvStation(capabilities=POM_CAPS))
+    result = runner.invoke(
+        app,
+        [
+            "cv",
+            "write",
+            str(MASTER_VOLUME_CV),
+            "35",
+            "--track",
+            "main",
+            "--page",
+            "0:1",
+            "--yes",
+            "--format",
+            "json",
+        ],
+    )
+    assert result.exit_code == USAGE_EXIT_CODE
+    assert _stderr_envelope(result)["suggestions"] == [
+        [
+            "railctl",
+            "cv",
+            "write",
+            str(MASTER_VOLUME_CV),
+            "35",
+            "--track",
+            "main",
+            "--page",
+            "0:1",
+            "--address",
+            "3",
+        ]
+    ]
+
+
+def test_build_cv_write_reports_the_selected_page_without_claiming_it_verified():
+    built = build_cv_write(
+        _write_result(MASTER_VOLUME_CV, 35, verified=None, mode=ProgMode.POM),
+        track="main",
+        address=3,
+        name="volume_master",
+        verify=False,
+        page=(0, 1),
+    )
+    assert built.result["page"] == [0, 1]
+    assert built.result["verified"] is None
+    assert "index page CV31:CV32 = 0:1 selected before the write" in built.lines
+    assert f"railctl cv read {MASTER_VOLUME_CV} --page 0:1" in built.warnings[0].message
 
 
 def test_the_bare_cv_group_is_a_usage_error_with_empty_stdout():
