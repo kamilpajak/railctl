@@ -24,6 +24,7 @@ from railctl.station.types import (
     CvReadOutcome,
     CvResult,
     CvSpec,
+    PageSelection,
     ProgMode,
 )
 from railctl.xbus.codec import encode
@@ -147,6 +148,41 @@ def test_ensure_page_cache_hit_sends_nothing(bench):
     assert bench.sent == before
 
 
+def test_a_cache_hit_on_a_page_nothing_verified_stays_unverified(bench):
+    """A cache hit sends nothing and so measures nothing: it may only repeat
+    what the selection it remembers established, which here was nothing."""
+    programmer = bench.station.programmer
+    bench.station.learn(pom_read=False)
+    bench.expect(cmd_pom_write_byte(ADDRESS, 31, 10, threshold=THRESHOLD), reply=ACK)
+    bench.expect(cmd_pom_write_byte(ADDRESS, 32, 2, threshold=THRESHOLD), reply=ACK)
+    programmer.select_page((10, 2), address=ADDRESS, mode=ProgMode.POM)
+    hit = programmer.ensure_page(ADDRESS, ProgMode.POM, 265, page=(10, 2))
+    assert hit == PageSelection(pair=(10, 2), verified=None)
+
+
+def test_a_cache_hit_on_a_verified_page_reports_it_verified(bench, monkeypatch):
+    programmer = bench.station.programmer
+    bench.station.learn(pom_read=True)
+    monkeypatch.setattr(
+        programmer,
+        "cv_read",
+        lambda cv, *, address, mode, page=None, page_selected=False: make_cv_result(
+            cv=cv, value={31: 10, 32: 2}[cv], mode=mode
+        ),
+    )
+    bench.expect(cmd_pom_write_byte(ADDRESS, 31, 10, threshold=THRESHOLD), reply=ACK)
+    bench.expect(cmd_pom_write_byte(ADDRESS, 32, 2, threshold=THRESHOLD), reply=ACK)
+    programmer.select_page((10, 2), address=ADDRESS, mode=ProgMode.POM)
+    before = list(bench.sent)
+    hit = programmer.ensure_page(ADDRESS, ProgMode.POM, 265, page=(10, 2))
+    assert bench.sent == before
+    assert hit == PageSelection(pair=(10, 2), verified=True)
+
+
+def test_ensure_page_reports_no_selection_outside_the_indexed_range(bench):
+    assert bench.station.programmer.ensure_page(ADDRESS, ProgMode.POM, 8, page=(9, 9)) is None
+
+
 def test_ensure_page_reselects_after_the_ttl_expires(bench):
     from railctl.station.timing import TIMING
 
@@ -174,8 +210,9 @@ def test_select_page_verifies_the_first_time_when_reads_are_available(bench, mon
             cv=cv, value={31: 10, 32: 2}[cv], mode=mode
         ),
     )
-    programmer.select_page((10, 2), address=ADDRESS, mode=ProgMode.POM)
+    selection = programmer.select_page((10, 2), address=ADDRESS, mode=ProgMode.POM)
     assert bench.events == []
+    assert selection == PageSelection(pair=(10, 2), verified=True, source="selected")
 
 
 def test_select_page_raises_cv_verify_error_when_the_page_did_not_stick(bench, monkeypatch):
@@ -187,13 +224,20 @@ def test_select_page_raises_cv_verify_error_when_the_page_did_not_stick(bench, m
         programmer,
         "cv_read",
         lambda cv, *, address, mode, page=None, page_selected=False: make_cv_result(
-            cv=cv, value=0, mode=mode
+            cv=cv, value={31: 0, 32: 1}[cv], mode=mode
         ),
     )
     with pytest.raises(CvVerifyError) as caught:
         programmer.select_page((10, 2), address=ADDRESS, mode=ProgMode.POM)
     assert caught.value.cv == 31
     assert "did not stick" in str(caught.value)
+    # Structured, so a caller can name both pairs instead of blaming the
+    # indexed CV it never got to write.
+    assert caught.value.details == {
+        "reason": "page_selection_mismatch",
+        "wrote": [10, 2],
+        "read_back": [0, 1],
+    }
 
 
 def test_select_page_verifies_a_different_page_selected_under_the_same_key(bench, monkeypatch):
@@ -260,8 +304,10 @@ def test_select_page_emits_unverified_when_reads_are_not_available(bench):
     bench.station.learn(pom_read=False)
     bench.expect(cmd_pom_write_byte(ADDRESS, 31, 10, threshold=THRESHOLD), reply=ACK)
     bench.expect(cmd_pom_write_byte(ADDRESS, 32, 2, threshold=THRESHOLD), reply=ACK)
-    programmer.select_page((10, 2), address=ADDRESS, mode=ProgMode.POM)
+    selection = programmer.select_page((10, 2), address=ADDRESS, mode=ProgMode.POM)
     assert bench.events == [("page.unverified", {"page": (10, 2), "mode": ProgMode.POM})]
+    # Unknown, not false: nothing read the pair back.
+    assert selection == PageSelection(pair=(10, 2), verified=None)
 
 
 def test_select_page_force_reselects_even_within_the_ttl(bench):
@@ -1375,8 +1421,8 @@ class _ProgrammerStub:
     def __init__(self) -> None:
         self.calls: list[tuple[object, ...]] = []
 
-    def cv_write(self, cv, value, *, address, mode, page, verify):
-        self.calls.append(("cv_write", cv, value, address, mode, page, verify))
+    def cv_write(self, cv, value, *, address, mode, page, verify, restore_page):
+        self.calls.append(("cv_write", cv, value, address, mode, page, verify, restore_page))
         return make_cv_result(cv=cv, value=value, operation="write", verified=verify)
 
     def cv_read_many(self, specs, *, address, mode, on_progress):
@@ -1385,6 +1431,7 @@ class _ProgrammerStub:
 
     def select_page(self, page, *, address, mode, force):
         self.calls.append(("select_page", page, address, mode, force))
+        return PageSelection(pair=page, verified=True)
 
 
 def test_facade_cv_write_substitutes_the_default_address_and_delegates(bench, monkeypatch):
@@ -1398,20 +1445,29 @@ def test_facade_cv_write_substitutes_the_default_address_and_delegates(bench, mo
     stub = _ProgrammerStub()
     monkeypatch.setattr(bench.station, "programmer", stub)
     bench.station.cv_write(5, 10)
-    assert stub.calls == [("cv_write", 5, 10, ADDRESS, ProgMode.AUTO, None, True)]
+    assert stub.calls == [("cv_write", 5, 10, ADDRESS, ProgMode.AUTO, None, True, False)]
 
 
 def test_facade_cv_write_keeps_an_explicit_address(bench, monkeypatch):
     stub = _ProgrammerStub()
     monkeypatch.setattr(bench.station, "programmer", stub)
     bench.station.cv_write(5, 10, address=99)
-    assert stub.calls == [("cv_write", 5, 10, 99, ProgMode.AUTO, None, True)]
+    assert stub.calls == [("cv_write", 5, 10, 99, ProgMode.AUTO, None, True, False)]
+
+
+def test_facade_cv_write_passes_restore_page_through(bench, monkeypatch):
+    stub = _ProgrammerStub()
+    monkeypatch.setattr(bench.station, "programmer", stub)
+    bench.station.cv_write(300, 10, mode=ProgMode.SERVICE, page=(145, 2), restore_page=True)
+    assert stub.calls == [("cv_write", 300, 10, ADDRESS, ProgMode.SERVICE, (145, 2), True, True)]
 
 
 def test_facade_select_page_and_cv_read_many_delegate(bench, monkeypatch):
     stub = _ProgrammerStub()
     monkeypatch.setattr(bench.station, "programmer", stub)
-    bench.station.select_page((10, 2), force=True)
+    assert bench.station.select_page((10, 2), force=True) == PageSelection(
+        pair=(10, 2), verified=True
+    )
     bench.station.cv_read_many([CvSpec(cv=8)])
     assert stub.calls == [
         ("select_page", (10, 2), ADDRESS, ProgMode.AUTO, True),
@@ -1458,8 +1514,10 @@ def test_select_page_skips_reverification_when_the_same_page_is_reselected_with_
 
     bench.expect(cmd_pom_write_byte(ADDRESS, 31, 10, threshold=THRESHOLD), reply=ACK)
     bench.expect(cmd_pom_write_byte(ADDRESS, 32, 2, threshold=THRESHOLD), reply=ACK)
-    programmer.select_page((10, 2), address=ADDRESS, mode=ProgMode.POM, force=True)
+    again = programmer.select_page((10, 2), address=ADDRESS, mode=ProgMode.POM, force=True)
     assert read_calls == [31, 32]
+    # Verified earlier under this key, so still reported as verified.
+    assert again == PageSelection(pair=(10, 2), verified=True)
 
 
 def test_cv_read_many_deselects_the_current_page_when_a_later_read_carries_none(bench, monkeypatch):
@@ -1661,3 +1719,245 @@ def test_a_write_after_a_reads_closed_session_waits_out_the_gap(bench_factory, m
     closed_at = bench.clock.monotonic()
     bench.station.programmer.service_write(8, 145, verify=False)
     assert bench.clock.monotonic() - closed_at >= TIMING.service_session_gap
+
+
+# -- cv_write reports its page, and restores it on the programming track -----------
+
+INDEXED = 300
+FOUND = (0, 1)
+CHOSEN = (145, 2)
+
+
+class _ProgTrackDecoder:
+    """CV31/CV32 as a decoder on the programming track holds them, behind the
+    three seams `cv_write`'s page handling goes through: `raw_cv_write` (the
+    selection's own writes), `cv_read` (the pre-read and every read-back) and
+    `service_write` (the indexed CV itself). `select_page` runs for real, so
+    its verification and cache bookkeeping are what is under test.
+
+    `ignored` names `(cv, value)` writes the decoder acknowledges and then
+    does not keep - how a selection or a restore that "did not stick" looks.
+    """
+
+    def __init__(self, programmer, monkeypatch, *, ignored=(), fail_reads=(), fail_write=False):
+        self.cvs = {31: FOUND[0], 32: FOUND[1]}
+        self.log: list[tuple[object, ...]] = []
+        ignored = set(ignored)
+
+        def raw_cv_write(cv, value, *, address, mode):
+            self.log.append(("write", cv, value))
+            if (cv, value) not in ignored:
+                self.cvs[cv] = value
+
+        def cv_read(cv, *, address=None, mode=ProgMode.AUTO, page=None, page_selected=False):
+            self.log.append(("read", cv))
+            if cv in fail_reads:
+                raise DecoderNotRespondingError("no answer", cv=cv)
+            return make_cv_result(cv=cv, value=self.cvs[cv], mode=ProgMode.SERVICE)
+
+        def service_write(cv, value, *, verify, page=None):
+            self.log.append(("write", cv, value))
+            if fail_write:
+                raise DecoderNoAckError("no ack", cv=cv)
+            return make_cv_result(
+                cv=cv, value=value, mode=ProgMode.SERVICE, operation="write", verified=True
+            )
+
+        monkeypatch.setattr(programmer, "raw_cv_write", raw_cv_write)
+        monkeypatch.setattr(programmer, "cv_read", cv_read)
+        monkeypatch.setattr(programmer, "service_write", service_write)
+
+    @property
+    def pair(self) -> tuple[int, int]:
+        return (self.cvs[31], self.cvs[32])
+
+
+@pytest.fixture
+def prog_track(bench_factory):
+    return bench_factory(capabilities=make_capabilities(pom_read=False, z21_cv_opcodes=True))
+
+
+def _write_restoring(bench, **kwargs):
+    return bench.station.programmer.cv_write(
+        INDEXED, 7, mode=ProgMode.SERVICE, page=CHOSEN, restore_page=True, **kwargs
+    )
+
+
+def test_a_prog_track_write_reads_the_pair_first_and_puts_it_back(prog_track, monkeypatch):
+    decoder = _ProgTrackDecoder(prog_track.station.programmer, monkeypatch)
+    result = _write_restoring(prog_track)
+    assert decoder.log == [
+        ("read", 31),
+        ("read", 32),  # the pair as found, before anything is written
+        ("write", 31, 145),
+        ("write", 32, 2),
+        ("read", 31),
+        ("read", 32),  # the selection, verified
+        ("write", INDEXED, 7),
+        ("write", 31, 0),
+        ("write", 32, 1),
+        ("read", 31),
+        ("read", 32),  # the restore, verified the same way
+    ]
+    assert decoder.pair == FOUND
+    assert result.page == PageSelection(pair=CHOSEN, verified=True)
+    assert result.page_restore == PageSelection(pair=FOUND, verified=True)
+
+
+def test_a_prog_track_write_restores_even_when_the_found_pair_is_the_one_used(
+    prog_track, monkeypatch
+):
+    """`cv_read_many` restores unconditionally; so does this. Skipping the
+    restore when the pairs match would leave nothing verified the decoder is
+    back where it was if the write itself disturbed CV31/CV32."""
+    decoder = _ProgTrackDecoder(prog_track.station.programmer, monkeypatch)
+    decoder.cvs.update({31: CHOSEN[0], 32: CHOSEN[1]})
+    result = _write_restoring(prog_track)
+    assert decoder.log[-2:] == [("write", 31, 145), ("write", 32, 2)]
+    assert result.page_restore is not None and result.page_restore.pair == CHOSEN
+
+
+def test_a_pre_read_that_fails_writes_nothing(prog_track, monkeypatch):
+    decoder = _ProgTrackDecoder(prog_track.station.programmer, monkeypatch, fail_reads={32})
+    with pytest.raises(DecoderNotRespondingError) as caught:
+        _write_restoring(prog_track)
+    assert decoder.log == [("read", 31), ("read", 32)]
+    assert caught.value.details["page_phase"] == "pre_read"
+
+
+def test_a_failed_write_still_restores_and_says_so_on_the_error(prog_track, monkeypatch):
+    decoder = _ProgTrackDecoder(prog_track.station.programmer, monkeypatch, fail_write=True)
+    with pytest.raises(DecoderNoAckError) as caught:
+        _write_restoring(prog_track)
+    assert decoder.pair == FOUND
+    assert decoder.log[-4:] == [("write", 31, 0), ("write", 32, 1), ("read", 31), ("read", 32)]
+    # The write's own failure, not a page phase - and the pair is known to be back.
+    assert "page_phase" not in caught.value.details
+    assert caught.value.details["page_restore"] == {"pair": [0, 1], "verified": True}
+
+
+def test_a_selection_that_did_not_stick_is_a_page_mismatch_and_still_restores(
+    prog_track, monkeypatch
+):
+    decoder = _ProgTrackDecoder(
+        prog_track.station.programmer, monkeypatch, ignored={(31, 145), (32, 2)}
+    )
+    with pytest.raises(CvVerifyError) as caught:
+        _write_restoring(prog_track)
+    assert ("write", INDEXED, 7) not in decoder.log
+    assert caught.value.cv == 31
+    assert caught.value.details == {
+        "reason": "page_selection_mismatch",
+        "wrote": [145, 2],
+        "read_back": [0, 1],
+        "page_phase": "select",
+        "page_restore": {"pair": [0, 1], "verified": True},
+    }
+
+
+def test_a_restore_that_did_not_stick_replaces_a_successful_write(prog_track, monkeypatch):
+    """The decoder is then not as it was found, which outranks the write's
+    success - exactly as a failed restore outranks `cv_read_many`'s outcomes."""
+    _ProgTrackDecoder(prog_track.station.programmer, monkeypatch, ignored={(31, 0)})
+    with pytest.raises(CvVerifyError) as caught:
+        _write_restoring(prog_track)
+    assert caught.value.details == {
+        "reason": "page_selection_mismatch",
+        "wrote": [0, 1],
+        "read_back": [145, 1],
+        "page_phase": "restore",
+    }
+
+
+def test_a_restore_that_fails_after_a_failed_write_keeps_the_write_error_as_context(
+    prog_track, monkeypatch
+):
+    _ProgTrackDecoder(
+        prog_track.station.programmer, monkeypatch, ignored={(31, 0)}, fail_write=True
+    )
+    with pytest.raises(CvVerifyError) as caught:
+        _write_restoring(prog_track)
+    assert caught.value.details["page_phase"] == "restore"
+    assert isinstance(caught.value.__context__, DecoderNoAckError)
+
+
+def test_a_prog_track_write_without_restore_page_leaves_the_pair_alone(prog_track, monkeypatch):
+    """`restore` relies on this: it writes every indexed row on a page it has
+    already established, and must not pay a pre-read and a restore per CV."""
+    decoder = _ProgTrackDecoder(prog_track.station.programmer, monkeypatch)
+    result = prog_track.station.programmer.cv_write(INDEXED, 7, mode=ProgMode.SERVICE, page=CHOSEN)
+    assert decoder.log[:2] == [("write", 31, 145), ("write", 32, 2)]
+    assert decoder.pair == CHOSEN
+    assert result.page == PageSelection(pair=CHOSEN, verified=True)
+    assert result.page_restore is None
+
+
+def test_restore_page_does_nothing_for_a_cv_outside_the_indexed_range(prog_track, monkeypatch):
+    decoder = _ProgTrackDecoder(prog_track.station.programmer, monkeypatch)
+    result = prog_track.station.programmer.cv_write(
+        8, 7, mode=ProgMode.SERVICE, page=CHOSEN, restore_page=True
+    )
+    assert decoder.log == [("write", 8, 7)]
+    assert result.page is None
+    assert result.page_restore is None
+
+
+def test_restore_page_over_pom_leaves_the_decoder_on_the_page_and_says_unverified(
+    bench, monkeypatch
+):
+    """Nothing can read the live pair on the main track, so there is nothing
+    to restore TO: the decoder stays on the page, and the selection is
+    reported unknown rather than confirmed."""
+    programmer = bench.station.programmer
+    bench.station.learn(pom_read=False)
+    bench.expect(cmd_pom_write_byte(ADDRESS, 31, 145, threshold=THRESHOLD), reply=ACK)
+    bench.expect(cmd_pom_write_byte(ADDRESS, 32, 2, threshold=THRESHOLD), reply=ACK)
+    monkeypatch.setattr(
+        programmer,
+        "pom_write",
+        lambda cv, value, *, address, verify, page=None: make_cv_result(
+            cv=cv, value=value, operation="write"
+        ),
+    )
+    result = programmer.cv_write(
+        INDEXED, 7, address=ADDRESS, mode=ProgMode.POM, page=CHOSEN, restore_page=True
+    )
+    assert len(bench.sent) == 2
+    assert result.page == PageSelection(pair=CHOSEN, verified=None)
+    assert result.page_restore is None
+
+
+def test_a_pom_selection_that_fails_is_tagged_as_the_select_phase(bench):
+    bench.station.learn(pom_read=False)
+    bench.expect(cmd_pom_write_byte(ADDRESS, 31, 145, threshold=THRESHOLD), reply=UNSUPPORTED)
+    with pytest.raises(UnsupportedCommandError) as caught:
+        bench.station.programmer.cv_write(
+            INDEXED, 7, address=ADDRESS, mode=ProgMode.POM, page=CHOSEN
+        )
+    assert caught.value.details["page_phase"] == "select"
+
+
+def test_cv_read_many_tags_a_failed_pre_read_and_a_failed_restore(bench, monkeypatch):
+    programmer = bench.station.programmer
+    fail = {"read": True}
+
+    def fake_cv_read(cv, *, address, mode, page=None, page_selected=False):
+        if fail["read"] and cv == 31:
+            raise DecoderNotRespondingError("no answer", cv=cv)
+        return make_cv_result(cv=cv, value=cv, mode=mode)
+
+    def fake_select_page(page, *, address, mode, force):
+        if page == (31, 32):
+            raise CvVerifyError("did not stick", cv=31)
+        return PageSelection(pair=page, verified=True)
+
+    monkeypatch.setattr(programmer, "cv_read", fake_cv_read)
+    monkeypatch.setattr(programmer, "select_page", fake_select_page)
+    specs = [CvSpec(cv=INDEXED, page=CHOSEN)]
+    with pytest.raises(DecoderNotRespondingError) as pre_read:
+        programmer.cv_read_many(specs, address=ADDRESS, mode=ProgMode.POM)
+    assert pre_read.value.details["page_phase"] == "pre_read"
+    fail["read"] = False
+    with pytest.raises(CvVerifyError) as restore:
+        programmer.cv_read_many(specs, address=ADDRESS, mode=ProgMode.POM)
+    assert restore.value.details["page_phase"] == "restore"

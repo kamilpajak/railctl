@@ -49,6 +49,7 @@ from railctl.station.types import (
     CvResult,
     CvSpec,
     DoctorReport,
+    PageSelection,
     ProgMode,
     StationEvent,
 )
@@ -365,11 +366,18 @@ class Station:
         mode: ProgMode = ProgMode.AUTO,
         page: CvPage | None = None,
         verify: bool = True,
+        restore_page: bool = False,
     ) -> CvResult:
         with self._lock:
             resolved_address = address if address is not None else self.default_address
             return self.programmer.cv_write(
-                cv, value, address=resolved_address, mode=mode, page=page, verify=verify
+                cv,
+                value,
+                address=resolved_address,
+                mode=mode,
+                page=page,
+                verify=verify,
+                restore_page=restore_page,
             )
 
     def cv_read_many(
@@ -393,10 +401,12 @@ class Station:
         address: int | None = None,
         mode: ProgMode = ProgMode.AUTO,
         force: bool = False,
-    ) -> None:
+    ) -> PageSelection:
         with self._lock:
             resolved_address = address if address is not None else self.default_address
-            self.programmer.select_page(page, address=resolved_address, mode=mode, force=force)
+            return self.programmer.select_page(
+                page, address=resolved_address, mode=mode, force=force
+            )
 
     # -- session ---------------------------------------------------------
     def close(self) -> None:

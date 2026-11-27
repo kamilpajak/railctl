@@ -61,6 +61,30 @@ class CvSpec:
 
 
 @dataclass(frozen=True, slots=True)
+class PageSelection:
+    """What one `select_page` call established about the ZIMO index pair
+    (CV31, CV32) - reported by the station, so no caller has to infer it.
+
+    `verified` follows the three-outcome rule with one outcome removed:
+    `True` = CV31 and CV32 were read back and matched, in this call or in an
+    earlier one for the same `PageKey` that the cache still holds; `None` =
+    nothing could read the pair back (POM on a station with no POM read), so
+    whether the decoder is on `pair` is unknown. Never `False`: a read-back
+    that disagrees raises `CvVerifyError` with `reason`
+    `page_selection_mismatch` instead of returning.
+
+    `source` is `"selected"` - this tool wrote CV31/CV32. It is a `Literal`
+    rather than a bare constant so a later source (a pair observed without
+    being written) can be added without changing the field's meaning; until
+    then `"selected"` is the only value there is.
+    """
+
+    pair: CvPage
+    verified: Literal[True] | None
+    source: Literal["selected"] = "selected"
+
+
+@dataclass(frozen=True, slots=True)
 class CvResult:
     """One resolved CV read or write."""
 
@@ -76,6 +100,15 @@ class CvResult:
     #: claim a mismatch nobody measured. read: always `None`.
     verified: bool | None
     elapsed: float
+    #: write only: the index page selected before an indexed CV (257-512) was
+    #: written, as `select_page` reported it; `None` for a CV outside that
+    #: window, and for every read.
+    page: PageSelection | None = None
+    #: write only: the pair that was in CV31/CV32 BEFORE the write, put back
+    #: after it - service mode with `restore_page=True` only (see
+    #: `CvProgrammer.cv_write`). `None` = no restore was made, which on the
+    #: main track means the decoder was left on `page`.
+    page_restore: PageSelection | None = None
 
 
 @dataclass(frozen=True, slots=True)

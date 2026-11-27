@@ -33,6 +33,7 @@ from railctl.station.types import (
     CvResult,
     CvSpec,
     DoctorReport,
+    PageSelection,
     ProgMode,
     StationEvent,
     decoder_family,
@@ -46,6 +47,7 @@ ALL_DATACLASSES = (
     CvSpec,
     CvResult,
     CvReadOutcome,
+    PageSelection,
     StationEvent,
     Check,
     DoctorReport,
@@ -88,6 +90,26 @@ def test_cv_result_carries_the_resolved_mode_never_auto():
     assert result.mode is ProgMode.SERVICE
     assert result.operation == "read"
     assert result.verified is None
+
+
+def test_cv_result_carries_no_page_unless_a_write_selected_one():
+    result = CvResult(
+        cv=8,
+        value=3,
+        mode=ProgMode.SERVICE,
+        encoding=CvEncoding.SERVICE_DIRECT,
+        operation="read",
+        verified=None,
+        elapsed=1.7,
+    )
+    assert result.page is None
+    assert result.page_restore is None
+
+
+def test_page_selection_says_this_tool_selected_the_pair_by_default():
+    selection = PageSelection(pair=(145, 2), verified=None)
+    assert selection.source == "selected"
+    assert selection.verified is None
 
 
 def test_cv_read_outcome_can_carry_a_result():
