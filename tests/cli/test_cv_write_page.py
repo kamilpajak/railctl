@@ -23,6 +23,7 @@ import pytest
 from typer.testing import CliRunner
 
 from railctl.cli.main import app
+from railctl.exit_codes import INTERRUPTED_EXIT_CODE
 from railctl.station import Station
 from railctl.station.capabilities import Capabilities
 from railctl.xbus.codec import encode
@@ -334,7 +335,7 @@ def test_an_interrupt_between_cv31_and_cv32_still_says_the_page_is_unknown(monke
     result = runner.invoke(app, [*_POM_ARGV, "--format", "json"])
 
     envelope = json.loads(result.stderr.strip().splitlines()[-1])
-    assert result.exit_code == 130, result.stderr
+    assert result.exit_code == INTERRUPTED_EXIT_CODE, result.stderr
     assert envelope["code"] == "aborted", envelope
     assert envelope["details"]["page_selection"]["page"] == [0, 1]
     assert envelope["details"]["page_selection"]["state"] == "unknown"
