@@ -1110,9 +1110,9 @@ def test_cv_write_publishes_the_unverified_warning_once_with_the_stations_reason
     assert "programming track" in unverified[0]["message"]
     assert unverified[0]["details"] == {"cv": 3, "reason": reason}
     # Every other station event still reaches the envelope unchanged.
-    assert {"name": "cv.stale_result"}.items() <= next(
-        w for w in warnings if w["name"] == "cv.stale_result"
-    ).items()
+    stale = [w for w in warnings if w["name"] == "cv.stale_result"]
+    assert len(stale) == 1
+    assert stale[0]["details"] == {"cv": 3, "echoed": 19}
 
 
 def test_build_cv_write_carries_a_reason_only_when_the_station_gave_one():

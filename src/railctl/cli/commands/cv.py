@@ -698,10 +698,19 @@ class _WriteEventLog(StationEventLog):
     """`StationEventLog` that folds the station's `cv.write_unverified` into
     the command's own warning rather than publishing it a second time.
 
-    Folded, not dropped: the event's `reason` ("verify=False: no read-back was
-    attempted", "CV29 bit 5 changes the answering address ...") is the one
-    thing it says that the command's warning does not, so it is kept and
-    `build_cv_write` puts it in that warning's details.
+    Folded, not dropped: the event's `reason` is the one thing it says that the
+    command's warning does not, so it is kept and `build_cv_write` puts it in
+    that warning's details (JSON only - the human renderer prints a warning's
+    message, not its details).
+
+    Through `cv write` that reason is today always "verify=False: no read-back
+    was attempted". A main-track write never verifies (`--verify` there is
+    refused), and `Programming._blind_reason` answers `verify=False` before it
+    looks at BLIND_WRITE_CVS or CV29, so the more specific reasons do not reach
+    this command. The fold keeps whatever the station sends regardless.
+
+    Suppression rests on the station emitting this event only for a write it
+    returns with `verified=None` - the one result `build_cv_write` warns about.
     """
 
     def __init__(self) -> None:
