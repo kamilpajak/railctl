@@ -162,6 +162,80 @@ def test_a_prog_write_with_a_page_selects_reads_the_page_back_then_writes_and_ve
     ]
 
 
+def test_a_prog_write_whose_page_does_not_stick_names_cv31_and_never_writes_the_indexed_cv(
+    monkeypatch,
+):
+    """The bench case: the MS450P22 refuses CV32=0, so `--page 0:0` is echoed
+    and then reads back as 0:1. The selection must fail against CV31 - the pair,
+    not CV266 - and CV266 must never be written onto a page nobody asked for."""
+    bench = Bench(
+        capabilities=Capabilities.unknown("bench").with_learned(z21_cv_opcodes=True)
+    ).open()
+    programmer = bench.station.programmer
+    # Per-CV answers in call order: the write echo first, then the read-back.
+    answers = {31: [0, 0], 32: [0, 1]}
+
+    def answer(matcher, **_kwargs):
+        return CvValue(
+            raw_cv=matcher.cv, value=answers[matcher.cv].pop(0), ident=0x14, z21_form=True
+        )
+
+    monkeypatch.setattr(programmer, "await_result", answer)
+    monkeypatch.setattr(programmer, "exit_service_mode", lambda **_: None)
+    _install(monkeypatch, bench)
+    _script_service_write(bench, 31, 0)
+    _script_service_write(bench, 32, 0)
+    _script_service_read(bench, 31)
+    _script_service_read(bench, 32)
+
+    result = runner.invoke(
+        app,
+        [
+            "cv",
+            "write",
+            str(MASTER_VOLUME_CV),
+            str(VALUE),
+            "--page",
+            "0:0",
+            "--yes",
+            "--format",
+            "json",
+        ],
+    )
+
+    envelope = json.loads(result.stderr.strip().splitlines()[-1])
+    assert result.exit_code != 0
+    assert envelope["code"] == "cv_verify", envelope
+    assert envelope["details"]["cv"] == 31
+    assert envelope["details"]["page_selection"]["page"] == [0, 0]
+    assert envelope["details"]["page_selection"]["state"] == "unknown"
+    assert cmd_z21_cv_write(MASTER_VOLUME_CV, VALUE) not in bench.sent
+
+
+def test_a_main_track_write_that_fails_after_the_selection_says_the_page_is_unknown(monkeypatch):
+    """CV31/CV32 go out and are acked (page.unverified is emitted), then CV266
+    is refused busy. `cv write` does not put the pair back, so the error envelope
+    - which carries no warnings - must say in `details` and the hint that the
+    page is unknown, and keep the page.unverified event rather than drop it."""
+    bench = _pom_bench(monkeypatch)
+    bench.expect(STATUS_REQUEST, reply=STATUS_POWER_ON)
+    bench.expect(cmd_pom_write_byte(ADDRESS, 31, RESTING_PAGE[0], threshold=THRESHOLD), reply=ACK)
+    bench.expect(cmd_pom_write_byte(ADDRESS, 32, RESTING_PAGE[1], threshold=THRESHOLD), reply=ACK)
+    bench.expect(
+        cmd_pom_write_byte(ADDRESS, MASTER_VOLUME_CV, VALUE, threshold=THRESHOLD),
+        reply=encode(0x61, 0x81),
+    )
+
+    result = runner.invoke(app, [*_POM_ARGV, "--format", "json"])
+
+    envelope = json.loads(result.stderr.strip().splitlines()[-1])
+    assert envelope["code"] == "station_busy", envelope
+    selection = envelope["details"]["page_selection"]
+    assert selection == {"page": [0, 1], "state": "unknown", "events": ["page.unverified"]}
+    assert "which index page the decoder is on is unknown" in envelope["hint"]
+    assert "railctl cv read 31 32" in envelope["hint"]
+
+
 def _pom_bench(monkeypatch) -> Bench:
     # The reference station as measured: POM read is silence, recorded false.
     bench = Bench(capabilities=Capabilities.unknown("bench").with_learned(pom_read=False)).open()

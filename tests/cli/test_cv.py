@@ -1291,7 +1291,7 @@ def test_cv_write_a_blocked_confirmation_on_main_suggests_the_main_track_argv(mo
     envelope = _stderr_envelope(result)
     assert envelope["code"] == "confirmation_required"
     assert envelope["suggestions"] == [
-        ["railctl", "cv", "write", "29", "6", "--track", "main", "--yes"]
+        ["railctl", "cv", "write", "29", "6", "--track", "main", "--address", "3", "--yes"]
     ]
 
 
@@ -1461,6 +1461,8 @@ def test_cv_write_a_page_confirmation_on_main_suggests_the_main_track_argv(monke
     )
     envelope = _stderr_envelope(result)
     assert envelope["code"] == "confirmation_required", result.stderr
+    # `--address` rides along: without it the retry names no locomotive, and
+    # exits 2 or writes to the config's default loco instead of loco 3.
     assert envelope["suggestions"] == [
         [
             "railctl",
@@ -1470,6 +1472,8 @@ def test_cv_write_a_page_confirmation_on_main_suggests_the_main_track_argv(monke
             "35",
             "--track",
             "main",
+            "--address",
+            "3",
             "--page",
             "0:1",
             "--yes",
@@ -1493,6 +1497,12 @@ def test_cv_write_a_bad_page_is_a_usage_error_before_the_station_opens(
     envelope = _stderr_envelope(result)
     assert envelope["code"] == "usage"
     assert envelope["details"]["reason"] == reason
+    # The suggested page is the resting one, never `cv read`'s 145:0 example: a
+    # write leaves the decoder on whatever page it selected, so following the
+    # suggestion must not park it on the audio bank.
+    assert envelope["suggestions"] == [
+        ["railctl", "cv", "write", str(MASTER_VOLUME_CV), "35", "--page", "0:1"]
+    ]
 
 
 def test_cv_write_a_bad_page_is_refused_even_for_a_cv_that_would_ignore_it(monkeypatch):
@@ -1547,6 +1557,7 @@ def test_cv_write_a_main_track_page_write_without_an_address_suggests_the_page_t
             "main",
             "--page",
             "0:1",
+            "--yes",
             "--address",
             "3",
         ]

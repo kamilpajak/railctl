@@ -242,15 +242,29 @@ _WRITE_PAGE_OPT = typer_option(CV_WRITE_PAGE_OPT)
 RESTING_PAGE_EXAMPLE: Final[str] = "0:1"
 
 
-def parse_page(token: str | None, *, argv_hint: Sequence[str]) -> CvPage | None:
-    """`"145:0"` -> `(145, 0)`, the CV31/CV32 pair; `None` stays `None`."""
+#: The example `cv read --page` suggests for a malformed token: the ZIMO audio
+#: bank, harmless there because a read puts the pair back as found afterwards.
+READ_PAGE_EXAMPLE: Final[str] = "145:0"
+
+
+def parse_page(
+    token: str | None, *, argv_hint: Sequence[str], example: str = READ_PAGE_EXAMPLE
+) -> CvPage | None:
+    """`"145:0"` -> `(145, 0)`, the CV31/CV32 pair; `None` stays `None`.
+
+    `example` is the page the usage suggestion names. It is the caller's to
+    choose because the two callers differ in what following it costs: `cv read`
+    restores the pair afterwards, `cv write` leaves the decoder on whatever page
+    it selected - so `cv write` passes RESTING_PAGE_EXAMPLE, the page the bench
+    already rests on, and never a bank that moves the decoder somewhere new.
+    """
     if token is None:
         return None
     parts = token.split(":")
     if len(parts) != 2 or not all(part.strip().isdigit() for part in parts):
         raise UsageProblem(
             f"--page takes the CV31 and CV32 values as two numbers separated by ':', got {token!r}",
-            suggestions=[[*argv_hint, "--page", "145:0"]],
+            suggestions=[[*argv_hint, "--page", example]],
             details={"reason": "malformed_page", "page": token},
         )
     cv31, cv32 = (int(part) for part in parts)
@@ -258,7 +272,7 @@ def parse_page(token: str | None, *, argv_hint: Sequence[str]) -> CvPage | None:
         if not VALUE_MIN <= value <= VALUE_MAX:
             raise UsageProblem(
                 f"--page {name} value {value} is outside {VALUE_MIN}..{VALUE_MAX}",
-                suggestions=[[*argv_hint, "--page", "145:0"]],
+                suggestions=[[*argv_hint, "--page", example]],
                 details={"reason": "page_value_not_a_byte", "field": name, "value": value},
             )
     return (cv31, cv32)
@@ -314,6 +328,35 @@ def _with_guidance(error: RailctlError, *, mode: ProgMode) -> RailctlError:
             details=dict(error.details),
         )
     return error
+
+
+def _note_page_left_unknown(error: RailctlError, page: CvPage, events: StationEventLog) -> None:
+    """Record on a failed `cv write --page` that the decoder's index page is now unknown.
+
+    The selection writes CV31/CV32 before the indexed CV, and `cv write` - unlike
+    `cv read --page` - does not put the pair back. A failure anywhere inside the
+    write can therefore leave the decoder on the selected page, on half of it
+    (CV31 written, CV32 not), or where it was; this layer cannot tell which. The
+    error envelope carries no warnings, so the fact goes into `details` and the
+    hint, the two fields both output formats publish: `page_selection.state` is
+    `"unknown"`, never a guess, and the station events seen so far (a
+    `page.unverified` among them) ride along instead of being dropped.
+    """
+    cv31, cv32 = page
+    error.details = {
+        **error.details,
+        "page_selection": {
+            "page": [cv31, cv32],
+            "state": "unknown",
+            "events": [name for name, _payload in events.events],
+        },
+    }
+    note = (
+        f"--page {cv31}:{cv32} may already have written CV31/CV32 before this failure, so "
+        f"which index page the decoder is on is unknown; read the pair with `railctl cv "
+        f"read 31 32` on the programming track before trusting any CV257-512"
+    )
+    error.hint = f"{error.hint}; {note}" if error.hint else note
 
 
 def build_cv_read(
@@ -709,9 +752,22 @@ def register(app: typer.Typer) -> None:
             retry = [*prefix, cv, str(value)]
             if track == TRACK_MAIN:
                 retry += ["--track", TRACK_MAIN]
+            # Every flag that changes WHAT is written or WHERE rides along, so
+            # the suggestion `confirm` publishes is the caller's own command and
+            # not a different one: without `--address` the retry exits 2 on a
+            # machine with no default address, or writes to the config's
+            # locomotive instead of the one typed.
+            if verify is not None:
+                retry.append("--verify" if verify else "--no-verify")
+            if address is not None:
+                retry += ["--address", str(address)]
+            if target is not None:
+                retry += ["--target", target]
             # Parsed for every CV, so a malformed token is a usage error even
             # where it would be ignored - the same order `cv read` checks in.
-            declared_page = parse_page(page, argv_hint=retry)
+            # The suggested page is the resting one, never the read's example:
+            # a write leaves the decoder on whatever page it selected.
+            declared_page = parse_page(page, argv_hint=retry, example=RESTING_PAGE_EXAMPLE)
             write_page: CvPage | None = None
             if number in INDEXED_CV_RANGE:
                 if declared_page is None:
@@ -801,21 +857,30 @@ def register(app: typer.Typer) -> None:
             try:
                 resolved_address: int | None = None
                 if wanted is ProgMode.POM:
-                    address_hint = [*prefix, cv, str(value), "--track", "main"]
+                    address_hint = list(retry)
                     if write_page is not None:
                         address_hint += ["--page", str(page)]
+                    if yes:
+                        # The question was answered by a typed --yes; a suggestion
+                        # without it would only lead back to confirmation_required.
+                        address_hint.append("--yes")
                     resolved_address = require_address(settings, argv_hint=address_hint)
                     preflight(station, speed=None, action="a main-track (POM) CV write")
                 else:
                     print(PROG_TRACK_NOTICE, file=output.stderr)
-                written = station.cv_write(
-                    number,
-                    value,
-                    address=resolved_address,
-                    mode=wanted,
-                    page=write_page,
-                    verify=effective_verify,
-                )
+                try:
+                    written = station.cv_write(
+                        number,
+                        value,
+                        address=resolved_address,
+                        mode=wanted,
+                        page=write_page,
+                        verify=effective_verify,
+                    )
+                except RailctlError as exc:
+                    if write_page is not None:
+                        _note_page_left_unknown(exc, write_page, events)
+                    raise
                 outcome = build_cv_write(
                     written,
                     track=track,

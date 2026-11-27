@@ -30,6 +30,21 @@ All notable changes to this project are documented in this file. The format foll
   the event. A main-track write's `cv.write_unverified` advice includes `--page` for an
   indexed CV, so the read-back it recommends is one that runs.
 
+- **A failed `cv write --page` says the index page is unknown.** The error envelope carries
+  no warnings, so a failure after the selection started used to drop both `page.unverified`
+  and the fact that CV31/CV32 may have been written. It now records
+  `details.page_selection` (`page`, `state: "unknown"`, the station events seen) and says so
+  in the hint.
+
+### Fixed
+
+- **`cv write`'s confirmation retry is the command that was typed.** The suggested
+  `--yes` retry dropped `--address`, `--target` and `--verify`/`--no-verify`, so on the main
+  track it named no locomotive - it exited 2, or wrote to the config's default loco. A
+  missing-address suggestion now keeps a typed `--yes`, and a malformed `cv write --page`
+  suggests the resting `0:1` instead of `cv read`'s `145:0`, which a write would have left
+  the decoder parked on.
+
 ## [0.4.0] - 2026-11-12
 
 ### Added
