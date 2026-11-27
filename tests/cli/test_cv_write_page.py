@@ -312,3 +312,78 @@ def test_a_main_track_write_with_a_page_says_the_same_in_human_output(monkeypatc
     assert "verified: unknown" in result.stdout
     assert "verified: yes" not in result.stdout
     assert "index page CV31:CV32 = 0:1 selected before the write" in result.stdout
+
+
+def test_an_interrupt_between_cv31_and_cv32_still_says_the_page_is_unknown(monkeypatch):
+    """Ctrl-C after CV31 went out and before CV32 did: the decoder may be on half
+    a page. `run()` alone reports a bare `aborted` with empty details, which hides
+    exactly the fact `page_selection` exists to publish."""
+    bench = _pom_bench(monkeypatch)
+    bench.expect(STATUS_REQUEST, reply=STATUS_POWER_ON)
+    bench.expect(cmd_pom_write_byte(ADDRESS, 31, RESTING_PAGE[0], threshold=THRESHOLD), reply=ACK)
+    second_half = cmd_pom_write_byte(ADDRESS, 32, RESTING_PAGE[1], threshold=THRESHOLD)
+    original_write = bench.transport.write
+
+    def write(data: bytes) -> None:
+        if second_half in data:
+            raise KeyboardInterrupt
+        original_write(data)
+
+    monkeypatch.setattr(bench.transport, "write", write)
+
+    result = runner.invoke(app, [*_POM_ARGV, "--format", "json"])
+
+    envelope = json.loads(result.stderr.strip().splitlines()[-1])
+    assert result.exit_code == 130, result.stderr
+    assert envelope["code"] == "aborted", envelope
+    assert envelope["details"]["page_selection"]["page"] == [0, 1]
+    assert envelope["details"]["page_selection"]["state"] == "unknown"
+    assert "which index page the decoder is on is unknown" in envelope["hint"]
+
+
+def test_an_address_typed_before_the_verb_rides_along_in_the_confirmation_retry():
+    """`railctl --address 7 cv write ...`: the root callback takes the address,
+    and the verb's own `--address` stays None. A retry built from the verb's
+    parameter named no locomotive - it exited 2, or wrote to the config's."""
+    result = runner.invoke(
+        app,
+        [
+            "--address",
+            "7",
+            "cv",
+            "write",
+            str(MASTER_VOLUME_CV),
+            str(VALUE),
+            "--track",
+            "main",
+            "--page",
+            "0:1",
+            "--non-interactive",
+            "--format",
+            "json",
+        ],
+    )
+
+    envelope = json.loads(result.stderr.strip().splitlines()[-1])
+    assert envelope["code"] == "confirmation_required", envelope
+    retry = envelope["suggestions"][0]
+    assert retry[retry.index("--address") + 1] == "7"
+    assert retry[-1] == "--yes"
+
+
+def test_a_silent_decoder_after_a_page_selection_suggests_a_read_on_that_page():
+    """The hint says the page is unknown, so the suggested read has to select
+    the write's own page; without `--page` it reads whichever page the decoder
+    is left on. An error that recorded no page keeps the plain suggestion."""
+    from railctl.cli._errors import report_for
+    from railctl.cli.commands.cv import _note_page_left_unknown
+    from railctl.cli.deps import StationEventLog
+    from railctl.errors import DecoderNotRespondingError
+
+    paged = DecoderNotRespondingError("silent", cv=MASTER_VOLUME_CV)
+    _note_page_left_unknown(paged, RESTING_PAGE, StationEventLog())
+    plain = DecoderNotRespondingError("silent", cv=MASTER_VOLUME_CV)
+
+    read = ["railctl", "cv", "read", str(MASTER_VOLUME_CV), "--mode", "service"]
+    assert [*read, "--page", "0:1"] in report_for(paged, command="cv write").suggestions
+    assert read in report_for(plain, command="cv write").suggestions

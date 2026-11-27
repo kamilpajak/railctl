@@ -45,7 +45,7 @@ from typing import Final
 import typer
 
 from railctl.catalog import CatalogEntry, load_catalog
-from railctl.cli._errors import run
+from railctl.cli._errors import ABORTED_MESSAGE, run
 from railctl.cli._meta import (
     CV_PAGE_OPT,
     CV_READ_MODE_OPT,
@@ -65,7 +65,7 @@ from railctl.cli._meta import (
 )
 from railctl.cli._parse_context import ParseContextTyper
 from railctl.cli.commands.throttle import preflight
-from railctl.cli.config import capabilities_path
+from railctl.cli.config import DEFAULT_TARGET, capabilities_path
 from railctl.cli.cvspec import parse_cv_spec
 from railctl.cli.deps import (
     StationEventLog,
@@ -83,6 +83,7 @@ from railctl.cli.deps import (
 from railctl.cli.result import CommandResult, error_code, tri_state
 from railctl.errors import (
     REASON_VALUE_OUT_OF_RANGE,
+    AbortedError,
     ConfirmationRequiredError,
     CvOutOfRangeError,
     DecoderNotRespondingError,
@@ -498,8 +499,12 @@ def build_cv_write(
     if written.verified:
         return result
     if track == TRACK_MAIN:
-        # The read-back command has to be one that RUNS: an indexed CV read
-        # without its page aborts with `index_page_required`.
+        # The read-back names the page because nothing confirmed the selection:
+        # over POM, CV31/CV32 cannot be read back (`page.unverified`), so the
+        # decoder may sit on another page. A service read without `--page` would
+        # then read CV{n} from whichever page that is - it runs, and answers about
+        # a different register. With `--page`, the read selects the bank the
+        # write went to before it reads.
         read_back = f"railctl cv read {written.cv}"
         if page is not None:
             read_back += f" --page {_page_token(page)}"
@@ -757,12 +762,18 @@ def register(app: typer.Typer) -> None:
             # not a different one: without `--address` the retry exits 2 on a
             # machine with no default address, or writes to the config's
             # locomotive instead of the one typed.
+            # The RESOLVED address and target, not this verb's own copies of the
+            # flags: `railctl --address 7 cv write ...` types the address BEFORE
+            # the verb, where the root callback takes it and `address` here stays
+            # `None`. Reading the parameter dropped it from the retry. A value from
+            # the environment or config.toml rides along too, which names the
+            # same locomotive and port the command was about to use.
             if verify is not None:
                 retry.append("--verify" if verify else "--no-verify")
-            if address is not None:
-                retry += ["--address", str(address)]
-            if target is not None:
-                retry += ["--target", target]
+            if settings.address is not None:
+                retry += ["--address", str(settings.address)]
+            if settings.target != DEFAULT_TARGET:
+                retry += ["--target", settings.target]
             # Parsed for every CV, so a malformed token is a usage error even
             # where it would be ignored - the same order `cv read` checks in.
             # The suggested page is the resting one, never the read's example:
@@ -860,9 +871,10 @@ def register(app: typer.Typer) -> None:
                     address_hint = list(retry)
                     if write_page is not None:
                         address_hint += ["--page", str(page)]
-                    if yes:
-                        # The question was answered by a typed --yes; a suggestion
-                        # without it would only lead back to confirmation_required.
+                    if settings.assume_yes:
+                        # The question was answered by --yes (typed before or after
+                        # the verb, or from the environment); a suggestion without it
+                        # would only lead back to confirmation_required.
                         address_hint.append("--yes")
                     resolved_address = require_address(settings, argv_hint=address_hint)
                     preflight(station, speed=None, action="a main-track (POM) CV write")
@@ -881,6 +893,17 @@ def register(app: typer.Typer) -> None:
                     if write_page is not None:
                         _note_page_left_unknown(exc, write_page, events)
                     raise
+                except KeyboardInterrupt:
+                    # Ctrl-C between CV31 and CV32 leaves the page just as unknown as
+                    # a failure does, and `run()` would report a bare `aborted` with
+                    # empty details. Raised as the same `AbortedError` `run()` builds
+                    # (same code, message and exit code), carrying the page note -
+                    # the route `restore` already takes for its own interrupt.
+                    if write_page is None:
+                        raise
+                    aborted = AbortedError(ABORTED_MESSAGE)
+                    _note_page_left_unknown(aborted, write_page, events)
+                    raise aborted from None
                 outcome = build_cv_write(
                     written,
                     track=track,

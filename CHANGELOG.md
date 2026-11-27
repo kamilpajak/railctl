@@ -34,14 +34,18 @@ All notable changes to this project are documented in this file. The format foll
   no warnings, so a failure after the selection started used to drop both `page.unverified`
   and the fact that CV31/CV32 may have been written. It now records
   `details.page_selection` (`page`, `state: "unknown"`, the station events seen) and says so
-  in the hint.
+  in the hint. An interrupt (Ctrl-C) during the write carries the same record on its
+  `aborted` envelope, and a silent decoder's suggested `cv read` names the same `--page`,
+  so it reads the write's own bank instead of whichever page the decoder was left on.
 
 ### Fixed
 
 - **`cv write`'s confirmation retry is the command that was typed.** The suggested
   `--yes` retry dropped `--address`, `--target` and `--verify`/`--no-verify`, so on the main
-  track it named no locomotive - it exited 2, or wrote to the config's default loco. A
-  missing-address suggestion now keeps a typed `--yes`, and a malformed `cv write --page`
+  track it named no locomotive - it exited 2, or wrote to the config's default loco. The
+  address and target are the resolved ones, so `railctl --address 7 cv write ...`, with the
+  flag before the verb, keeps it too. A missing-address suggestion now keeps a `--yes` given
+  at either level, and a malformed `cv write --page`
   suggests the resting `0:1` instead of `cv read`'s `145:0`, which a write would have left
   the decoder parked on.
 
