@@ -1080,6 +1080,64 @@ def test_cv_write_on_main_needs_an_address_and_never_verifies(monkeypatch):
     assert payload["warnings"][0]["name"] == "cv.write_unverified"
 
 
+def test_cv_write_publishes_the_unverified_warning_once_with_the_stations_reason(monkeypatch):
+    # Measured on the bench 2026-11-27: a POM `cv write --no-verify` printed
+    # `cv.write_unverified` twice - the command's own warning, then the station
+    # event under the generic "the station reported ..." sentence. The real
+    # station emits that event for exactly the result the command already warns
+    # about, so the fake emits it the same way here.
+    reason = "verify=False: no read-back was attempted"
+    _install(
+        monkeypatch,
+        FakeCvStation(
+            capabilities=POM_CAPS,
+            emit_events=[
+                ("cv.write_unverified", {"cv": 3, "value": 20, "reason": reason}),
+                ("cv.stale_result", {"cv": 3, "echoed": 19}),
+            ],
+        ),
+    )
+    result = runner.invoke(
+        app,
+        ["cv", "write", "3", "20", "--track", "main", "--address", "3", "--format", "json"],
+    )
+    assert result.exit_code == 0, result.stderr
+    warnings = json.loads(result.stdout)["warnings"]
+    unverified = [w for w in warnings if w["name"] == "cv.write_unverified"]
+    assert len(unverified) == 1
+    # The command's own, actionable message - not the generic event sentence -
+    # and the station's reason folded into its details rather than lost.
+    assert "programming track" in unverified[0]["message"]
+    assert unverified[0]["details"] == {"cv": 3, "reason": reason}
+    # Every other station event still reaches the envelope unchanged.
+    stale = [w for w in warnings if w["name"] == "cv.stale_result"]
+    assert len(stale) == 1
+    assert stale[0]["details"] == {"cv": 3, "echoed": 19}
+
+
+def test_build_cv_write_carries_a_reason_only_when_the_station_gave_one():
+    without = build_cv_write(
+        _write_result(3, 20, verified=None),
+        track="prog",
+        address=None,
+        name="accel_rate",
+        verify=False,
+    )
+    assert without.warnings[0].details == {"cv": 3}
+    given = build_cv_write(
+        _write_result(3, 20, verified=None),
+        track="prog",
+        address=None,
+        name="accel_rate",
+        verify=False,
+        reason="verify=False: no read-back was attempted",
+    )
+    assert given.warnings[0].details == {
+        "cv": 3,
+        "reason": "verify=False: no read-back was attempted",
+    }
+
+
 def test_cv_write_explicit_verify_with_main_is_refused_not_downgraded(monkeypatch):
     fake = _install(monkeypatch, FakeCvStation(capabilities=POM_CAPS))
     result = runner.invoke(

@@ -93,6 +93,14 @@ All notable changes to this project are documented in this file. The format foll
   suggests the resting `0:1` instead of `cv read`'s `145:0`, which a main-track write would
   have left the decoder parked on.
 
+- **`cv write` publishes `cv.write_unverified` once.** Every unverified write carried it
+  twice: the command's own warning, which says how to check the write, and the station's
+  event of the same name under the generic "the station reported ..." sentence. The
+  station's copy is now folded into the command's: its `reason` moves into that warning's
+  `details` (JSON only), and the second entry, with its `details.value`, is gone. A script
+  that counted `warnings` or read the station copy's `value` sees one entry fewer. Every
+  other station event reaches the envelope as before.
+
 ## [0.4.0] - 2026-11-12
 
 ### Added

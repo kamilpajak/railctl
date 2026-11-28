@@ -428,11 +428,12 @@ def test_a_main_track_write_with_a_page_warns_the_page_is_unverified_and_claims_
     assert by_name["page.unverified"]["details"] == {"page": [0, 1], "mode": "pom"}
     assert "unknown" in by_name["page.unverified"]["message"]
     assert "0:1" in by_name["page.unverified"]["message"]
-    # The read-back advice has to be a command that runs on an indexed CV. Two
-    # `cv.write_unverified` warnings ride here - the command's own and the
-    # station's event - so the advice is looked for among all of them.
-    advice = [w["message"] for w in payload["warnings"] if w["name"] == "cv.write_unverified"]
-    assert any(f"railctl cv read {MASTER_VOLUME_CV} --page 0:1" in text for text in advice)
+    # Exactly one `cv.write_unverified`: the command's own, carrying the
+    # station's reason. The station's copy of the event is folded into it.
+    (advice,) = [w for w in payload["warnings"] if w["name"] == "cv.write_unverified"]
+    # The read-back advice has to be a command that runs on an indexed CV.
+    assert f"railctl cv read {MASTER_VOLUME_CV} --page 0:1" in advice["message"]
+    assert advice["details"]["reason"] == "verify=False: no read-back was attempted"
 
 
 def test_a_main_track_write_with_a_page_says_the_same_in_human_output(monkeypatch):
@@ -514,6 +515,42 @@ def test_an_interrupt_during_a_prog_write_puts_the_pair_back_and_never_says_main
         in (cmd_z21_cv_write(31, RESTING_PAGE[0]), cmd_z21_cv_write(32, RESTING_PAGE[1]))
     ]
     assert len(selection_writes) == 4
+
+
+def test_an_interrupt_during_the_restore_still_records_that_the_cv_went_out_unverified(
+    monkeypatch,
+):
+    """`--no-verify` on the programming track: CV266 is written, the station
+    emits `cv.write_unverified`, then Ctrl-C lands on the restore's CV31 write.
+    No `build_cv_write` runs and the interrupt carries no `details.write`, so
+    `page_selection.events` is the only trace that the CV went out unverified.
+    Folding the event into the command's warning must not erase it here."""
+    bench = _service_bench(monkeypatch)
+    _script_pair_read(bench)
+    _script_selection(bench, RESTING_PAGE)
+    _script_service_write(bench, MASTER_VOLUME_CV, VALUE)
+    bench.expect(STATUS_REQUEST, reply=STATUS_POWER_ON)
+    restore_cv31 = cmd_z21_cv_write(31, RESTING_PAGE[0])
+    seen = 0
+    original_write = bench.transport.write
+
+    def write(data: bytes) -> None:
+        nonlocal seen
+        if restore_cv31 in data:
+            seen += 1
+            if seen == 2:  # the first is the selection, the second the restore
+                raise KeyboardInterrupt
+        original_write(data)
+
+    monkeypatch.setattr(bench.transport, "write", write)
+
+    result = runner.invoke(app, [*_PROG_ARGV, "--no-verify", "--format", "json"])
+
+    envelope = json.loads(result.stderr.strip().splitlines()[-1])
+    assert result.exit_code == INTERRUPTED_EXIT_CODE, result.stderr
+    assert envelope["code"] == "aborted", envelope
+    assert cmd_z21_cv_write(MASTER_VOLUME_CV, VALUE) in bench.sent
+    assert envelope["details"]["page_selection"]["events"] == ["cv.write_unverified"]
 
 
 def test_an_address_typed_before_the_verb_rides_along_in_the_confirmation_retry():
