@@ -711,6 +711,12 @@ class _WriteEventLog(StationEventLog):
 
     Suppression rests on the station emitting this event only for a write it
     returns with `verified=None` - the one result `build_cv_write` warns about.
+
+    Only the warning is suppressed (`attach_to`); the event stays in `events`.
+    A failure after the write - Ctrl-C during the programming track's page
+    restore, which carries no `details.write` - reaches no `build_cv_write`,
+    and `details.page_selection.events` is then the only trace that the CV
+    went out unverified. Dropping it from `events` erased that trace.
     """
 
     def __init__(self) -> None:
@@ -721,8 +727,12 @@ class _WriteEventLog(StationEventLog):
         if name == WRITE_UNVERIFIED_EVENT:
             reason = payload.get("reason")
             self.unverified_reason = reason if isinstance(reason, str) else None
-            return
         super().__call__(name, payload)
+
+    def attach_to(self, outcome: CommandResult) -> None:
+        published = StationEventLog()
+        published.events = [event for event in self.events if event[0] != WRITE_UNVERIFIED_EVENT]
+        published.attach_to(outcome)
 
 
 def build_cv_write(
