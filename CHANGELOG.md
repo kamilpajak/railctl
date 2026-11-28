@@ -6,6 +6,93 @@ All notable changes to this project are documented in this file. The format foll
 
 ## [Unreleased]
 
+### Added
+
+- **`cv write` takes `--page CV31:CV32`, so CV257-512 can be written at all.** Before this,
+  `Programming.cv_write` demanded a page for an indexed CV and `cv write` had no way to pass
+  one, so CV266 (`volume_master`) was unwritable on both tracks. The flag parses exactly as
+  `cv read --page` does, and because selecting the page WRITES CV31/CV32 it is confirmed
+  through the same gate before the station opens (`--yes` answers it).
+
+- **`cv write --page` puts the index page back on the programming track.** The station
+  reads CV31/CV32 before anything is written, selects the page, writes the CV, and then
+  re-selects the pair it found and reads it back - the leave-as-found `cv read --page`
+  already had. The restore runs after a failed write and after Ctrl-C as well. A pre-read
+  that fails writes nothing; a restore that fails turns the command into an error, even
+  after a successful write, because the decoder is then not as it was found - and that
+  error carries `details.write` (`cv`, `value`, `state`: `written` with its `verified`,
+  `failed` with the `error` code, or `not_sent`; an open set), with the hint opening on
+  it, so a write that landed is never read as one that failed. The pair found is put back rather than a fixed "neutral" one: the ZIMO
+  MS manual (EN) says to reset the CV page after programming (p. 68) but names three
+  different neutral pairs (pp. 68, 69, 70), and NMRA S-9.2.2 defines none. It matters
+  beyond railctl: JMRI's ZIMO MS decoder definitions address CV257-512 by plain number and
+  never select a page, so a decoder left on another page sends JMRI into the wrong bank.
+  On the main track nothing can read the pair (docs/probe-results.md R1), so the decoder
+  is left on the selected page, as JMRI's indexed-CV facade leaves it in every mode. The
+  confirmation question and `--help` say which applies, per track.
+
+- **`cv write`'s result reports the page as the station established it.** `page` is
+  `null` for a CV outside 257-512, otherwise an object: `pair` (the CV31/CV32 values
+  selected), `verified` (`true` when the pair was read back and matched, `null` when
+  nothing could read it - never `false`, a mismatch is an error), `source` (`"selected"`;
+  an open set) and `restore` (`{pair, verified}` of the pair put back, or `null` when
+  nothing was - the main track). The human output says "selected and confirmed" or
+  "selected, not confirmed", and either "put back to ..." or "the decoder is left on ...".
+
+- **A `--page` that no requested CV can use is refused**, as a usage error with
+  `details.reason: "page_not_applicable"`, before any question is asked and before the
+  station opens; the suggestion is the same command without `--page`. This covers
+  `cv write` on a CV outside 257-512 and a `cv read` with no CV in that window, where the
+  flag used to be ignored. A `cv read` batch mixing indexed and plain CVs still takes it.
+  The suggestion keeps a `--yes` already given (a `cv read` sweep asks again), and a
+  malformed `--page` on such a command suggests the same no-`--page` argv rather than an
+  example page that would only be refused next.
+
+### Changed
+
+- **An indexed CV written without `--page` is refused before the station opens**, still as
+  `index_page_required`, now with a hint that names `--page` and a runnable example, and
+  points at `railctl cv read 31 32` to find the live pair first.
+
+- **`page.unverified` says what it means.** Over POM the CV31/CV32 selection cannot be read
+  back on the reference station (docs/probe-results.md R1), and the warning now says the
+  page was written and that whether the decoder is on it is unknown, instead of only naming
+  the event. A main-track write's `cv.write_unverified` advice includes `--page` for an
+  indexed CV, so the read-back it recommends is one that runs.
+
+- **A failed `cv write --page` says what is known about the index page.** The error
+  envelope carries no warnings, so a failure after the selection started used to drop both
+  `page.unverified` and the fact that CV31/CV32 may have been written. It now records
+  `details.page_selection` (`page`, `state`, the station events seen); `state` is
+  `"unknown"` today and is an open set of values, so a consumer should treat one it does
+  not know as unknown. The station adds `details.page_phase` when a page step failed
+  (`pre_read`, `select` or `restore`; an open set). It is a station fact, so it appears on
+  every command whose error came from a page step - `cv read --page` and `backup --page`
+  (pre-read, selection, restore) and `restore`'s indexed rows (selection) too - always
+  with the same meaning; `cv write` is the one that also turns it into a hint. On the programming
+  track, `details.page_restore` (`{pair, verified}`) when the found pair was put back after
+  the failure. The hint follows them: nothing was written after a failed pre-read, the
+  indexed CV was not written after a failed selection, the pair is back after a confirmed
+  restore, and otherwise the page is unknown, with `railctl cv read 31 32` to settle it.
+  A selection that reads back as another pair is still `cv_verify` against CV31, now with
+  `reason: "page_selection_mismatch"`, `wrote` and `read_back` (both `[cv31, cv32]`), so it
+  is never mistaken for the indexed CV failing to verify. An interrupt (Ctrl-C) during the
+  write carries the same record on its `aborted` envelope, and a silent decoder's
+  suggested `cv read` names the same `--page` when the silent CV is in 257-512, so it reads
+  the write's own bank; a page step silent on CV31/CV32 suggests a plain `cv read 31`,
+  since `--page` there is `page_not_applicable`.
+
+### Fixed
+
+- **`cv write`'s confirmation retry is the command that was typed.** The suggested
+  `--yes` retry dropped `--address`, `--target` and `--verify`/`--no-verify`, so on the main
+  track it named no locomotive - it exited 2, or wrote to the config's default loco. The
+  address and target are the resolved ones, so `railctl --address 7 cv write ...`, with the
+  flag before the verb, keeps it too. A missing-address suggestion now keeps a `--yes` given
+  at either level, and a malformed `cv write --page`
+  suggests the resting `0:1` instead of `cv read`'s `145:0`, which a main-track write would
+  have left the decoder parked on.
+
 ## [0.4.0] - 2026-11-12
 
 ### Added

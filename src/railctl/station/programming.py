@@ -10,10 +10,11 @@ numbers and reply idents without ever touching a wire byte itself.
 from __future__ import annotations
 
 from collections.abc import Callable, Sequence
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from typing import TYPE_CHECKING, Final, Literal, TypeVar
 
 from railctl.errors import (
+    AbortedError,
     CvOutOfRangeError,
     CvVerifyError,
     DecoderNoAckError,
@@ -41,6 +42,7 @@ from railctl.station.types import (
     CvReadOutcome,
     CvResult,
     CvSpec,
+    PageSelection,
     ProgMode,
 )
 from railctl.xbus.commands import (
@@ -201,6 +203,28 @@ BATCH_ENDING_ERRORS: Final[tuple[type[RailctlError], ...]] = (
 #: bench run shows a long session answering to the last CV.
 SERVICE_BATCH_SIZE: Final[int] = 8
 _REGISTER_COLLISION_MAX: Final[int] = 8  # registers 1..8 collide with CV1..8
+
+#: Which step of an operation that moves the ZIMO index pair an error came
+#: from, written into `details["page_phase"]`: `pre_read` = reading CV31/CV32
+#: as found, before anything was written; `select` = writing (and verifying)
+#: the requested page; `restore` = putting the found pair back. An error with
+#: no `page_phase` came from the CV operation itself.
+PagePhase = Literal["pre_read", "select", "restore"]
+
+#: `details["write"]["state"]` on a failed restore after a programming-track
+#: indexed write - what had happened to the indexed CV when the restore failed:
+#: `not_sent` = the selection failed first, so its telegram never went out;
+#: `failed` = it was sent and raised (`error` names the code; the CV's value is
+#: then whatever that error says about it); `written` = it succeeded, with its
+#: own `verified` (`true` or `null`, never `false`). An open set.
+WriteState = Literal["not_sent", "failed", "written"]
+
+
+def _tag_page_phase(exc: RailctlError, phase: PagePhase) -> None:
+    """Record `phase` on `exc` unless an inner step already did. A new dict,
+    not an in-place update: `details` may be the very dict a raiser passed in."""
+    if "page_phase" not in exc.details:
+        exc.details = {**exc.details, "page_phase": phase}
 
 
 class CvMatcher:
@@ -682,11 +706,13 @@ class CvProgrammer:
 
     def ensure_page(
         self, address: int | None, mode: ProgMode, cv: int, page: CvPage | None
-    ) -> None:
+    ) -> PageSelection | None:
+        """Select `page` for an indexed `cv` and say what that established;
+        `None` for a CV outside 257-512, which no page applies to."""
         if cv not in INDEXED_CV_RANGE:
-            return
+            return None
         self._require_page(cv, page)  # raises when `page` is None; never returns in that case
-        self.select_page(page, address=address, mode=mode, force=False)  # type: ignore[arg-type]
+        return self.select_page(page, address=address, mode=mode, force=False)  # type: ignore[arg-type]
 
     def _page_key(self, address: int | None, mode: ProgMode) -> PageKey:
         """`PageKey`'s own rule, enforced instead of assumed.
@@ -709,7 +735,35 @@ class CvProgrammer:
         address: int | None = None,
         mode: ProgMode = ProgMode.AUTO,
         force: bool = False,
-    ) -> None:
+        reverify: bool = False,
+    ) -> PageSelection:
+        """Write `page` into CV31/CV32 and report what that established.
+
+        The returned `PageSelection.verified` is `True` when the pair was read
+        back and matched - in this call, or in an earlier one for the same key
+        that `_verified_pages` still holds (a cache hit, or `force=True` on a
+        page already verified) - and `None` when nothing could read it back,
+        which is also when `page.unverified` is emitted.
+
+        `reverify=True` refuses the earlier answer and reads these writes back
+        whenever reads are available. A restore needs it: its `verified` is
+        published as "put back and confirmed by read-back", and when the found
+        pair equals the page used, the only earlier read was of the
+        selection's writes, made before the indexed write that may have
+        disturbed CV31/CV32. `cv_read_many`'s group selections keep the
+        shortcut - each would otherwise pay two service reads - and claim
+        nothing to their caller. It is never `False`:
+        a read-back that disagrees raises `CvVerifyError` whose details carry
+        `reason: "page_selection_mismatch"` and both pairs, so a caller can
+        name what was written and what came back instead of blaming the CV it
+        was about to touch.
+
+        JMRI's `MultiIndexProgrammerFacade` (java/src/jmri/implementation/,
+        the only indexed-CV path JMRI has) trusts the programmer's OK for the
+        CV31/CV32 writes and never reads them back, in any mode; the read-back
+        here goes beyond it, which is why its absence is `None` and never a
+        claim.
+        """
         resolved_mode = resolve_mode(mode, self._station.capabilities, operation="write")
         key = self._page_key(address, resolved_mode)
         cached = self._pages.get(key)
@@ -720,7 +774,9 @@ class CvProgrammer:
             and cached[0] == page
             and (now - cached[1]) < self._station.timing.page_cache_ttl
         ):
-            return
+            return PageSelection(
+                pair=page, verified=True if self._verified_pages.get(key) == page else None
+            )
         cv31, cv32 = page
         try:
             self.raw_cv_write(31, cv31, address=address, mode=resolved_mode)
@@ -728,21 +784,33 @@ class CvProgrammer:
         except RailctlError:
             self._station.invalidate_caches()
             raise
-        first_selection = self._verified_pages.get(key) != page
-        if first_selection:
-            if self.reads_available(resolved_mode):
-                read31 = self.cv_read(31, address=address, mode=resolved_mode)
-                read32 = self.cv_read(32, address=address, mode=resolved_mode)
-                if (read31.value, read32.value) != page:
-                    raise CvVerifyError(
-                        f"CV31/CV32 index page selection did not stick: wrote "
-                        f"{page}, read back {(read31.value, read32.value)}",
-                        cv=31,
-                    )
-                self._verified_pages[key] = page
-            else:
-                self._station.emit("page.unverified", {"page": page, "mode": resolved_mode})
+        verified: Literal[True] | None = None
+        if not reverify and self._verified_pages.get(key) == page:
+            # Verified earlier under this key and not invalidated since -
+            # re-reading would only pay for the same answer again. Not under
+            # `reverify` (see the docstring): there the caller publishes
+            # `verified` as a read-back of THESE writes.
+            verified = True
+        elif self.reads_available(resolved_mode):
+            read31 = self.cv_read(31, address=address, mode=resolved_mode)
+            read32 = self.cv_read(32, address=address, mode=resolved_mode)
+            if (read31.value, read32.value) != page:
+                raise CvVerifyError(
+                    f"CV31/CV32 index page selection did not stick: wrote "
+                    f"{page}, read back {(read31.value, read32.value)}",
+                    cv=31,
+                    details={
+                        "reason": "page_selection_mismatch",
+                        "wrote": [cv31, cv32],
+                        "read_back": [read31.value, read32.value],
+                    },
+                )
+            self._verified_pages[key] = page
+            verified = True
+        else:
+            self._station.emit("page.unverified", {"page": page, "mode": resolved_mode})
         self._pages[key] = (page, now)
+        return PageSelection(pair=page, verified=verified)
 
     def _service_encoding_for(self, cv: int) -> tuple[CvEncoding, int]:
         """First encoding `SERVICE_ENCODING_ORDER` allows for `cv`, with its page
@@ -1236,7 +1304,24 @@ class CvProgrammer:
         mode: ProgMode = ProgMode.AUTO,
         page: CvPage | None = None,
         verify: bool = True,
+        restore_page: bool = False,
     ) -> CvResult:
+        """Write one CV, choosing POM or service mode through `resolve_mode`.
+
+        For an indexed CV (257-512) the page is selected first and the
+        returned `CvResult.page` says what that selection established - the
+        station reports it, so no caller has to infer it.
+
+        `restore_page=True` puts CV31/CV32 back afterwards, in service mode
+        only, with exactly `cv_read_many`'s leave-as-found semantics (see
+        `_write_restoring_page`). It is opt-in because the `restore` command
+        writes every indexed row on a page it has already established and
+        must not pay six extra service sessions per CV for it. Over POM it
+        changes nothing: no read can tell what pair the decoder was on, so
+        there is nothing to restore TO, and the decoder stays on `page`
+        (`CvResult.page_restore` is `None`) - the same as JMRI, whose
+        indexed-CV facade never reads the pair in any mode.
+        """
         try:
             resolved_mode = resolve_mode(mode, self._station.capabilities, operation="write")
             if resolved_mode is ProgMode.POM:
@@ -1244,12 +1329,122 @@ class CvProgrammer:
                     raise ValueError(
                         "POM CV write needs a locomotive address: pass --address or set a default"
                     )
-                self.ensure_page(address, resolved_mode, cv, page)
-                return self.pom_write(cv, value, address=address, verify=verify, page=page)
-            self.ensure_page(None, resolved_mode, cv, page)
-            return self.service_write(cv, value, verify=verify, page=page)
+                selection = self._select_for_write(address, resolved_mode, cv, page)
+                written = self.pom_write(cv, value, address=address, verify=verify, page=page)
+                return replace(written, page=selection)
+            if restore_page and cv in INDEXED_CV_RANGE:
+                return self._write_restoring_page(cv, value, page=page, verify=verify)
+            selection = self._select_for_write(None, resolved_mode, cv, page)
+            written = self.service_write(cv, value, verify=verify, page=page)
+            return replace(written, page=selection)
         except RailctlError:
             self.invalidate_pages()
+            raise
+
+    def _select_for_write(
+        self, address: int | None, mode: ProgMode, cv: int, page: CvPage | None
+    ) -> PageSelection | None:
+        """`ensure_page`, with any error it raises tagged `page_phase: "select"`
+        - so a caller can tell a failed selection from a failure of the CV
+        write that never happened. `_require_page` runs first, untagged: a
+        missing page is the caller's mistake, not a selection that failed."""
+        self._require_page(cv, page)
+        try:
+            return self.ensure_page(address, mode, cv, page)
+        except RailctlError as exc:
+            _tag_page_phase(exc, "select")
+            raise
+
+    def _write_restoring_page(
+        self, cv: int, value: int, *, page: CvPage | None, verify: bool
+    ) -> CvResult:
+        """Service-mode indexed write that leaves CV31/CV32 as it found them.
+
+        Mirrors `cv_read_many`'s leave-as-found, step for step:
+
+        - the pair is read BEFORE anything is written. If that read fails,
+          the error propagates (tagged `page_phase: "pre_read"`) and nothing
+          has been written - selecting a page whose original cannot be put
+          back is the very mutation this exists to prevent;
+        - the restore is `select_page(found, force=True, reverify=True)` and
+          ALWAYS runs, after a failed write as after a successful one, and
+          even when the found pair equals the page used. `reverify` makes it
+          read its own writes back even then, instead of reusing the
+          selection's earlier read;
+        - a restore that fails raises (tagged `page_phase: "restore"`) and
+          replaces whatever was in flight, which stays reachable only as
+          `__context__`: the decoder is then NOT as it was found, and that is
+          the fact the caller must be told first. Unlike `cv_read_many`, whose
+          outcomes are lost with it, the restore error carries
+          `details["write"]` (`WriteState`): whether the indexed CV was never
+          sent, failed, or was written - so "written, page lost" and "nothing
+          written, page lost" stay distinguishable in the envelope.
+
+        Where `cv_read_many` reports a successful restore by saying nothing,
+        this returns it as `CvResult.page_restore`, and a write that failed
+        while the restore succeeded carries `details["page_restore"]` - so
+        the caller can say the pair is back rather than "unknown".
+
+        Why restore at all: the ZIMO MS manual (EN, p. 68) tells the operator
+        to reset CV31/CV32 after programming, since the pair "remain[s]
+        unchanged unless they are specifically reprogrammed", and ZIMO's own
+        Sound Editor resets the page when its window closes (p. 69). JMRI's
+        ZIMO MS definitions (xml/decoders/zimo/CV258-CV399_MS-MN-FS.xml and
+        siblings) address CV257-512 by plain number and never select a page,
+        so a decoder left on another page sends JMRI's next session into the
+        wrong bank. The pair found is put back rather than a fixed "neutral"
+        one because the manual names three different neutral pairs (0/0 on
+        p. 68, 0/1 on p. 69, CV31=0 on pp. 70 and 91) and NMRA S-9.2.2
+        defines none.
+        """
+        self._require_page(cv, page)
+        try:
+            found: CvPage = (
+                self.cv_read(31, address=None, mode=ProgMode.SERVICE).value,
+                self.cv_read(32, address=None, mode=ProgMode.SERVICE).value,
+            )
+        except RailctlError as exc:
+            _tag_page_phase(exc, "pre_read")
+            raise
+        state: WriteState = "not_sent"
+        try:
+            selection = self._select_for_write(None, ProgMode.SERVICE, cv, page)
+            state = "failed"
+            written = self.service_write(cv, value, verify=verify, page=page)
+        except BaseException as exc:
+            code = exc.code if isinstance(exc, RailctlError) else AbortedError.code
+            restored = self._restore_page(
+                found, write={"cv": cv, "value": value, "state": state, "error": code}
+            )
+            if isinstance(exc, RailctlError):
+                exc.details = {
+                    **exc.details,
+                    "page_restore": {"pair": list(restored.pair), "verified": restored.verified},
+                }
+            raise
+        restored = self._restore_page(
+            found,
+            write={
+                "cv": written.cv,
+                "value": written.value,
+                "state": "written",
+                "verified": written.verified,
+            },
+        )
+        return replace(written, page=selection, page_restore=restored)
+
+    def _restore_page(self, found: CvPage, *, write: dict[str, object]) -> PageSelection:
+        """Re-select `found`. A failure is tagged `page_phase: "restore"` and
+        carries `write` - what happened to the indexed CV before it - because
+        this error replaces the `CvResult` (or the write's own error, which
+        survives only as `__context__` and never reaches an envelope)."""
+        try:
+            return self.select_page(
+                found, address=None, mode=ProgMode.SERVICE, force=True, reverify=True
+            )
+        except RailctlError as exc:
+            _tag_page_phase(exc, "restore")
+            exc.details = {**exc.details, "write": write}
             raise
 
     def cv_read_many(
@@ -1326,10 +1521,14 @@ class CvProgrammer:
         # exists to prevent.
         found_page: CvPage | None = None
         if any(spec.page is not None for spec in ordered):
-            found_page = (
-                self.cv_read(31, address=address, mode=mode).value,
-                self.cv_read(32, address=address, mode=mode).value,
-            )
+            try:
+                found_page = (
+                    self.cv_read(31, address=address, mode=mode).value,
+                    self.cv_read(32, address=address, mode=mode).value,
+                )
+            except RailctlError as exc:
+                _tag_page_phase(exc, "pre_read")
+                raise
         total = len(ordered)
         outcomes: list[CvReadOutcome] = []
         current_page: CvPage | None = None
@@ -1367,7 +1566,11 @@ class CvProgrammer:
                 # selection. A restore that fails raises out of this finally -
                 # loudly - because the decoder is then NOT as it was found,
                 # and reporting the batch as if it were would be the lie.
-                self.select_page(found_page, address=address, mode=mode, force=True)
+                try:
+                    self.select_page(found_page, address=address, mode=mode, force=True)
+                except RailctlError as exc:
+                    _tag_page_phase(exc, "restore")
+                    raise
         return outcomes
 
     def _service_batch_applies(self, ordered: Sequence[CvSpec], *, mode: ProgMode) -> bool:

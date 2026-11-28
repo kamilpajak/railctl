@@ -46,6 +46,7 @@ from railctl.errors import (
     exit_code_for,
 )
 from railctl.exit_codes import INTERNAL_EXIT_CODE, INTERRUPTED_EXIT_CODE, USAGE_EXIT_CODE
+from railctl.station.types import INDEXED_CV_RANGE
 
 
 @dataclass(frozen=True, slots=True)
@@ -91,6 +92,28 @@ TRACK_POWER_RECOVERY: Final[dict[str, tuple[tuple[str, ...], ...]]] = {
     ),
     CONDITION_TRACK_DEAD: (("railctl", "power", "on"),),
 }
+
+
+#: Set on an error by a failed `cv write --page` (`cli/commands/cv.py`): whether its
+#: confirmation was answered by `--yes`, so the `cv read --page` suggested below can
+#: keep it. Read with `getattr(..., False)`; an error nothing set it on gets none.
+PAGE_READ_ASSUME_YES = "railctl_page_read_assume_yes"
+
+
+def _recorded_page(exc: BaseException) -> str | None:
+    """The `CV31:CV32` token a failed `cv write --page` recorded in `details.page_selection`.
+
+    `None` for anything else - no page recorded, or a shape this did not write. Read with
+    defaults because `_meta._class_error_row` probes classes built by `__new__`, which have
+    no `details` at all.
+    """
+    selection = (getattr(exc, "details", None) or {}).get("page_selection")
+    if not isinstance(selection, dict):
+        return None
+    page = selection.get("page")
+    if not (isinstance(page, list) and len(page) == 2 and all(isinstance(v, int) for v in page)):
+        return None
+    return f"{page[0]}:{page[1]}"
 
 
 def default_suggestions(
@@ -140,7 +163,21 @@ def default_suggestions(
         # the operator most needs to be told to re-probe got no runnable answer at all.
         suggestions = [["railctl", "doctor"]]
         if cv is not None:
-            suggestions.append(["railctl", "cv", "read", str(cv), "--mode", "service"])
+            read = ["railctl", "cv", "read", str(cv), "--mode", "service"]
+            # A failed `cv write --page` recorded the page it was selecting
+            # (`page_selection`), and its hint says the decoder may now sit on
+            # another one. A read without `--page` would run and answer from that
+            # unknown page; with it, the read selects the write's own bank first.
+            # Only for an indexed CV: a page step fails against CV31 or CV32,
+            # which no page indexes, and `cv read 31 --page X` is refused as
+            # `page_not_applicable` - a suggestion that cannot run.
+            page = _recorded_page(exc)
+            if page is not None and cv in INDEXED_CV_RANGE:
+                read += ["--page", page]
+                # That read writes CV31/CV32 and asks first; keep a typed `--yes`.
+                if getattr(exc, PAGE_READ_ASSUME_YES, False):
+                    read.append("--yes")
+            suggestions.append(read)
         return suggestions
     if isinstance(exc, ConfirmationRequiredError):
         # The raiser's own full argv with `--yes` appended, when it supplied
