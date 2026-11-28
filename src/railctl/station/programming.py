@@ -735,6 +735,7 @@ class CvProgrammer:
         address: int | None = None,
         mode: ProgMode = ProgMode.AUTO,
         force: bool = False,
+        reverify: bool = False,
     ) -> PageSelection:
         """Write `page` into CV31/CV32 and report what that established.
 
@@ -742,7 +743,16 @@ class CvProgrammer:
         back and matched - in this call, or in an earlier one for the same key
         that `_verified_pages` still holds (a cache hit, or `force=True` on a
         page already verified) - and `None` when nothing could read it back,
-        which is also when `page.unverified` is emitted. It is never `False`:
+        which is also when `page.unverified` is emitted.
+
+        `reverify=True` refuses the earlier answer and reads these writes back
+        whenever reads are available. A restore needs it: its `verified` is
+        published as "put back and confirmed by read-back", and when the found
+        pair equals the page used, the only earlier read was of the
+        selection's writes, made before the indexed write that may have
+        disturbed CV31/CV32. `cv_read_many`'s group selections keep the
+        shortcut - each would otherwise pay two service reads - and claim
+        nothing to their caller. It is never `False`:
         a read-back that disagrees raises `CvVerifyError` whose details carry
         `reason: "page_selection_mismatch"` and both pairs, so a caller can
         name what was written and what came back instead of blaming the CV it
@@ -775,9 +785,11 @@ class CvProgrammer:
             self._station.invalidate_caches()
             raise
         verified: Literal[True] | None = None
-        if self._verified_pages.get(key) == page:
+        if not reverify and self._verified_pages.get(key) == page:
             # Verified earlier under this key and not invalidated since -
-            # re-reading would only pay for the same answer again.
+            # re-reading would only pay for the same answer again. Not under
+            # `reverify` (see the docstring): there the caller publishes
+            # `verified` as a read-back of THESE writes.
             verified = True
         elif self.reads_available(resolved_mode):
             read31 = self.cv_read(31, address=address, mode=resolved_mode)
@@ -1354,10 +1366,11 @@ class CvProgrammer:
           the error propagates (tagged `page_phase: "pre_read"`) and nothing
           has been written - selecting a page whose original cannot be put
           back is the very mutation this exists to prevent;
-        - the restore is `select_page(found, force=True)` and ALWAYS runs,
-          after a failed write as after a successful one, and even when the
-          found pair equals the page used, so it is verified by read-back like
-          any other selection;
+        - the restore is `select_page(found, force=True, reverify=True)` and
+          ALWAYS runs, after a failed write as after a successful one, and
+          even when the found pair equals the page used. `reverify` makes it
+          read its own writes back even then, instead of reusing the
+          selection's earlier read;
         - a restore that fails raises (tagged `page_phase: "restore"`) and
           replaces whatever was in flight, which stays reachable only as
           `__context__`: the decoder is then NOT as it was found, and that is
@@ -1426,7 +1439,9 @@ class CvProgrammer:
         this error replaces the `CvResult` (or the write's own error, which
         survives only as `__context__` and never reaches an envelope)."""
         try:
-            return self.select_page(found, address=None, mode=ProgMode.SERVICE, force=True)
+            return self.select_page(
+                found, address=None, mode=ProgMode.SERVICE, force=True, reverify=True
+            )
         except RailctlError as exc:
             _tag_page_phase(exc, "restore")
             exc.details = {**exc.details, "write": write}

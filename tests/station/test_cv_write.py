@@ -1824,8 +1824,48 @@ def test_a_prog_track_write_restores_even_when_the_found_pair_is_the_one_used(
     decoder = _ProgTrackDecoder(prog_track.station.programmer, monkeypatch)
     decoder.cvs.update({31: CHOSEN[0], 32: CHOSEN[1]})
     result = _write_restoring(prog_track)
-    assert decoder.log[-2:] == [("write", 31, 145), ("write", 32, 2)]
-    assert result.page_restore is not None and result.page_restore.pair == CHOSEN
+    # The restore's own writes are read back. The selection had already read
+    # the same pair back, and reusing that answer reported `verified: True`
+    # for two writes nothing had read.
+    assert decoder.log[-4:] == [
+        ("write", 31, 145),
+        ("write", 32, 2),
+        ("read", 31),
+        ("read", 32),
+    ]
+    assert result.page_restore == PageSelection(pair=CHOSEN, verified=True)
+
+
+def test_a_restore_that_did_not_stick_is_caught_even_when_the_pairs_match(prog_track, monkeypatch):
+    """The selection reads CHOSEN back. The indexed write then disturbs CV32,
+    and the decoder acknowledges the restore's CV32 write without keeping it.
+    Only a read of the restore itself can see that; the selection's earlier
+    answer would have reported the decoder as back where it was found."""
+    programmer = prog_track.station.programmer
+    decoder = _ProgTrackDecoder(programmer, monkeypatch)
+    decoder.cvs.update({31: CHOSEN[0], 32: CHOSEN[1]})
+    fake_raw_write, fake_service_write = programmer.raw_cv_write, programmer.service_write
+    after_write = False
+
+    def service_write(cv, value, **kwargs):
+        nonlocal after_write
+        result = fake_service_write(cv, value, **kwargs)
+        decoder.cvs[32] = 9  # the indexed write disturbed CV32
+        after_write = True
+        return result
+
+    def raw_cv_write(cv, value, **kwargs):
+        fake_raw_write(cv, value, **kwargs)
+        if after_write and cv == 32:
+            decoder.cvs[32] = 9  # acknowledged, not kept
+
+    monkeypatch.setattr(programmer, "service_write", service_write)
+    monkeypatch.setattr(programmer, "raw_cv_write", raw_cv_write)
+    with pytest.raises(CvVerifyError) as caught:
+        _write_restoring(prog_track)
+    assert caught.value.details["page_phase"] == "restore"
+    assert caught.value.details["reason"] == "page_selection_mismatch"
+    assert caught.value.details["read_back"] == [CHOSEN[0], 9]
 
 
 def test_a_pre_read_that_fails_writes_nothing(prog_track, monkeypatch):

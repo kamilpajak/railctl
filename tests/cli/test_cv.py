@@ -1436,6 +1436,44 @@ def test_cv_write_publishes_a_page_option():
     assert "--page" in help_text
 
 
+@pytest.mark.parametrize(
+    ("yes_argv", "keeps_yes"),
+    [(["--yes"], True), ([], False)],
+    ids=["yes-typed", "answered-at-the-prompt"],
+)
+def test_a_silent_page_write_suggests_a_page_read_that_keeps_a_typed_yes(
+    monkeypatch, yes_argv, keeps_yes
+):
+    """The suggested `cv read --page` writes CV31/CV32 and asks first. Without
+    the `--yes` the write itself was given, a non-interactive caller following
+    the suggestion gets `confirmation_required` instead of the read. A `--yes`
+    the caller never typed is not added: that would be consent nobody gave."""
+    _install(
+        monkeypatch,
+        FakeCvStation(write_error=DecoderNotRespondingError("silent", cv=MASTER_VOLUME_CV)),
+    )
+    monkeypatch.setattr(cv_module, "confirm", lambda *_a, **_k: None)
+    result = runner.invoke(
+        app,
+        [
+            "cv",
+            "write",
+            str(MASTER_VOLUME_CV),
+            "35",
+            "--page",
+            "0:1",
+            *yes_argv,
+            "--format",
+            "json",
+        ],
+    )
+    envelope = _stderr_envelope(result)
+    assert envelope["code"] == "decoder_not_responding", envelope
+    read = ["railctl", "cv", "read", str(MASTER_VOLUME_CV), "--mode", "service", "--page", "0:1"]
+    expected = [*read, "--yes"] if keeps_yes else read
+    assert expected in envelope["suggestions"]
+
+
 def test_cv_write_hands_the_page_to_the_station_for_an_indexed_cv(monkeypatch):
     fake = _install(monkeypatch, FakeCvStation())
     result = runner.invoke(

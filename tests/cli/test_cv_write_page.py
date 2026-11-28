@@ -557,7 +557,12 @@ def test_a_silent_decoder_after_a_page_selection_suggests_a_read_on_that_page():
 
     paged = DecoderNotRespondingError("silent", cv=MASTER_VOLUME_CV)
     _note_page_left_unknown(
-        paged, RESTING_PAGE, StationEventLog(), cv=MASTER_VOLUME_CV, track="main"
+        paged,
+        RESTING_PAGE,
+        StationEventLog(),
+        cv=MASTER_VOLUME_CV,
+        track="main",
+        assume_yes=False,
     )
     plain = DecoderNotRespondingError("silent", cv=MASTER_VOLUME_CV)
 
@@ -570,7 +575,14 @@ def _noted(error, *, track: str):
     from railctl.cli.commands.cv import _note_page_left_unknown
     from railctl.cli.deps import StationEventLog
 
-    _note_page_left_unknown(error, (145, 2), StationEventLog(), cv=MASTER_VOLUME_CV, track=track)
+    _note_page_left_unknown(
+        error,
+        (145, 2),
+        StationEventLog(),
+        cv=MASTER_VOLUME_CV,
+        track=track,
+        assume_yes=False,
+    )
     return error
 
 

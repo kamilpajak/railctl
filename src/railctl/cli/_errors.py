@@ -94,6 +94,12 @@ TRACK_POWER_RECOVERY: Final[dict[str, tuple[tuple[str, ...], ...]]] = {
 }
 
 
+#: Set on an error by a failed `cv write --page` (`cli/commands/cv.py`): whether its
+#: confirmation was answered by `--yes`, so the `cv read --page` suggested below can
+#: keep it. Read with `getattr(..., False)`; an error nothing set it on gets none.
+PAGE_READ_ASSUME_YES = "railctl_page_read_assume_yes"
+
+
 def _recorded_page(exc: BaseException) -> str | None:
     """The `CV31:CV32` token a failed `cv write --page` recorded in `details.page_selection`.
 
@@ -168,6 +174,9 @@ def default_suggestions(
             page = _recorded_page(exc)
             if page is not None and cv in INDEXED_CV_RANGE:
                 read += ["--page", page]
+                # That read writes CV31/CV32 and asks first; keep a typed `--yes`.
+                if getattr(exc, PAGE_READ_ASSUME_YES, False):
+                    read.append("--yes")
             suggestions.append(read)
         return suggestions
     if isinstance(exc, ConfirmationRequiredError):

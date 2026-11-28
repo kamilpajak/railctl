@@ -54,7 +54,7 @@ from typing import Final
 import typer
 
 from railctl.catalog import CatalogEntry, load_catalog
-from railctl.cli._errors import ABORTED_MESSAGE, run
+from railctl.cli._errors import ABORTED_MESSAGE, PAGE_READ_ASSUME_YES, run
 from railctl.cli._meta import (
     CV_PAGE_OPT,
     CV_READ_MODE_OPT,
@@ -495,7 +495,13 @@ def _page_note(error: RailctlError, page: CvPage, *, cv: int, track: str) -> str
 
 
 def _note_page_left_unknown(
-    error: RailctlError, page: CvPage, events: StationEventLog, *, cv: int, track: str
+    error: RailctlError,
+    page: CvPage,
+    events: StationEventLog,
+    *,
+    cv: int,
+    track: str,
+    assume_yes: bool,
 ) -> None:
     """Record on a failed `cv write --page` what is known about the index page.
 
@@ -524,6 +530,13 @@ def _note_page_left_unknown(
     }
     note = _page_note(error, page, cv=cv, track=track)
     error.hint = f"{error.hint}; {note}" if error.hint else note
+    # The suggested `cv read --page` writes CV31/CV32 and asks first, so it
+    # carries `--yes` exactly when this write's question was answered by one;
+    # without it a non-interactive caller is led to `confirmation_required`.
+    # An attribute, not a `details` key: it shapes a suggestion, it is not a
+    # fact about the station (`FunctionGroupUnreadableError.retry_argv` is the
+    # same hand-off).
+    setattr(error, PAGE_READ_ASSUME_YES, assume_yes)
 
 
 def build_cv_read(
@@ -1147,7 +1160,14 @@ def register(app: typer.Typer) -> None:
                     )
                 except RailctlError as exc:
                     if write_page is not None:
-                        _note_page_left_unknown(exc, write_page, events, cv=number, track=track)
+                        _note_page_left_unknown(
+                            exc,
+                            write_page,
+                            events,
+                            cv=number,
+                            track=track,
+                            assume_yes=settings.assume_yes,
+                        )
                     raise
                 except KeyboardInterrupt:
                     # Ctrl-C between CV31 and CV32 leaves the page just as unknown as
@@ -1158,7 +1178,14 @@ def register(app: typer.Typer) -> None:
                     if write_page is None:
                         raise
                     aborted = AbortedError(ABORTED_MESSAGE)
-                    _note_page_left_unknown(aborted, write_page, events, cv=number, track=track)
+                    _note_page_left_unknown(
+                        aborted,
+                        write_page,
+                        events,
+                        cv=number,
+                        track=track,
+                        assume_yes=settings.assume_yes,
+                    )
                     raise aborted from None
                 outcome = build_cv_write(
                     written,
