@@ -10,6 +10,7 @@ the envelope, which exit code came out - never about wire bytes, which
 from __future__ import annotations
 
 import json
+import re
 from dataclasses import replace
 
 import pytest
@@ -1428,7 +1429,10 @@ def test_cv_write_publishes_a_page_option():
     read_help = {option.name: option for option in command_meta("cv read").options}["--page"].help
     assert "re-selected as found" in read_help
     assert "refused when no requested CV is in 257-512" in read_help
-    help_text = runner.invoke(app, ["cv", "write", "--help"]).stdout
+    # Rich forces colour under GITHUB_ACTIONS and paints "-" and "-page" apart, so
+    # the raw text holds no "--page" on CI. Read what an operator would see.
+    painted = runner.invoke(app, ["cv", "write", "--help"]).stdout
+    help_text = re.sub(r"\x1b\[[0-9;]*m", "", painted)
     assert "--page" in help_text
 
 
